@@ -1,0 +1,27 @@
+# CMake and build files
+/build/
+/out/
+/bin/
+/obj/
+/x64/
+/ARM/
+/ARM64/
+/.vs/
+/*.user
+/*.suo
+/*.sln.docstate
+
+# JUCE generated files / IDEs
+.idea/
+.vscode/
+cmake-build-*/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project test outputs
+/test_out.txt
+
+# Local tools
+/.claude/
