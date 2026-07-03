@@ -81,6 +81,11 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     styleValueLabel (sidechainStatusLabel, 13.0f, accentTeal, true);
     styleValueLabel (bpmValueLabel, 13.0f, strongText, true);
 
+    // Multi-line read-outs anchor at the top-left so their wrapped lines stack
+    // cleanly instead of centering oddly inside a tall box.
+    for (auto* label : { &analyzeResultLabel, &fixStatsLabel, &fixSettingsLabel, &fixTimelineLabel })
+        label->setJustificationType (juce::Justification::topLeft);
+
     for (auto* label : { &processingStatusLabel, &processingDetailLabel, &analyzeResultLabel,
                          &fixActionLabel, &fixStatsLabel, &fixConfidenceLabel,
                          &fixSettingsLabel, &fixTimelineLabel, &sidechainStatusLabel,
@@ -117,11 +122,17 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     analyzeButton.setTooltip ("Measure kick against bass and prepare a safe bass-path fix.");
     analyzeButton.onClick = [this]
     {
-        const auto fix = audioProcessor.analyzeFix();
-        hasAnalyzedResult = true;
-        hasFixReady = hasApplyAction (fix);
-        analyzeResultLabel.setText (fix.message, juce::dontSendNotification);
-        updateStatusLabels();
+        // Non-blocking: kicks off analysis on a background worker. The UI timer
+        // polls getAnalyzeState() and picks up the result when it's ready.
+        if (audioProcessor.beginBackgroundAnalyze())
+        {
+            hasFixReady = false;
+            analyzeButton.setButtonText ("Analyzing...");
+            analyzeButton.setEnabled (false);
+            applyFixButton.setEnabled (false);
+            analyzeResultLabel.setText ("Analyzing current window...", juce::dontSendNotification);
+            updateStatusLabels();
+        }
     };
     addAndMakeVisible (analyzeButton);
 
@@ -285,7 +296,7 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
     content.removeFromRight (12);
     const auto scopePanel = content.toFloat();
     bounds.removeFromTop (12);
-    const auto footerPanel = bounds.removeFromTop (44).toFloat();
+    const auto footerPanel = bounds.removeFromTop (96).toFloat();
 
     for (auto panel : { topBar, scopePanel, sidePanel, footerPanel })
     {
@@ -319,19 +330,7 @@ void KickLockAudioProcessorEditor::resized()
     content.removeFromRight (12);
     auto scopePanel = content;
     bounds.removeFromTop (12);
-    auto footerPanel = bounds.removeFromTop (44);
-
-    auto brandArea = topBar.removeFromLeft (250);
-    topBar.removeFromLeft (16);
-    auto controlsArea = topBar;
-
-    brandArea.removeFromTop (58);
-    processingDetailLabel.setBounds (brandArea.removeFromTop (18));
-    sidechainStatusLabel.setBounds (brandArea.removeFromTop (18));
-    processingStatusLabel.setBounds (brandArea.removeFromTop (20));
-
-    auto row1 = controlsArea.removeFromTop (34);
-    auto row2 = controlsArea.removeFromTop (34);
+    auto footerPanel = bounds.removeFromTop (96);
 
     auto layoutCompact = [] (juce::Rectangle<int>& row, juce::Label& label, juce::Component& control,
                              int labelWidth, int controlWidth)
@@ -340,66 +339,156 @@ void KickLockAudioProcessorEditor::resized()
         control.setBounds (row.removeFromLeft (controlWidth));
     };
 
+    // --- Top bar: brand/status on the left, controls + action buttons right --
+    auto brandArea = topBar.removeFromLeft (250);
+    topBar.removeFromLeft (16);
+    auto controlsArea = topBar.reduced (0, 6);
+
+    brandArea.removeFromTop (58);
+    processingDetailLabel.setBounds (brandArea.removeFromTop (18));
+    sidechainStatusLabel.setBounds (brandArea.removeFromTop (18));
+    processingStatusLabel.setBounds (brandArea.removeFromTop (20));
+
+    auto row1 = controlsArea.removeFromTop (34);
+    controlsArea.removeFromTop (6);
+    auto row2 = controlsArea.removeFromTop (34);
+
+    // Action buttons live at the right end of row 1 so they never get pushed
+    // out of the visible area by the left-hand controls (P4: Freeze stays put).
+    applyFixButton.setBounds (row1.removeFromRight (100).reduced (0, 2));
+    row1.removeFromRight (8);
+    analyzeButton.setBounds (row1.removeFromRight (100).reduced (0, 2));
+    row1.removeFromRight (8);
+    freezeButton.setBounds (row1.removeFromRight (84).reduced (0, 2));
+    row1.removeFromRight (16);
+
     layoutCompact (row1, gridDivisionLabel, gridDivisionBox, 34, 82);
     row1.removeFromLeft (10);
     layoutCompact (row1, viewModeLabel, viewModeBox, 36, 110);
     row1.removeFromLeft (12);
     layoutCompact (row1, bpmLabel, bpmValueLabel, 28, 86);
-    row1.removeFromLeft (12);
-    layoutCompact (row1, visualOffsetLabel, visualOffsetSlider, 30, 220);
-    row1.removeFromLeft (12);
-    analyzeButton.setBounds (row1.removeFromLeft (100).reduced (0, 2));
-    row1.removeFromLeft (8);
-    applyFixButton.setBounds (row1.removeFromLeft (100).reduced (0, 2));
 
-    layoutCompact (row2, delayMsLabel, delayMsSlider, 40, 220);
-    row2.removeFromLeft (12);
-    polarityInvertButton.setBounds (row2.removeFromLeft (128));
+    layoutCompact (row2, visualOffsetLabel, visualOffsetSlider, 34, 300);
 
+    // --- Scope ---------------------------------------------------------------
     auto scopeArea = scopePanel.reduced (10);
     oscilloscope.setBounds (scopeArea);
 
+    // --- Side panel: meter + analyzer read-out ------------------------------
+    // Vertical budget is tight (406 px); the score/timeline labels render as
+    // two lines each, so heights below are sized for wrapped text, not clipped.
     auto rightArea = sidePanel.reduced (12);
-    correlationDisplay.setBounds (rightArea.removeFromTop (170));
-    rightArea.removeFromTop (12);
+    correlationDisplay.setBounds (rightArea.removeFromTop (156));
+    rightArea.removeFromTop (10);
 
     analysisHeaderLabel.setBounds (rightArea.removeFromTop (18));
-    rightArea.removeFromTop (4);
+    rightArea.removeFromTop (2);
     analyzeResultLabel.setBounds (rightArea.removeFromTop (38));
-    fixActionLabel.setBounds (rightArea.removeFromTop (24));
-    fixStatsLabel.setBounds (rightArea.removeFromTop (38));
-    fixConfidenceLabel.setBounds (rightArea.removeFromTop (24));
-    fixSettingsLabel.setBounds (rightArea.removeFromTop (42));
-    fixTimelineLabel.setBounds (rightArea.removeFromTop (42));
+    fixActionLabel.setBounds (rightArea.removeFromTop (22));
+    fixStatsLabel.setBounds (rightArea.removeFromTop (40));
+    fixConfidenceLabel.setBounds (rightArea.removeFromTop (22));
+    fixSettingsLabel.setBounds (rightArea.removeFromTop (40));
+    fixTimelineLabel.setBounds (rightArea.removeFromTop (40));
 
+    // --- Footer: two rows of bass-path controls -----------------------------
     auto footerArea = footerPanel.reduced (12, 8);
-    auto layoutFooter = [] (juce::Rectangle<int>& row, juce::Label& label, juce::Component& control,
-                            int labelWidth, int controlWidth)
-    {
-        label.setBounds (row.removeFromLeft (labelWidth));
-        control.setBounds (row.removeFromLeft (controlWidth));
-    };
+    auto footerRowA = footerArea.removeFromTop (34);
+    footerArea.removeFromTop (6);
+    auto footerRowB = footerArea.removeFromTop (34);
 
-    layoutFooter (footerArea, phaseSectionLabel, phaseFilterEnabledButton, 84, 92);
-    footerArea.removeFromLeft (12);
-    layoutFooter (footerArea, rotatorFreqLabel, rotatorFreqSlider, 36, 160);
-    footerArea.removeFromLeft (12);
-    layoutFooter (footerArea, rotatorQLabel, rotatorQSlider, 18, 140);
-    footerArea.removeFromLeft (12);
-    layoutFooter (footerArea, rotatorStagesLabel, rotatorStagesBox, 52, 70);
-    footerArea.removeFromLeft (12);
-    layoutFooter (footerArea, delayInterpLabel, delayInterpBox, 42, 108);
-    footerArea.removeFromLeft (12);
-    layoutFooter (footerArea, timeZoomLabel, timeZoomSlider, 38, 140);
-    footerArea.removeFromLeft (12);
-    layoutFooter (footerArea, ampZoomLabel, ampZoomSlider, 34, 140);
-    footerArea.removeFromLeft (12);
-    freezeButton.setBounds (footerArea.removeFromLeft (84).reduced (0, 1));
+    layoutCompact (footerRowA, phaseSectionLabel, phaseFilterEnabledButton, 54, 84);
+    footerRowA.removeFromLeft (12);
+    layoutCompact (footerRowA, rotatorFreqLabel, rotatorFreqSlider, 36, 170);
+    footerRowA.removeFromLeft (12);
+    layoutCompact (footerRowA, rotatorQLabel, rotatorQSlider, 18, 150);
+    footerRowA.removeFromLeft (12);
+    layoutCompact (footerRowA, rotatorStagesLabel, rotatorStagesBox, 52, 64);
+    footerRowA.removeFromLeft (12);
+    layoutCompact (footerRowA, delayInterpLabel, delayInterpBox, 42, 96);
+
+    layoutCompact (footerRowB, delayMsLabel, delayMsSlider, 40, 240);
+    footerRowB.removeFromLeft (12);
+    polarityInvertButton.setBounds (footerRowB.removeFromLeft (128));
+    footerRowB.removeFromLeft (24);
+    layoutCompact (footerRowB, timeZoomLabel, timeZoomSlider, 38, 150);
+    footerRowB.removeFromLeft (12);
+    layoutCompact (footerRowB, ampZoomLabel, ampZoomSlider, 34, 150);
 }
 
 void KickLockAudioProcessorEditor::timerCallback()
 {
+    pollAnalyzeState();
     syncScopeSettings();
+    updateStatusLabels();
+}
+
+void KickLockAudioProcessorEditor::pollAnalyzeState()
+{
+    const auto state = audioProcessor.getAnalyzeState();
+    if (state == lastAnalyzeState)
+        return;
+
+    lastAnalyzeState = state;
+
+    switch (state)
+    {
+        case AnalyzeState::Preparing:
+        case AnalyzeState::Analyzing:
+            analyzeBusy = true;
+            analyzeButton.setButtonText ("Analyzing...");
+            analyzeButton.setEnabled (false);
+            hasFixReady = false;
+            analyzeResultLabel.setText ("Analyzing the captured window...", juce::dontSendNotification);
+            break;
+
+        case AnalyzeState::ResultReady:
+        {
+            analyzeBusy = false;
+            analyzeButton.setButtonText ("Analyze");
+            analyzeButton.setEnabled (true);
+            const auto fix = audioProcessor.getLatestFixResult();
+            hasAnalyzedResult = true;
+            hasFixReady = hasApplyAction (fix);
+            analyzeResultLabel.setText (fix.message, juce::dontSendNotification);
+            audioProcessor.acknowledgeAnalyzeState();
+            lastAnalyzeState = AnalyzeState::Idle;
+            break;
+        }
+
+        case AnalyzeState::NotEnoughMaterial:
+        {
+            analyzeBusy = false;
+            analyzeButton.setButtonText ("Analyze");
+            analyzeButton.setEnabled (true);
+            const auto fix = audioProcessor.getLatestFixResult();
+            hasAnalyzedResult = true;
+            hasFixReady = false;
+            analyzeResultLabel.setText (fix.message.isNotEmpty()
+                                            ? fix.message
+                                            : "Not enough kick + bass material captured yet. Keep the loop playing and analyze again.",
+                                        juce::dontSendNotification);
+            audioProcessor.acknowledgeAnalyzeState();
+            lastAnalyzeState = AnalyzeState::Idle;
+            break;
+        }
+
+        case AnalyzeState::Failed:
+            analyzeBusy = false;
+            analyzeButton.setButtonText ("Analyze");
+            analyzeButton.setEnabled (true);
+            hasFixReady = false;
+            analyzeResultLabel.setText ("Analysis could not complete. Try again.", juce::dontSendNotification);
+            audioProcessor.acknowledgeAnalyzeState();
+            lastAnalyzeState = AnalyzeState::Idle;
+            break;
+
+        case AnalyzeState::Idle:
+            analyzeBusy = false;
+            analyzeButton.setButtonText ("Analyze");
+            analyzeButton.setEnabled (true);
+            break;
+    }
+
     updateStatusLabels();
 }
 
@@ -424,12 +513,18 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
     const bool neutral = audioProcessor.isBassProcessingNeutral();
     const bool hasSidechain = audioProcessor.hasSidechainReference();
     const auto latest = audioProcessor.getLatestFixResult();
-    const auto sidechainStatus = classifySidechainSignalStatus (hasSidechain,
-                                                                audioProcessor.getBassSignalRms(),
-                                                                audioProcessor.getKickSignalRms());
+
+    // P3: musically-aware status driven by HELD activity, not instant RMS, so a
+    // normal beat does not flicker to SIGNAL TOO LOW between kick transients.
+    const auto materialStatus = classifyAnalysisMaterialStatus (hasSidechain,
+                                                               audioProcessor.isKickActive(),
+                                                               audioProcessor.isBassActive(),
+                                                               audioProcessor.isAnalysisSignalUsable(),
+                                                               audioProcessor.hasEnoughMaterialForAnalysis());
+    const bool sidechainActive = analysisStatusHasLiveSidechain (materialStatus);
+
     const auto workflowStatus = classifyProcessingWorkflowStatus (neutral,
-                                                                  hasFixReady
-                                                                      && sidechainStatus == SidechainSignalStatus::SidechainActive);
+                                                                  hasFixReady && sidechainActive);
 
     const auto* delayParam = audioProcessor.apvts.getRawParameterValue ("delayMs");
     const auto* polarityParam = audioProcessor.apvts.getRawParameterValue ("polarityInvert");
@@ -438,26 +533,47 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
     const float delayMs = delayParam != nullptr ? delayParam->load() : 0.0f;
     const bool polarity = polarityParam != nullptr && polarityParam->load() > 0.5f;
     const bool phase = phaseParam != nullptr && phaseParam->load() > 0.5f;
-    const float currentMatch = audioProcessor.correlationPercent.load();
+    const float liveMultiBand = audioProcessor.liveMultiBandMatchPercent.load();
+    const float liveLowEnd = audioProcessor.liveLowEndMatchPercent.load();
+    const float liveBroadband = audioProcessor.liveBroadbandMatchPercent.load();
 
-    switch (sidechainStatus)
+    switch (materialStatus)
     {
-        case SidechainSignalStatus::WaitingForSidechain:
+        case AnalysisMaterialStatus::WaitingForSidechain:
             sidechainStatusLabel.setText ("WAITING FOR SIDECHAIN", juce::dontSendNotification);
             sidechainStatusLabel.setColour (juce::Label::textColourId, accentOrange);
             processingDetailLabel.setText ("Connect the kick reference to the sidechain input.",
                                            juce::dontSendNotification);
             break;
 
-        case SidechainSignalStatus::SignalTooLow:
+        case AnalysisMaterialStatus::WaitingForKick:
+            sidechainStatusLabel.setText ("WAITING FOR KICK", juce::dontSendNotification);
+            sidechainStatusLabel.setColour (juce::Label::textColourId, accentOrange);
+            processingDetailLabel.setText ("Sidechain connected. Waiting for a kick transient.",
+                                           juce::dontSendNotification);
+            break;
+
+        case AnalysisMaterialStatus::WaitingForBass:
+            sidechainStatusLabel.setText ("WAITING FOR BASS", juce::dontSendNotification);
+            sidechainStatusLabel.setColour (juce::Label::textColourId, accentOrange);
+            processingDetailLabel.setText ("Kick detected. Waiting for bass on the main input.",
+                                           juce::dontSendNotification);
+            break;
+
+        case AnalysisMaterialStatus::SignalTooLow:
             sidechainStatusLabel.setText ("SIGNAL TOO LOW", juce::dontSendNotification);
             sidechainStatusLabel.setColour (juce::Label::textColourId, accentOrange);
             processingDetailLabel.setText ("Kick or bass is too quiet for a reliable low-end phase read.",
                                            juce::dontSendNotification);
             break;
 
-        case SidechainSignalStatus::SidechainActive:
-            sidechainStatusLabel.setText ("SIDECHAIN ACTIVE", juce::dontSendNotification);
+        case AnalysisMaterialStatus::CapturingMaterial:
+            sidechainStatusLabel.setText ("CAPTURING MATERIAL", juce::dontSendNotification);
+            sidechainStatusLabel.setColour (juce::Label::textColourId, accentTeal);
+            break;
+
+        case AnalysisMaterialStatus::ReadyToAnalyze:
+            sidechainStatusLabel.setText ("READY TO ANALYZE", juce::dontSendNotification);
             sidechainStatusLabel.setColour (juce::Label::textColourId, accentTeal);
             break;
     }
@@ -475,7 +591,7 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
             processingStatusLabel.setText ("PROCESSING BASS", juce::dontSendNotification);
             processingStatusLabel.setColour (juce::Label::textColourId, accentTeal);
 
-            if (sidechainStatus == SidechainSignalStatus::SidechainActive)
+            if (sidechainActive)
             {
                 juce::String detail;
                 detail << "Delay " << formatBassDelayMs (delayMs)
@@ -489,7 +605,7 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
         case ProcessingWorkflowStatus::FixReady:
             processingStatusLabel.setText ("FIX READY", juce::dontSendNotification);
             processingStatusLabel.setColour (juce::Label::textColourId, accentOrange);
-            if (sidechainStatus == SidechainSignalStatus::SidechainActive)
+            if (sidechainActive)
             {
                 processingDetailLabel.setText (
                     latest.quality == PhaseFixQuality::PartialImprovement
@@ -504,7 +620,7 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
         case ProcessingWorkflowStatus::MonitoringDryInput:
             processingStatusLabel.setText ("MONITORING DRY INPUT", juce::dontSendNotification);
             processingStatusLabel.setColour (juce::Label::textColourId, accentTeal);
-            if (sidechainStatus == SidechainSignalStatus::SidechainActive)
+            if (sidechainActive)
                 processingDetailLabel.setText ("Bass path is dry. Scope and meter are reading the live low-end relationship.",
                                                juce::dontSendNotification);
             break;
@@ -512,20 +628,24 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
 
     if (! hasAnalyzedResult)
     {
-        analyzeResultLabel.setText (sidechainStatus == SidechainSignalStatus::WaitingForSidechain
-                                        ? "Waiting for kick sidechain."
-                                        : sidechainStatus == SidechainSignalStatus::SignalTooLow
-                                            ? "Needs stronger kick and bass signal before analysis."
-                                            : "Analyze the current window to prepare a bass-path fix.",
-                                    juce::dontSendNotification);
-        fixActionLabel.setText (sidechainStatus == SidechainSignalStatus::WaitingForSidechain
-                                    ? "Quality: Waiting For Signal"
-                                    : sidechainStatus == SidechainSignalStatus::SignalTooLow
-                                        ? "Quality: Waiting For Signal"
-                                        : "Quality: Monitoring",
+        if (! analyzeBusy)
+            analyzeResultLabel.setText (materialStatus == AnalysisMaterialStatus::WaitingForSidechain
+                                            ? "Waiting for kick sidechain."
+                                            : materialStatus == AnalysisMaterialStatus::WaitingForKick
+                                                ? "Waiting for a kick transient on the sidechain."
+                                                : materialStatus == AnalysisMaterialStatus::WaitingForBass
+                                                    ? "Waiting for bass on the main input."
+                                                    : materialStatus == AnalysisMaterialStatus::SignalTooLow
+                                                        ? "Needs stronger kick and bass signal before analysis."
+                                                        : "Analyze the current window to prepare a bass-path fix.",
+                                        juce::dontSendNotification);
+        fixActionLabel.setText (sidechainActive ? "Quality: Monitoring"
+                                                : "Quality: Waiting For Signal",
                                 juce::dontSendNotification);
-        fixStatsLabel.setText ("Analyze Score -- -> -- | Live 30-120 "
-                               + juce::String ((int) std::round (currentMatch)) + "%",
+        fixStatsLabel.setText ("Analyze Multi-Band: -- -> --\nLive Multi-Band "
+                               + juce::String ((int) std::round (liveMultiBand)) + "%   |   Low-End "
+                               + juce::String ((int) std::round (liveLowEnd)) + "%   |   20-2k "
+                               + juce::String ((int) std::round (liveBroadband)) + "%",
                                juce::dontSendNotification);
         fixConfidenceLabel.setText ("Confidence --", juce::dontSendNotification);
         fixSettingsLabel.setText ("Bass Delay: 0.00 ms   Polarity: Normal   Phase: OFF",
@@ -542,16 +662,18 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
                                 juce::dontSendNotification);
 
         juce::String matches;
-        matches << "Analyze Score "
+        matches << "Analyze Multi-Band "
                 << juce::String ((int) std::round (audioProcessor.latestAnalyzedBeforePercent.load())) << "% -> "
                 << juce::String ((int) std::round (audioProcessor.latestAnalyzedAfterPercent.load())) << "%";
         const auto verified = audioProcessor.latestVerifiedAfterPercent.load();
         if (verified >= 0.0f)
-            matches << " | Verified " << juce::String ((int) std::round (verified)) << "%";
+            matches << "   |   Verified Offline " << juce::String ((int) std::round (verified)) << "%";
         else
-            matches << " | Verified --";
-        matches
-                << " | Live 30-120 " << juce::String ((int) std::round (currentMatch)) << "%";
+            matches << "   |   Verified Offline --";
+        // Second line: the live meters, clearly separated from the offline scores.
+        matches << "\nLive Multi-Band " << juce::String ((int) std::round (liveMultiBand)) << "%"
+                << "   |   Low-End " << juce::String ((int) std::round (liveLowEnd)) << "%"
+                << "   |   20-2k " << juce::String ((int) std::round (liveBroadband)) << "%";
         fixStatsLabel.setText (matches, juce::dontSendNotification);
 
         juce::String confidenceText;
@@ -559,10 +681,21 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
                        << juce::String ((int) std::round (audioProcessor.latestFixConfidence.load())) << "%";
         if (latest.singleHitAnalysis)
             confidenceText << "   Single-hit analysis";
+
+        // P8: predicted-after vs verified-offline divergence > 10% is a real
+        // "don't trust this number" signal, so make it visible (orange + words),
+        // not just a delta figure buried in grey text.
         if (latest.verificationWarning)
-            confidenceText << "   Verify delta "
+        {
+            confidenceText << "   WARNING verified "
                            << juce::String ((int) std::round (audioProcessor.latestVerificationDeltaPercent.load()))
-                           << "%";
+                           << "% off predicted";
+            fixConfidenceLabel.setColour (juce::Label::textColourId, accentOrange);
+        }
+        else
+        {
+            fixConfidenceLabel.setColour (juce::Label::textColourId, strongText);
+        }
         fixConfidenceLabel.setText (confidenceText,
                                     juce::dontSendNotification);
 
@@ -636,8 +769,11 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
         applyFixButton.setTooltip ("Apply the latest safe bass correction. This never moves the kick reference.");
     }
 
-    applyFixButton.setEnabled (hasFixReady
-                               && sidechainStatus == SidechainSignalStatus::SidechainActive);
+    // Apply Fix availability depends on a usable analysis result plus a still-
+    // connected sidechain -- deliberately NOT on the instantaneous level, so it
+    // does not disable just because the current block sits between two kicks.
+    applyFixButton.setEnabled (! analyzeBusy
+                               && applyFixAvailable (hasSidechain, hasFixReady));
 
     for (auto* c : { static_cast<juce::Component*> (&rotatorFreqSlider),
                      static_cast<juce::Component*> (&rotatorFreqLabel),

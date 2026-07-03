@@ -282,8 +282,12 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
         const float overlapY = midY - signedOverlap * halfHeight;
         const float combinedY = midY - combined * halfHeight;
 
-        const auto relation = classifyPhaseRelation (visibleMainBuffer[(size_t) i],
-                                                     visibleSideBuffer[(size_t) i]);
+        // Colour the constructive/destructive fill from the LOW-BAND envelope,
+        // not the raw broadband sample sign, so the green/red regions track the
+        // musical kick/bass body relationship instead of flickering on every
+        // high-frequency zero crossing (P7).
+        const auto relation = classifyPhaseRelation (smoothedMainBuffer[(size_t) i],
+                                                     smoothedSideBuffer[(size_t) i]);
         if (relation == PhaseRelation::Constructive || relation == PhaseRelation::Destructive)
         {
             g.setColour ((relation == PhaseRelation::Constructive ? constructive : destructive)
@@ -418,9 +422,14 @@ void Oscilloscope::drawTransientMarkers (juce::Graphics& g,
                                          juce::Rectangle<float> bounds,
                                          int visible) const
 {
-    const auto markers = findScopePeakMarkers (visibleMainBuffer.data(),
-                                               visibleSideBuffer.data(),
-                                               visible, sampleRate * (double) decimationFactor);
+    // P7: markers sit on the amplitude ENVELOPE peak (rectify + centered smooth)
+    // rather than the raw broadband peak sample, so the Δ-ms read-out reflects
+    // the musical kick/bass body offset and stays stable frame to frame. Δ is
+    // computed at the scope's effective (decimated) sample rate.
+    const double scopeRate = sampleRate / (double) juce::jmax (1, decimationFactor);
+    const auto markers = findEnvelopePeakMarkers (visibleMainBuffer.data(),
+                                                 visibleSideBuffer.data(),
+                                                 visible, scopeRate);
     if (! markers.valid || visible <= 1)
         return;
 
@@ -483,6 +492,16 @@ void Oscilloscope::rebuildVisibleBuffers (int visible)
         visibleMainBuffer[(size_t) i] = mainHistory[(size_t) indices.bassIndex];
         visibleSideBuffer[(size_t) i] = sidechainHistory[(size_t) indices.kickIndex];
     }
+
+    // P7: low-band envelope-smoothed copies for a musically-readable phase
+    // relationship. Raw scope samples are broadband and jitter sample-to-sample,
+    // so the green/red constructive-destructive shading and the peak markers
+    // read from these smoothed traces instead. The smoothing window is derived
+    // from the scope's effective sample rate so it tracks ~a low-frequency
+    // period rather than a fixed sample count.
+    const double scopeRate = sampleRate / (double) juce::jmax (1, decimationFactor);
+    smoothScopeEnvelope (visibleMainBuffer.data(), smoothedMainBuffer.data(), visible, scopeRate);
+    smoothScopeEnvelope (visibleSideBuffer.data(), smoothedSideBuffer.data(), visible, scopeRate);
 }
 
 void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)

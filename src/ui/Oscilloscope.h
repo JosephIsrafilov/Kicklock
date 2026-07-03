@@ -102,5 +102,13 @@ private:
     std::array<float, historyLength> visibleMainBuffer {};
     std::array<float, historyLength> visibleSideBuffer {};
 
+    // P7: low-band envelope-smoothed copies of the visible buffers. The raw
+    // buffers still drive the waveform traces (so the scope stays a scope), but
+    // the phase-delta colouring and the Δ-ms transient markers read from these
+    // so the green/red regions and the peak markers track the musical low/body
+    // content instead of broadband sample jitter.
+    std::array<float, historyLength> smoothedMainBuffer {};
+    std::array<float, historyLength> smoothedSideBuffer {};
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Oscilloscope)
 };

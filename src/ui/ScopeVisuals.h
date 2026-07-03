@@ -90,21 +90,7 @@ inline double gridDivisionToMs (double bpm, GridDivision division) noexcept
 
 inline double gridWindowToMs (double bpm, GridDivision division) noexcept
 {
-    const double quarterMs = bpmToQuarterMs (bpm);
-    if (quarterMs <= 0.0)
-        return 0.0;
-
-    switch (division)
-    {
-        case GridDivision::Quarter:      return quarterMs * 4.0;
-        case GridDivision::Eighth:       return quarterMs * 2.0;
-        case GridDivision::Sixteenth:    return quarterMs;
-        case GridDivision::ThirtySecond: return quarterMs * 0.5;
-        case GridDivision::Bar:          return quarterMs * 4.0;
-        case GridDivision::Milliseconds: return 0.0;
-    }
-
-    return 0.0;
+    return gridDivisionToMs (bpm, division);
 }
 
 inline PhaseRelation classifyPhaseRelation (float bass, float kick, float epsilon = 1.0e-5f) noexcept
@@ -253,4 +239,115 @@ inline float calculatePeakDeltaMs (const float* bass,
                                    double sampleRate) noexcept
 {
     return findScopePeakMarkers (bass, kick, numSamples, sampleRate).deltaMs;
+}
+
+// P7: centered moving average of the raw scope signal. The scope feed is already
+// decimated (~2 kHz), so a short symmetric average strips the sample-to-sample
+// broadband jitter and leaves the low/body content that actually decides the
+// kick/bass phase relationship. Symmetric window => zero net phase shift, so
+// peaks and zero-crossings are not moved. O(n), no allocation (caller owns out).
+inline void smoothScopeSignal (const float* in, float* out, int n, int halfWindow) noexcept
+{
+    if (in == nullptr || out == nullptr || n <= 0)
+        return;
+
+    halfWindow = std::clamp (halfWindow, 0, n / 2);
+    if (halfWindow == 0)
+    {
+        for (int i = 0; i < n; ++i)
+            out[i] = in[i];
+        return;
+    }
+
+    double sum = 0.0;
+    int count = 0;
+    for (int j = 0; j <= halfWindow && j < n; ++j) { sum += (double) in[j]; ++count; }
+
+    for (int i = 0; i < n; ++i)
+    {
+        out[i] = count > 0 ? (float) (sum / (double) count) : 0.0f;
+
+        const int add = i + 1 + halfWindow;
+        const int rem = i - halfWindow;
+        if (add < n) { sum += (double) in[add]; ++count; }
+        if (rem >= 0) { sum -= (double) in[rem]; --count; }
+    }
+}
+
+// P7: signed low-band smooth sized from the scope sample rate. Picks a centered
+// window of roughly half a ~180 Hz period so sub/low/body content survives while
+// broadband jitter is averaged out, preserving sign (needed for the
+// constructive/destructive shading). Zero net phase shift (symmetric window).
+inline void smoothScopeEnvelope (const float* in, float* out, int n, double scopeSampleRate) noexcept
+{
+    if (in == nullptr || out == nullptr || n <= 0)
+        return;
+
+    // ~180 Hz reference: half-period in samples at the scope's decimated rate.
+    int halfWindow = 3;
+    if (scopeSampleRate > 0.0)
+        halfWindow = std::clamp ((int) std::lround (scopeSampleRate / 180.0 / 2.0), 1, n / 2);
+
+    smoothScopeSignal (in, out, n, halfWindow);
+}
+
+// P7: transient markers / Δ ms from the signal ENVELOPE, not the raw peak. The
+// raw peak sample jumps between adjacent samples frame to frame; the envelope
+// peak (rectify + centered smooth) sits on the stable centre of the kick/bass
+// body, so the marker and Δ ms read musically instead of jittering. O(n), no
+// allocation (rolling window sum of |x|).
+inline ScopePeakMarkers findEnvelopePeakMarkers (const float* bass,
+                                                 const float* kick,
+                                                 int numSamples,
+                                                 double sampleRate,
+                                                 int halfWindow = 6) noexcept
+{
+    ScopePeakMarkers markers;
+
+    if (bass == nullptr || kick == nullptr || numSamples <= 0 || sampleRate <= 0.0)
+        return markers;
+
+    halfWindow = std::clamp (halfWindow, 0, numSamples / 2);
+
+    auto envelopePeak = [numSamples, halfWindow] (const float* x, float& peakOut) -> int
+    {
+        int bestIdx = -1;
+        float best = 0.0f;
+        double sum = 0.0;
+        int count = 0;
+
+        for (int j = 0; j <= halfWindow && j < numSamples; ++j) { sum += (double) std::abs (x[j]); ++count; }
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float env = count > 0 ? (float) (sum / (double) count) : 0.0f;
+            if (env > best)
+            {
+                best = env;
+                bestIdx = i;
+            }
+
+            const int add = i + 1 + halfWindow;
+            const int rem = i - halfWindow;
+            if (add < numSamples) { sum += (double) std::abs (x[add]); ++count; }
+            if (rem >= 0) { sum -= (double) std::abs (x[rem]); --count; }
+        }
+
+        peakOut = best;
+        return bestIdx;
+    };
+
+    float bassPeak = 0.0f, kickPeak = 0.0f;
+    markers.bassPeakIndex = envelopePeak (bass, bassPeak);
+    markers.kickPeakIndex = envelopePeak (kick, kickPeak);
+
+    if (markers.bassPeakIndex < 0 || markers.kickPeakIndex < 0
+        || bassPeak <= 1.0e-5f || kickPeak <= 1.0e-5f)
+    {
+        return markers;
+    }
+
+    markers.valid = true;
+    markers.deltaMs = samplesToMs (markers.bassPeakIndex - markers.kickPeakIndex, sampleRate);
+    return markers;
 }

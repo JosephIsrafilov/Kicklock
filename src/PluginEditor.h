@@ -22,6 +22,7 @@ private:
     void timerCallback() override;
     void updateStatusLabels();
     void syncScopeSettings();
+    void pollAnalyzeState();
 
     KickLockAudioProcessor& audioProcessor;
 
@@ -89,6 +90,8 @@ private:
 
     bool hasFixReady = false;
     bool hasAnalyzedResult = false;
+    bool analyzeBusy = false;
+    AnalyzeState lastAnalyzeState = AnalyzeState::Idle;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KickLockAudioProcessorEditor)
 };

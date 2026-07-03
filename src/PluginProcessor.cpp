@@ -55,6 +55,52 @@ namespace
                                                     : InterpolationType::Allpass;
     }
 
+    float rmsOf (const std::vector<float>& x) noexcept
+    {
+        if (x.empty())
+            return 0.0f;
+
+        double sum = 0.0;
+        for (auto v : x)
+            sum += (double) v * (double) v;
+
+        return (float) std::sqrt (sum / (double) x.size());
+    }
+
+    // P6: when analysis can't produce a usable fix, say specifically what's
+    // missing rather than a generic "waiting for signal". Inspects the captured
+    // window so the message names the actual absent input (no kick / no bass /
+    // not enough material) instead of guessing.
+    void refineInsufficientSignalMessage (PhaseFixResult& result,
+                                          const std::vector<float>& bass,
+                                          const std::vector<float>& kick,
+                                          int numSamples,
+                                          double sampleRate)
+    {
+        if (result.enoughSignal)
+            return;
+
+        const int minMaterial = (int) (sampleRate * 0.3);
+        if (numSamples < minMaterial)
+        {
+            result.message = "Not enough material captured yet. Keep the loop playing, then analyze again.";
+            return;
+        }
+
+        constexpr float presenceFloor = 1.5e-3f;
+        const bool hasKick = rmsOf (kick) >= presenceFloor;
+        const bool hasBass = rmsOf (bass) >= presenceFloor;
+
+        if (! hasKick && ! hasBass)
+            result.message = "No kick or bass detected. Feed a kick into the sidechain and bass into the main input.";
+        else if (! hasKick)
+            result.message = "No kick detected on the sidechain. Route the kick to the sidechain input.";
+        else if (! hasBass)
+            result.message = "No bass detected on the main input. Route the bass through the plugin.";
+        else
+            result.message = "Kick and bass are present but too quiet for a reliable low-end phase read.";
+    }
+
     std::vector<AnalysisHitWindow> extractRecentHitWindows (const std::vector<float>& kick,
                                                             double sampleRate,
                                                             int maxHits = 8)
@@ -248,8 +294,13 @@ namespace
             if (hitResult.bassPolarityInvert)
                 ++polarityFlips;
 
-            if (hitResult.improvementPercent >= 5.0f)
+            if (hitResult.improvementPercent >= 5.0f
+                || hitResult.bassDelayMs >= 0.40f
+                || hitResult.bassPolarityInvert
+                || hitResult.phaseFilterEnabled)
+            {
                 ++improvementCount;
+            }
 
             if (hitResult.largeTimingOffset)
             {
@@ -396,6 +447,14 @@ KickLockAudioProcessor::KickLockAudioProcessor()
     rotatorStagesParam = apvts.getRawParameterValue ("rotatorStages");
 }
 
+KickLockAudioProcessor::~KickLockAudioProcessor()
+{
+    // The background analysis job captures `this`. Remove any queued job and
+    // wait for a running one to finish before the members it touches (the
+    // capture buffer, the result fields) start tearing down.
+    analysisThreadPool.removeAllJobs (true, 2000);
+}
+
 juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::createParameterLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
@@ -468,26 +527,13 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
         rotator[(size_t) ch].prepare (sampleRate, 2);
     }
 
-    dryInputCorrelationMeter.prepare (sampleRate, (int) sampleRate / 20);
-    processedCorrelationMeter.prepare (sampleRate, (int) sampleRate / 20);
+    // Live multi-band phase meters (P5). They band-pass internally, so no
+    // separate pre-filters are needed. ~0.25 s rolling window per band.
+    const int liveWindow = juce::jmax (256, (int) (sampleRate * 0.25));
+    dryMultiBandMeter.prepare (sampleRate, liveWindow);
+    processedMultiBandMeter.prepare (sampleRate, liveWindow);
     scopeFifo.prepare (8192);
 
-    dryMainHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
-    dryMainLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
-    dryKickHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
-    dryKickLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
-    processedMainHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
-    processedMainLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
-    processedKickHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
-    processedKickLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
-    dryMainHighPass.reset();
-    dryMainLowPass.reset();
-    dryKickHighPass.reset();
-    dryKickLowPass.reset();
-    processedMainHighPass.reset();
-    processedMainLowPass.reset();
-    processedKickHighPass.reset();
-    processedKickLowPass.reset();
     phaseFilterWet.reset (sampleRate, 0.005);
     phaseFilterWet.setCurrentAndTargetValue (0.0f);
 
@@ -500,6 +546,17 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 25.0f, 180.0f);
     hitHistory.reset();
+
+    // Held-activity trackers for the P3 status. ~500 ms hold so a steady loop
+    // never flickers to "no signal" in the gaps between kick transients. The
+    // activation floor is low: it only needs to tell "playing" from "silent",
+    // not judge phase-read quality (that is materialUsable below).
+    kickActivity.prepare (sampleRate, 500.0f, 3.0e-3f);
+    bassActivity.prepare (sampleRate, 500.0f, 3.0e-3f);
+    kickActiveHeld.store (false);
+    bassActiveHeld.store (false);
+    analysisSignalUsable.store (false);
+    analysisMaterialReady.store (false);
 
     // Decimate the scope feed so the UI ring can show a multi-beat view
     // without allocating on the audio thread.
@@ -516,7 +573,20 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     lastRotatorFreq = -1.0f;
     lastRotatorQ = -1.0f;
     lastDelayActive = false;
-    latestFixResult = {};
+
+    {
+        const std::lock_guard<std::mutex> lock (resultMutex);
+        latestFixResult = {};
+        lastAnalyzedBassWindow.clear();
+        lastAnalyzedKickWindow.clear();
+    }
+
+    // Reset the Analyze state machine unless a background job is mid-flight
+    // (leave a running/analyzing job to resolve itself so its terminal store
+    // isn't clobbered here).
+    const auto state = analyzeState.load (std::memory_order_acquire);
+    if (! analyzeStateIsBusy (state))
+        analyzeState.store (AnalyzeState::Idle, std::memory_order_release);
 }
 
 void KickLockAudioProcessor::releaseResources()
@@ -564,9 +634,9 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     bool bpmDetected = false;
     float bpmValue = 0.0f;
 
-    if (auto* playHead = getPlayHead())
+    if (auto* currentPlayHead = getPlayHead())
     {
-        if (const auto position = playHead->getPosition())
+        if (const auto position = currentPlayHead->getPosition())
         {
             if (const auto bpm = position->getBpm())
             {
@@ -623,14 +693,10 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const bool transientDetected = transientDetector.processSample (kickMono);
             hitCapture.pushSample (bassMono, kickMono, transientDetected);
 
-            const float lowBass = dryMainLowPass.processSample (
-                dryMainHighPass.processSample (bassMono));
-            const float lowKick = dryKickLowPass.processSample (
-                dryKickHighPass.processSample (kickMono));
-            dryInputCorrelationMeter.pushSample (lowBass, lowKick);
+            // Live multi-band read of the RAW (pre-processing) relationship.
+            // The meter band-passes internally, so feed it the mono pair.
+            dryMultiBandMeter.pushSample (bassMono, kickMono);
         }
-
-        rawCapture.publishSnapshot();
     }
     else
     {
@@ -648,8 +714,40 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     }
 
     const double safeCount = (double) juce::jmax (1, numSamples);
-    bassSignalRms.store ((float) std::sqrt (bassEnergySum / safeCount));
-    kickSignalRms.store (hasSidechain ? (float) std::sqrt (kickEnergySum / safeCount) : 0.0f);
+    const float blockBassRms = (float) std::sqrt (bassEnergySum / safeCount);
+    const float blockKickRms = hasSidechain ? (float) std::sqrt (kickEnergySum / safeCount) : 0.0f;
+    bassSignalRms.store (blockBassRms);
+    kickSignalRms.store (blockKickRms);
+
+    // Feed the held-activity trackers so status reflects recent hits, not just
+    // this instant. Without a sidechain the kick can never be "active".
+    bassActivity.pushBlock (blockBassRms, numSamples);
+    if (hasSidechain)
+        kickActivity.pushBlock (blockKickRms, numSamples);
+    else
+        kickActivity.pushBlock (0.0f, numSamples);
+
+    kickActiveHeld.store (kickActivity.isActive());
+    bassActiveHeld.store (bassActivity.isActive());
+
+    // "Usable" material: both signals cleared a floor loud enough for a phase
+    // read within the hold window. Lets status tell "present but far too quiet"
+    // (SIGNAL TOO LOW) apart from a genuinely playing loop, without flickering
+    // between kick transients.
+    constexpr float usableFloorRms = 8.0e-3f;
+    analysisSignalUsable.store (hasSidechain
+                                && kickActivity.isUsable (usableFloorRms)
+                                && bassActivity.isUsable (usableFloorRms));
+
+    // "Enough material" for a meaningful analysis window: the raw capture has
+    // accumulated at least ~0.5 s of samples AND both signals have been active
+    // recently. Display-only; Apply Fix gates on the analysis result, not this.
+    const int capturedSamples = rawCapture.getFilledSamples();
+    const int minMaterialSamples = (int) (getSampleRate() * 0.5);
+    analysisMaterialReady.store (hasSidechain
+                                 && capturedSamples >= minMaterialSamples
+                                 && kickActivity.isActive()
+                                 && bassActivity.isActive());
 
     const bool neutral = isBassProcessingNeutral();
     const float delayMs = normaliseBassDelayMs (delayMsParam->load());
@@ -773,12 +871,9 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                 sidechainSum += sidechainBuffer.getSample (ch, i);
             const float sidechainMono = sidechainChannels > 0 ? sidechainSum / (float) sidechainChannels : 0.0f;
 
-            const float lowMain = processedMainLowPass.processSample (
-                processedMainHighPass.processSample (mainMono));
-            const float lowKick = processedKickLowPass.processSample (
-                processedKickHighPass.processSample (sidechainMono));
-
-            processedCorrelationMeter.pushSample (lowMain, lowKick);
+            // Post-processing multi-band phase read. The meter band-passes both
+            // signals internally per band; feed it the raw mono pair.
+            processedMultiBandMeter.pushSample (mainMono, sidechainMono);
 
             // Decimate the scope feed only: the meter still sees every sample,
             // but the UI keeps a slower, longer history for the musical grid.
@@ -790,13 +885,25 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    const float dryMatch = hasSidechain ? dryInputCorrelationMeter.getCorrelation() : 50.0f;
-    const float processedMatch = hasSidechain ? processedCorrelationMeter.getCorrelation() : 50.0f;
-    const float activeMatch = hasSidechain ? (processingNeeded ? processedMatch : dryMatch) : 50.0f;
+    // Overall (low-end-weighted) match from whichever meter reflects what the
+    // user is hearing: the processed meter when the bass path is doing anything,
+    // otherwise the dry meter.
+    const auto& activeMeter = processingNeeded ? processedMultiBandMeter : dryMultiBandMeter;
+
+    const float dryMatch = hasSidechain ? dryMultiBandMeter.getWeightedMatchPercent() : 50.0f;
+    const float processedMatch = hasSidechain ? processedMultiBandMeter.getWeightedMatchPercent() : 50.0f;
+    const float activeMatch = hasSidechain ? activeMeter.getWeightedMatchPercent() : 50.0f;
+    const float activeLowEnd = hasSidechain ? activeMeter.getLowEndMatchPercent() : 50.0f;
+    const float activeBroad = hasSidechain ? activeMeter.getBroadbandMatchPercent() : 50.0f;
 
     dryInputMatchPercent.store (dryMatch);
     processedMatchPercent.store (processedMatch);
-    realtimeLowBandMatchPercent.store (activeMatch);
+
+    // P5/P8 live read-outs: overall multi-band, sub/low only, broad 20-2k.
+    liveMultiBandMatchPercent.store (activeMatch);
+    liveLowEndMatchPercent.store (activeLowEnd);
+    liveBroadbandMatchPercent.store (activeBroad);
+    realtimeLowBandMatchPercent.store (activeLowEnd); // legacy alias (sub/low)
     correlationPercent.store (activeMatch);
 }
 
@@ -949,96 +1056,168 @@ PhaseFixResult KickLockAudioProcessor::analyzeFix()
 {
     std::vector<float> bass, kick;
     const int n = rawCapture.snapshot (bass, kick);
+    return computeAndPublishFix (bass, kick, n);
+}
+
+PhaseFixResult KickLockAudioProcessor::computeAndPublishFix (const std::vector<float>& bass,
+                                                            const std::vector<float>& kick,
+                                                            int numSamples)
+{
     const auto delayInterpolation = interpolationFromChoice (delayInterpParam != nullptr
                                                                  ? delayInterpParam->load()
                                                                  : 0.0f);
 
-    if (n > 32)
+    PhaseFixResult result;
+    std::vector<float> analyzedBass, analyzedKick;
+
+    if (numSamples > 32)
     {
         const auto hits = extractRecentHitWindows (kick, getSampleRate(), 8);
         if (! hits.empty())
-            appendHitWindows (bass, kick, hits, lastAnalyzedBassWindow, lastAnalyzedKickWindow);
+            appendHitWindows (bass, kick, hits, analyzedBass, analyzedKick);
         else
         {
-            lastAnalyzedBassWindow = bass;
-            lastAnalyzedKickWindow = kick;
+            analyzedBass = bass;
+            analyzedKick = kick;
         }
 
-        latestFixResult = analyzeAggregatedHits (bass, kick, hits, getSampleRate(), delayInterpolation);
+        result = analyzeAggregatedHits (bass, kick, hits, getSampleRate(), delayInterpolation);
     }
     else
     {
-        lastAnalyzedBassWindow.clear();
-        lastAnalyzedKickWindow.clear();
-        latestFixResult = {};
-        PhaseFixEngine::updateDerivedResultFields (latestFixResult);
+        PhaseFixEngine::updateDerivedResultFields (result);
     }
 
-    latestAnalyzedBeforePercent.store (latestFixResult.beforeMatchPercent);
-    latestAnalyzedAfterPercent.store (latestFixResult.predictedAfterMatchPercent);
-    latestVerifiedAfterPercent.store (latestFixResult.verifiedAfterMatchPercent);
-    latestVerificationDeltaPercent.store (latestFixResult.verificationDeltaPercent);
-    latestFixConfidence.store (latestFixResult.confidence * 100.0f);
+    // P6: replace the generic "waiting for signal" text with a specific reason
+    // (no kick / no bass / not enough material) when there's no usable result.
+    refineInsufficientSignalMessage (result, bass, kick, numSamples, getSampleRate());
 
-    return latestFixResult;
+    // Publish the result and the window it was computed from under the lock so
+    // a background worker and the message thread never race on them.
+    {
+        const std::lock_guard<std::mutex> lock (resultMutex);
+        latestFixResult = result;
+        lastAnalyzedBassWindow = std::move (analyzedBass);
+        lastAnalyzedKickWindow = std::move (analyzedKick);
+    }
+
+    latestAnalyzedBeforePercent.store (result.beforeMatchPercent);
+    latestAnalyzedAfterPercent.store (result.predictedAfterMatchPercent);
+    latestVerifiedAfterPercent.store (result.verifiedAfterMatchPercent);
+    latestVerificationDeltaPercent.store (result.verificationDeltaPercent);
+    latestFixConfidence.store (result.confidence * 100.0f);
+
+    return result;
+}
+
+bool KickLockAudioProcessor::beginBackgroundAnalyze()
+{
+    // Reject re-entry while an analysis is already in flight.
+    if (analyzeStateIsBusy (analyzeState.load (std::memory_order_acquire)))
+        return false;
+
+    analyzeState.store (AnalyzeState::Preparing, std::memory_order_release);
+
+    // Snapshot on the message thread (allocates, but off the audio thread),
+    // then hand the copy to the worker. The worker only ever touches this copy
+    // and the lock-guarded result fields, never live/mutable audio buffers.
+    auto bass = std::make_shared<std::vector<float>>();
+    auto kick = std::make_shared<std::vector<float>>();
+    const int n = rawCapture.snapshot (*bass, *kick);
+
+    analysisThreadPool.addJob ([this, bass, kick, n]
+    {
+        analyzeState.store (AnalyzeState::Analyzing, std::memory_order_release);
+
+        const auto result = computeAndPublishFix (*bass, *kick, n);
+
+        const bool usable = result.enoughSignal;
+        analyzeState.store (usable ? AnalyzeState::ResultReady
+                                   : AnalyzeState::NotEnoughMaterial,
+                            std::memory_order_release);
+    });
+
+    return true;
+}
+
+void KickLockAudioProcessor::acknowledgeAnalyzeState() noexcept
+{
+    // Called by the UI once it has consumed a resolved state, so a subsequent
+    // Analyze can transition cleanly from Idle-like semantics again.
+    if (analyzeStateIsResolved (analyzeState.load (std::memory_order_acquire)))
+        analyzeState.store (AnalyzeState::Idle, std::memory_order_release);
 }
 
 bool KickLockAudioProcessor::applyLatestFix()
 {
-    if (! latestFixResult.applyAllowed
-        && ! latestFixResult.optionalApplyAllowed)
+    // Snapshot the shared result + analysis windows under lock so a background
+    // analysis job can't swap them out from under us mid-apply. All the heavy
+    // scoring below then runs on these local copies with the lock released.
+    PhaseFixResult fix;
+    std::vector<float> bassWindow;
+    std::vector<float> kickWindow;
     {
-        return false;
+        const std::lock_guard<std::mutex> lock (resultMutex);
+        fix = latestFixResult;
+        bassWindow = lastAnalyzedBassWindow;
+        kickWindow = lastAnalyzedKickWindow;
     }
 
+    if (! fix.applyAllowed && ! fix.optionalApplyAllowed)
+        return false;
+
     if (auto* polParam = apvts.getParameter ("polarityInvert"))
-        polParam->setValueNotifyingHost (latestFixResult.bassPolarityInvert ? 1.0f : 0.0f);
+        polParam->setValueNotifyingHost (fix.bassPolarityInvert ? 1.0f : 0.0f);
 
     if (auto* delayParam = apvts.getParameter ("delayMs"))
         delayParam->setValueNotifyingHost (
-            delayParam->convertTo0to1 (normaliseBassDelayMs (latestFixResult.bassDelayMs)));
+            delayParam->convertTo0to1 (normaliseBassDelayMs (fix.bassDelayMs)));
 
     if (auto* enabledParam = apvts.getParameter ("phaseFilterEnabled"))
-        enabledParam->setValueNotifyingHost (latestFixResult.phaseFilterEnabled ? 1.0f : 0.0f);
+        enabledParam->setValueNotifyingHost (fix.phaseFilterEnabled ? 1.0f : 0.0f);
 
-    if (latestFixResult.phaseFilterEnabled)
+    if (fix.phaseFilterEnabled)
     {
         if (auto* freqParam = apvts.getParameter ("rotatorFreq"))
             freqParam->setValueNotifyingHost (
-                freqParam->convertTo0to1 (latestFixResult.phaseFilterFreqHz));
+                freqParam->convertTo0to1 (fix.phaseFilterFreqHz));
 
         if (auto* qParam = apvts.getParameter ("rotatorQ"))
             qParam->setValueNotifyingHost (
-                qParam->convertTo0to1 (latestFixResult.phaseFilterQ));
+                qParam->convertTo0to1 (fix.phaseFilterQ));
 
         if (auto* stagesParam = apvts.getParameter ("rotatorStages"))
         {
-            const int stageIndex = juce::jlimit (0, 2, latestFixResult.phaseFilterStages - 2);
+            const int stageIndex = juce::jlimit (0, 2, fix.phaseFilterStages - 2);
             stagesParam->setValueNotifyingHost (stagesParam->convertTo0to1 ((float) stageIndex));
         }
     }
 
-    if (! lastAnalyzedBassWindow.empty()
-        && lastAnalyzedBassWindow.size() == lastAnalyzedKickWindow.size())
+    if (! bassWindow.empty() && bassWindow.size() == kickWindow.size())
     {
         PhaseFixRenderSettings settings;
-        settings.bassPolarityInvert = latestFixResult.bassPolarityInvert;
-        settings.bassDelayMs = latestFixResult.bassDelayMs;
-        settings.phaseFilterEnabled = latestFixResult.phaseFilterEnabled;
-        settings.phaseFilterFreqHz = latestFixResult.phaseFilterFreqHz;
-        settings.phaseFilterQ = latestFixResult.phaseFilterQ;
-        settings.phaseFilterStages = latestFixResult.phaseFilterStages;
+        settings.bassPolarityInvert = fix.bassPolarityInvert;
+        settings.bassDelayMs = fix.bassDelayMs;
+        settings.phaseFilterEnabled = fix.phaseFilterEnabled;
+        settings.phaseFilterFreqHz = fix.phaseFilterFreqHz;
+        settings.phaseFilterQ = fix.phaseFilterQ;
+        settings.phaseFilterStages = fix.phaseFilterStages;
         settings.delayInterpolation = interpolationFromChoice (delayInterpParam != nullptr
                                                                    ? delayInterpParam->load()
                                                                    : 0.0f);
 
-        const auto verified = PhaseFixEngine::scoreSettings (lastAnalyzedBassWindow.data(),
-                                                             lastAnalyzedKickWindow.data(),
-                                                             (int) lastAnalyzedBassWindow.size(),
+        const auto verified = PhaseFixEngine::scoreSettings (bassWindow.data(),
+                                                             kickWindow.data(),
+                                                             (int) bassWindow.size(),
                                                              getSampleRate(),
                                                              settings,
                                                              PhaseFixEngine::absoluteManualMaxDelayMs);
 
+        PhaseFixEngine::applyVerification (fix, verified.matchPercent);
+
+        const std::lock_guard<std::mutex> lock (resultMutex);
+        // Only write verification back if the stored result is still the one we
+        // applied (a racing re-analyze would have replaced it — leave that one).
         PhaseFixEngine::applyVerification (latestFixResult, verified.matchPercent);
         latestVerifiedAfterPercent.store (latestFixResult.verifiedAfterMatchPercent);
         latestVerificationDeltaPercent.store (latestFixResult.verificationDeltaPercent);
@@ -1049,6 +1228,7 @@ bool KickLockAudioProcessor::applyLatestFix()
 
 PhaseFixResult KickLockAudioProcessor::getLatestFixResult() const
 {
+    const std::lock_guard<std::mutex> lock (resultMutex);
     return latestFixResult;
 }
 
@@ -1089,6 +1269,7 @@ float KickLockAudioProcessor::getKickSignalRms() const noexcept
 
 void KickLockAudioProcessor::setLatestFixResultForTesting (const PhaseFixResult& result)
 {
+    const std::lock_guard<std::mutex> lock (resultMutex);
     latestFixResult = result;
 }
 

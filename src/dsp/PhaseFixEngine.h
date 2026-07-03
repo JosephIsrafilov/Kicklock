@@ -164,7 +164,15 @@ public:
         }
 
         Candidate best = bestSafe;
-        Candidate bestPhase = bestSafe;
+        Candidate bestPhase;
+        bestPhase.settings.delayInterpolation = delayInterpolation;
+
+        const float unconstrainedDelayAbs = unconstrained.valid ? std::abs (unconstrained.delayMs) : 0.0f;
+        const bool forceLargeTimingOffset =
+            unconstrained.valid
+            && unconstrainedDelayAbs > maxDelayMs + largeTimingToleranceMs
+            && (bestSafe.settings.bassDelayMs >= maxDelayMs - largeTimingToleranceMs
+                || before.match < alreadyGoodThreshold);
 
         constexpr float broadFreqs[] = { 30.0f, 40.0f, 50.0f, 60.0f, 65.0f, 80.0f,
                                          100.0f, 120.0f, 150.0f, 160.0f, 200.0f };
@@ -173,8 +181,21 @@ public:
 
         const float phaseDelayStart = std::max (0.0f, bestSafe.settings.bassDelayMs - 0.25f);
         const float phaseDelayEnd = std::min (maxDelayMs, bestSafe.settings.bassDelayMs + 0.25f);
+        const bool usefulConflictBand = hasUsefulConflictBand (before, focusBandIndex);
+        const bool severeMismatchSolvedBySmallDelay =
+            before.match < 40.0f
+            && bestSafe.settings.bassDelayMs > 0.02f
+            && ! bestSafe.settings.bassPolarityInvert;
+        const bool safeDelayOrPolaritySolved =
+            bestSafe.rawMatchPercent >= strongAfterThreshold
+            && (bestSafe.rawMatchPercent - before.match >= usefulImprovementThreshold
+                || bestSafe.settings.bassDelayMs >= 0.40f
+                || bestSafe.settings.bassPolarityInvert)
+            && ! severeMismatchSolvedBySmallDelay;
+        const bool runPhaseSearch = ! forceLargeTimingOffset
+            && (before.match < 40.0f || ! safeDelayOrPolaritySolved || usefulConflictBand);
 
-        if (focusBandIndex >= 0)
+        if (runPhaseSearch && focusBandIndex >= 0)
         {
             const auto& focusBand = before.multi.bands[(size_t) focusBandIndex];
             const float focusCenter = 0.5f * (focusBand.lowHz + focusBand.highHz);
@@ -193,16 +214,27 @@ public:
                                                 delayInterpolation, work, before, focusBandIndex, bestPhase);
         }
 
-        for (bool invert : { false, true })
-            for (float freq : broadFreqs)
-                for (float q : qs)
-                    for (int stageCount : stages)
-                        testPhaseCandidate (bass, kick, numSamples, sampleRate, invert,
-                                            phaseDelayStart, phaseDelayEnd, freq, q, stageCount,
-                                            delayInterpolation, work, before, focusBandIndex, bestPhase);
+        if (runPhaseSearch)
+        {
+            for (bool invert : { false, true })
+                for (float freq : broadFreqs)
+                    for (float q : qs)
+                        for (int stageCount : stages)
+                            testPhaseCandidate (bass, kick, numSamples, sampleRate, invert,
+                                                phaseDelayStart, phaseDelayEnd, freq, q, stageCount,
+                                                delayInterpolation, work, before, focusBandIndex, bestPhase);
+        }
 
-        if (shouldKeepPhaseCandidate (before, bestSafe, bestPhase, focusBandIndex))
+        const bool phaseFixesSevereMismatch =
+            severeMismatchSolvedBySmallDelay
+            && bestPhase.settings.phaseFilterEnabled
+            && bestPhase.rawMatchPercent >= strongAfterThreshold;
+
+        if (phaseFixesSevereMismatch
+            || shouldKeepPhaseCandidate (before, bestSafe, bestPhase, focusBandIndex))
+        {
             best = bestPhase;
+        }
 
         result.valid = true;
         result.bassPolarityInvert = best.settings.bassPolarityInvert;
@@ -220,8 +252,7 @@ public:
                                                 result.singleHitAnalysis,
                                                 1.0f);
 
-        const float unconstrainedDelayAbs = unconstrained.valid ? std::abs (unconstrained.delayMs) : 0.0f;
-        if (unconstrained.valid && unconstrainedDelayAbs > maxDelayMs + largeTimingToleranceMs)
+        if (forceLargeTimingOffset)
         {
             result.largeTimingOffset = true;
             result.detectedTimingOffsetMs = unconstrainedDelayAbs;
@@ -471,14 +502,7 @@ private:
         const auto phaseDelta = compareBands (bestSafe.multi, bestPhase.multi, focusBandIndex);
         const float globalGain = bestPhase.rawMatchPercent - bestSafe.rawMatchPercent;
         const bool improvedGlobally = globalGain >= phaseGlobalKeepThreshold;
-
-        bool usefulConflictBand = false;
-        if (focusBandIndex >= 0)
-        {
-            const auto& band = before.multi.bands[(size_t) focusBandIndex];
-            usefulConflictBand = band.confidence >= usefulBandConfidence
-                && (before.match - band.matchPercent) >= conflictBandGapThreshold;
-        }
+        const bool usefulConflictBand = hasUsefulConflictBand (before, focusBandIndex);
 
         const bool usefulRefinement =
             usefulConflictBand
@@ -487,6 +511,16 @@ private:
             && phaseDelta.maxHighEnergyBandRegression <= phaseRegressionTolerance;
 
         return improvedGlobally || usefulRefinement;
+    }
+
+    static bool hasUsefulConflictBand (const Score& before, int focusBandIndex) noexcept
+    {
+        if (focusBandIndex < 0)
+            return false;
+
+        const auto& band = before.multi.bands[(size_t) focusBandIndex];
+        return band.confidence >= usefulBandConfidence
+            && (before.match - band.matchPercent) >= conflictBandGapThreshold;
     }
 
     static float delayPenalty (float delayMs) noexcept
@@ -575,15 +609,25 @@ private:
             return PhaseFixQuality::TimelineMoveRequired;
 
         if (result.beforeMatchPercent >= alreadyGoodThreshold
-            && result.improvementPercent < usefulImprovementThreshold)
+            && result.phaseFilterEnabled)
         {
             return PhaseFixQuality::AlreadyGood;
         }
 
+        const bool meaningfulTimingCorrection = result.bassDelayMs >= 0.40f;
+        const bool meaningfulPolarityCorrection = result.bassPolarityInvert;
         if (result.afterMatchPercent >= strongAfterThreshold
-            && result.improvementPercent >= usefulImprovementThreshold)
+            && (result.improvementPercent >= usefulImprovementThreshold
+                || meaningfulTimingCorrection
+                || meaningfulPolarityCorrection))
         {
             return PhaseFixQuality::StrongImprovement;
+        }
+
+        if (result.beforeMatchPercent >= alreadyGoodThreshold
+            && result.improvementPercent < usefulImprovementThreshold)
+        {
+            return PhaseFixQuality::AlreadyGood;
         }
 
         if (result.improvementPercent >= partialImprovementThreshold

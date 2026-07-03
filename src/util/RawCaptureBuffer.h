@@ -8,12 +8,15 @@
 
 // Rolling capture of raw (pre-processing) mono bass/kick samples for offline
 // analysis by the Analyze button. The audio thread writes one pair per sample
-// via push(); the UI/message thread calls snapshot() on demand.
+// via push(); a message/background thread calls snapshot() on demand.
 //
-// Lock-free and allocation-free on the audio thread (buffers sized once in
-// prepare()). The audio thread publishes a copied snapshot into one of two
-// buffers; the UI reads only the currently published buffer, never the live
-// capture ring.
+// Realtime-safe by construction: the audio thread only ever does O(1) writes
+// into a preallocated ring (buffers sized once in prepare()). There is NO
+// per-block full-buffer copy and no lock. snapshot() reads the live ring
+// directly from the reader thread. A handful of torn samples at the wrap
+// boundary are acceptable for a correlation estimate over tens of thousands of
+// samples, so no double buffering is used (that would just move an expensive
+// copy back onto the audio thread, which is exactly what we are removing here).
 class RawCaptureBuffer
 {
 public:
@@ -22,33 +25,19 @@ public:
         capacity = juce::jmax (1, capacitySamples);
         captureBass.assign ((size_t) capacity, 0.0f);
         captureKick.assign ((size_t) capacity, 0.0f);
-        for (auto& buffer : publishedBass)
-            buffer.assign ((size_t) capacity, 0.0f);
-        for (auto& buffer : publishedKick)
-            buffer.assign ((size_t) capacity, 0.0f);
-        publishedWritePos = {};
-        publishedFilledSamples = {};
-        filledSamples = 0;
         writePos.store (0, std::memory_order_relaxed);
-        publishedSlot.store (0, std::memory_order_release);
+        filledSamples.store (0, std::memory_order_release);
     }
 
     void reset()
     {
         std::fill (captureBass.begin(), captureBass.end(), 0.0f);
         std::fill (captureKick.begin(), captureKick.end(), 0.0f);
-        for (auto& buffer : publishedBass)
-            std::fill (buffer.begin(), buffer.end(), 0.0f);
-        for (auto& buffer : publishedKick)
-            std::fill (buffer.begin(), buffer.end(), 0.0f);
-        publishedWritePos = {};
-        publishedFilledSamples = {};
-        filledSamples = 0;
         writePos.store (0, std::memory_order_relaxed);
-        publishedSlot.store (0, std::memory_order_release);
+        filledSamples.store (0, std::memory_order_release);
     }
 
-    // Audio thread. Never allocates or blocks.
+    // Audio thread. O(1), never allocates, never locks.
     void push (float bassValue, float kickValue) noexcept
     {
         const int cap = capacity;
@@ -59,59 +48,61 @@ public:
         captureBass[(size_t) w] = bassValue;
         captureKick[(size_t) w] = kickValue;
         w = (w + 1) % cap;
-        writePos.store (w, std::memory_order_relaxed);
-        filledSamples = std::min (filledSamples + 1, cap);
-    }
 
-    // Audio thread. Copies the current capture ring into the inactive
-    // published slot once per processed block.
-    void publishSnapshot() noexcept
-    {
-        const int cap = capacity;
-        if (cap <= 0)
-            return;
+        // Publish the new write position and fill count with release semantics
+        // so a reader that acquires them sees the sample stores above.
+        writePos.store (w, std::memory_order_release);
 
-        const int slot = 1 - publishedSlot.load (std::memory_order_acquire);
-        std::copy (captureBass.begin(), captureBass.end(), publishedBass[(size_t) slot].begin());
-        std::copy (captureKick.begin(), captureKick.end(), publishedKick[(size_t) slot].begin());
-        publishedWritePos[(size_t) slot] = writePos.load (std::memory_order_relaxed);
-        publishedFilledSamples[(size_t) slot] = filledSamples;
-        publishedSlot.store (slot, std::memory_order_release);
+        const int filled = filledSamples.load (std::memory_order_relaxed);
+        if (filled < cap)
+            filledSamples.store (filled + 1, std::memory_order_release);
     }
 
     int getCapacity() const noexcept { return capacity; }
 
-    // UI/message thread. Copies the latest published ring into the provided
+    // Number of valid samples captured so far (saturates at capacity). Used by
+    // the "enough material captured" status check. Reader thread.
+    int getFilledSamples() const noexcept
+    {
+        return filledSamples.load (std::memory_order_acquire);
+    }
+
+    // UI/message/background thread. Copies the live ring into the provided
     // vectors in chronological order (oldest first). Returns the sample count.
+    // Only the samples actually written so far are returned, so an early
+    // snapshot (before the ring is full) never reports capacity-length zero
+    // padding as if it were captured material.
     int snapshot (std::vector<float>& bassOut, std::vector<float>& kickOut) const
     {
-        const int slot = publishedSlot.load (std::memory_order_acquire);
-        const int samples = publishedFilledSamples[(size_t) slot];
+        const int cap = capacity;
+        if (cap <= 0)
+            return 0;
+
+        const int samples = filledSamples.load (std::memory_order_acquire);
         if (samples <= 0)
             return 0;
+
+        const int w = writePos.load (std::memory_order_acquire);
 
         bassOut.resize ((size_t) samples);
         kickOut.resize ((size_t) samples);
 
-        const int cap = capacity;
-        const int start = samples < cap ? 0 : publishedWritePos[(size_t) slot];
+        // Oldest sample sits `samples` positions behind the write head once the
+        // ring is full; before that it starts at index 0.
+        const int start = samples < cap ? 0 : w;
         for (int i = 0; i < samples; ++i)
         {
             const int idx = (start + i) % cap;
-            bassOut[(size_t) i] = publishedBass[(size_t) slot][(size_t) idx];
-            kickOut[(size_t) i] = publishedKick[(size_t) slot][(size_t) idx];
+            bassOut[(size_t) i] = captureBass[(size_t) idx];
+            kickOut[(size_t) i] = captureKick[(size_t) idx];
         }
+
         return samples;
     }
 
 private:
     int capacity = 0;
-    int filledSamples = 0;
     std::vector<float> captureBass, captureKick;
-    std::array<std::vector<float>, 2> publishedBass;
-    std::array<std::vector<float>, 2> publishedKick;
-    std::array<int, 2> publishedWritePos {};
-    std::array<int, 2> publishedFilledSamples {};
     std::atomic<int> writePos { 0 };
-    std::atomic<int> publishedSlot { 0 };
+    std::atomic<int> filledSamples { 0 };
 };

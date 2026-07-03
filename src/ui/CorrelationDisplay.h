@@ -44,7 +44,8 @@ public:
 
         g.setColour (juce::Colour (0xff6f7d89));
         g.setFont (juce::Font (juce::FontOptions (10.0f)));
-        g.drawText ("30-120 Hz", area.removeFromTop (14.0f).toNearestInt(),
+        g.drawText ("Multi-band 20 Hz-2 kHz (low-end weighted)",
+                    area.removeFromTop (14.0f).toNearestInt(),
                     juce::Justification::centred);
 
         // Big percent.
