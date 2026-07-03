@@ -11,6 +11,7 @@ KickLockAudioProcessor::KickLockAudioProcessor()
     delayMsParam = apvts.getRawParameterValue ("delayMs");
     delayInterpParam = apvts.getRawParameterValue ("delayInterp");
     polarityInvertParam = apvts.getRawParameterValue ("polarityInvert");
+    phaseFilterEnabledParam = apvts.getRawParameterValue ("phaseFilterEnabled");
     rotatorFreqParam = apvts.getRawParameterValue ("rotatorFreq");
     rotatorQParam = apvts.getRawParameterValue ("rotatorQ");
     rotatorStagesParam = apvts.getRawParameterValue ("rotatorStages");
@@ -35,6 +36,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "polarityInvert", 1 },
         "Polarity Invert",
+        false));
+
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "phaseFilterEnabled", 1 },
+        "Phase Filter",
         false));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
@@ -69,6 +75,17 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     correlationMeter.prepare (sampleRate, (int) sampleRate / 20);
     scopeFifo.prepare (8192);
 
+    realtimeMainHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
+    realtimeMainLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
+    realtimeKickHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
+    realtimeKickLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
+    realtimeMainHighPass.reset();
+    realtimeMainLowPass.reset();
+    realtimeKickHighPass.reset();
+    realtimeKickLowPass.reset();
+    phaseFilterWet.reset (sampleRate, 0.005);
+    phaseFilterWet.setCurrentAndTargetValue (0.0f);
+
     // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
     rawCapture.prepare ((int) (sampleRate * 2.0));
     transientDetector.prepare (sampleRate);
@@ -88,6 +105,7 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     lastStageChoice = 0;
     lastRotatorFreq = -1.0f;
     lastRotatorQ = -1.0f;
+    latestFixResult = {};
 }
 
 void KickLockAudioProcessor::releaseResources()
@@ -227,9 +245,17 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         lastRotatorQ = rotatorQ;
     }
 
-    for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
-        for (int i = 0; i < numSamples; ++i)
-            mainBuffer.setSample (ch, i, rotator[(size_t) ch].processSample (mainBuffer.getSample (ch, i)));
+    phaseFilterWet.setTargetValue (phaseFilterEnabledParam->load() > 0.5f ? 1.0f : 0.0f);
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const float mix = phaseFilterWet.getNextValue();
+        for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
+        {
+            const float dry = mainBuffer.getSample (ch, i);
+            const float wet = rotator[(size_t) ch].processSample (dry);
+            mainBuffer.setSample (ch, i, dry + mix * (wet - dry));
+        }
+    }
 
     // 4) Feed the correlation meter and scope fifo with mono-summed
     // main/sidechain values. Skipped entirely when there's no sidechain,
@@ -251,7 +277,12 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                 sidechainSum += sidechainBuffer.getSample (ch, i);
             const float sidechainMono = sidechainChannels > 0 ? sidechainSum / (float) sidechainChannels : 0.0f;
 
-            correlationMeter.pushSample (mainMono, sidechainMono);
+            const float lowMain = realtimeMainLowPass.processSample (
+                realtimeMainHighPass.processSample (mainMono));
+            const float lowKick = realtimeKickLowPass.processSample (
+                realtimeKickHighPass.processSample (sidechainMono));
+
+            correlationMeter.pushSample (lowMain, lowKick);
 
             // Decimate the scope feed only: the meter still sees every sample,
             // but the scope gets 1 in N so its window spans ~1 second.
@@ -263,7 +294,9 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    correlationPercent.store (correlationMeter.getCorrelation());
+    const float lowBandMatch = correlationMeter.getCorrelation();
+    realtimeLowBandMatchPercent.store (lowBandMatch);
+    correlationPercent.store (lowBandMatch);
 }
 
 juce::AudioProcessorEditor* KickLockAudioProcessor::createEditor()
@@ -341,44 +374,38 @@ void KickLockAudioProcessor::setStateInformation (const void* data, int sizeInBy
 
 AnalyzerInstruction KickLockAudioProcessor::analyzeAndApply (AnalyzeMode mode)
 {
-    // Snapshot the raw capture (message thread; allocation is fine here).
-    std::vector<float> bass, kick;
-    const int n = rawCapture.snapshot (bass, kick);
+    const auto fix = analyzeFix();
 
-    const auto result = AlignmentAnalyzer::analyze (bass.data(), kick.data(), n,
-                                                    getSampleRate(), 50.0f);
-    const auto instruction = AnalyzerInstructionBuilder::build (result, mode);
+    AnalyzerInstruction instruction;
+    instruction.delayMs = fix.bassDelayMs;
+    instruction.flipPolarity = fix.bassPolarityInvert;
+    instruction.phaseFilterRecommended = fix.phaseFilterEnabled;
+    instruction.phaseFilterFreqHz = fix.phaseFilterFreqHz;
+    instruction.phaseFilterQ = fix.phaseFilterQ;
+    instruction.phaseFilterStages = fix.phaseFilterStages;
+    instruction.beforeMatchPercent = fix.beforeMatchPercent;
+    instruction.afterMatchPercent = fix.afterMatchPercent;
+    instruction.confidence = fix.confidence;
+    instruction.message = fix.message;
 
-    if (! result.valid || mode != AnalyzeMode::AutoApplySafe
-        || instruction.action == AlignmentAction::LowConfidence)
-        return instruction;
-
-    // AutoApplySafe writes through parameters so both the sliders and the host
-    // update. Only bass-path changes are legal here. Negative analyzer delay
-    // means "move/delay the kick", so it remains a recommendation.
-    if (result.delayMs > 0.0f)
-        if (auto* delayParam = apvts.getParameter ("delayMs"))
-            delayParam->setValueNotifyingHost (delayParam->convertTo0to1 (result.delayMs));
-
-    if (auto* polParam = apvts.getParameter ("polarityInvert"))
-        polParam->setValueNotifyingHost (result.invertPolarity ? 1.0f : 0.0f);
-
-    // Apply the recommended phase-rotator settings too, when the search found
-    // an improvement. rotatorStages is a choice param: index 0->2, 1->3, 2->4.
-    if (result.adjustRotator)
+    if (! fix.enoughSignal)
+        instruction.action = AlignmentAction::NotEnoughSignal;
+    else if (fix.requiresTimelineMove)
     {
-        if (auto* freqParam = apvts.getParameter ("rotatorFreq"))
-            freqParam->setValueNotifyingHost (freqParam->convertTo0to1 (result.rotatorFreqHz));
-
-        if (auto* qParam = apvts.getParameter ("rotatorQ"))
-            qParam->setValueNotifyingHost (qParam->convertTo0to1 (result.rotatorQ));
-
-        if (auto* stagesParam = apvts.getParameter ("rotatorStages"))
-        {
-            const int stageIndex = juce::jlimit (0, 2, result.rotatorStages - 2);
-            stagesParam->setValueNotifyingHost (stagesParam->convertTo0to1 ((float) stageIndex));
-        }
+        instruction.action = AlignmentAction::RecommendMoveKick;
+        instruction.delayMs = -fix.suggestedKickMoveMs;
     }
+    else if (! PhaseFixEngine::canApply (fix))
+        instruction.action = AlignmentAction::LowConfidence;
+    else if (fix.bassDelayMs > 0.02f)
+        instruction.action = AlignmentAction::ApplyBassDelay;
+    else if (fix.bassPolarityInvert)
+        instruction.action = AlignmentAction::FlipBassPolarity;
+    else if (fix.phaseFilterEnabled)
+        instruction.action = AlignmentAction::RecommendPhaseFilter;
+
+    if (mode == AnalyzeMode::AutoApplySafe)
+        applyLatestFix();
 
     return instruction;
 }
@@ -409,6 +436,64 @@ HitAnalysisResult KickLockAudioProcessor::analyzeLatestHit()
                                << " over " << juce::String (hitHistory.getCount());
 
     return result;
+}
+
+PhaseFixResult KickLockAudioProcessor::analyzeFix()
+{
+    std::vector<float> bass, kick;
+    int n = hitCapture.snapshotLatest (bass, kick);
+
+    if (n <= 0)
+        n = rawCapture.snapshot (bass, kick);
+
+    latestFixResult = PhaseFixEngine::analyze (bass.data(), kick.data(), n,
+                                               getSampleRate(), 50.0f);
+
+    latestAnalyzedBeforePercent.store (latestFixResult.beforeMatchPercent);
+    latestAnalyzedAfterPercent.store (latestFixResult.afterMatchPercent);
+    latestFixConfidence.store (latestFixResult.confidence * 100.0f);
+
+    return latestFixResult;
+}
+
+bool KickLockAudioProcessor::applyLatestFix()
+{
+    if (! PhaseFixEngine::canApply (latestFixResult))
+        return false;
+
+    if (auto* polParam = apvts.getParameter ("polarityInvert"))
+        polParam->setValueNotifyingHost (latestFixResult.bassPolarityInvert ? 1.0f : 0.0f);
+
+    if (auto* delayParam = apvts.getParameter ("delayMs"))
+        delayParam->setValueNotifyingHost (
+            delayParam->convertTo0to1 (juce::jmax (0.0f, latestFixResult.bassDelayMs)));
+
+    if (auto* enabledParam = apvts.getParameter ("phaseFilterEnabled"))
+        enabledParam->setValueNotifyingHost (latestFixResult.phaseFilterEnabled ? 1.0f : 0.0f);
+
+    if (latestFixResult.phaseFilterEnabled)
+    {
+        if (auto* freqParam = apvts.getParameter ("rotatorFreq"))
+            freqParam->setValueNotifyingHost (
+                freqParam->convertTo0to1 (latestFixResult.phaseFilterFreqHz));
+
+        if (auto* qParam = apvts.getParameter ("rotatorQ"))
+            qParam->setValueNotifyingHost (
+                qParam->convertTo0to1 (latestFixResult.phaseFilterQ));
+
+        if (auto* stagesParam = apvts.getParameter ("rotatorStages"))
+        {
+            const int stageIndex = juce::jlimit (0, 2, latestFixResult.phaseFilterStages - 2);
+            stagesParam->setValueNotifyingHost (stagesParam->convertTo0to1 ((float) stageIndex));
+        }
+    }
+
+    return true;
+}
+
+PhaseFixResult KickLockAudioProcessor::getLatestFixResult() const
+{
+    return latestFixResult;
 }
 
 int KickLockAudioProcessor::getLatestHitSequence() const noexcept

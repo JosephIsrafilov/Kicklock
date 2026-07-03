@@ -12,6 +12,7 @@
 #include "TransientDetector.h"
 #include "MultiBandCorrelation.h"
 #include "PerHitAnalyzer.h"
+#include "PhaseFixEngine.h"
 
 namespace
 {
@@ -482,6 +483,171 @@ public:
 };
 
 static Stage2AnalysisTests stage2AnalysisTestsInstance;
+
+//==============================================================================
+class PhaseFixEngineTests : public juce::UnitTest
+{
+public:
+    PhaseFixEngineTests() : juce::UnitTest ("PhaseFixEngine", "DSP") {}
+
+    void runTest() override
+    {
+        constexpr int n = 8192;
+
+        auto fillBurst = [] (std::vector<float>& bass, std::vector<float>& kick,
+                             int bassOffset, int kickOffset, double freq,
+                             bool invertBass = false)
+        {
+            std::fill (bass.begin(), bass.end(), 0.0f);
+            std::fill (kick.begin(), kick.end(), 0.0f);
+
+            for (int i = 0; i < (int) bass.size(); ++i)
+            {
+                const int bi = i - bassOffset;
+                const int ki = i - kickOffset;
+
+                if (bi >= 0)
+                {
+                    const double t = (double) bi / kSampleRate;
+                    const float v = (float) (std::sin (kTwoPi * freq * t) * std::exp (-t * 5.0));
+                    bass[(size_t) i] = invertBass ? -v : v;
+                }
+
+                if (ki >= 0)
+                {
+                    const double t = (double) ki / kSampleRate;
+                    kick[(size_t) i] = (float) (std::sin (kTwoPi * freq * t) * std::exp (-t * 5.0));
+                }
+            }
+        };
+
+        beginTest ("Inverted bass recommends polarity invert");
+        {
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1000, 1000, 70.0, true);
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expect (r.enoughSignal);
+            expect (r.bassPolarityInvert);
+            expectGreaterThan (r.afterMatchPercent, r.beforeMatchPercent + 40.0f);
+            expect (PhaseFixEngine::canApply (r));
+        }
+
+        beginTest ("Bass too early recommends positive bass delay");
+        {
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1000, 1040, 65.0);
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expectGreaterThan (r.bassDelayMs, 0.5f);
+            expectLessThan (r.bassDelayMs, 1.2f);
+            expectGreaterThan (r.afterMatchPercent, 95.0f);
+            expect (! r.requiresTimelineMove);
+        }
+
+        beginTest ("Already aligned does not recommend unnecessary apply");
+        {
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1000, 1000, 80.0);
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expectGreaterThan (r.beforeMatchPercent, 85.0f);
+            expectLessThan (r.improvementPercent, 5.0f);
+            expect (! PhaseFixEngine::canApply (r));
+        }
+
+        beginTest ("Phase offset recommends phase filter when useful");
+        {
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+
+            AllpassPhaseRotator rot;
+            rot.prepare (kSampleRate, 4);
+            rot.setParameters (80.0f, 2.0f);
+
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const double fadeIn = std::min (1.0, t * 200.0);
+                const double env = fadeIn * std::exp (-t * 0.4);
+                const float x = (float) (env * (std::sin (kTwoPi * 50.0 * t)
+                                      + 0.8 * std::sin (kTwoPi * 90.0 * t + 0.3)
+                                      + 0.6 * std::sin (kTwoPi * 150.0 * t + 1.1)));
+                bass[(size_t) i] = x;
+                kick[(size_t) i] = rot.processSample (x);
+            }
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            const auto phaseDebug = "phase result: before=" + juce::String (r.beforeMatchPercent, 2)
+                                  + " after=" + juce::String (r.afterMatchPercent, 2)
+                                  + " improve=" + juce::String (r.improvementPercent, 2)
+                                  + " delay=" + juce::String (r.bassDelayMs, 2)
+                                  + " phase=" + juce::String (r.phaseFilterEnabled ? "on" : "off")
+                                  + " msg=" + r.message;
+            expect (r.valid);
+            expect (r.phaseFilterEnabled, phaseDebug);
+            expect (r.afterMatchPercent > r.beforeMatchPercent + 5.0f, phaseDebug);
+        }
+
+        beginTest ("Bass late suggests timeline movement instead of negative delay");
+        {
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1040, 1000, 70.0);
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expect (r.bassDelayMs >= 0.0f);
+            expect (r.requiresTimelineMove);
+            expectGreaterThan (r.suggestedKickMoveMs, 0.5f);
+            expect (! PhaseFixEngine::canApply (r));
+        }
+
+        beginTest ("Low signal returns enoughSignal=false");
+        {
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (! r.enoughSignal);
+            expect (! PhaseFixEngine::canApply (r));
+        }
+
+        beginTest ("High-frequency click does not dominate low-end fix");
+        {
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+            const int lag = 40;
+
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const double click = 4.0 * std::sin (kTwoPi * 5000.0 * t) * std::exp (-t * 200.0);
+                const double kickLow = std::sin (kTwoPi * 60.0 * t) * std::exp (-t * 5.0);
+                const int bi = i - lag;
+                const double bassLow = bi >= 0
+                    ? std::sin (kTwoPi * 60.0 * (double) bi / kSampleRate) * std::exp (-(double) bi / kSampleRate * 5.0)
+                    : 0.0;
+
+                kick[(size_t) i] = (float) (click + kickLow);
+                bass[(size_t) i] = (float) (click + bassLow);
+            }
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expect (r.requiresTimelineMove);
+            expectGreaterThan (r.suggestedKickMoveMs, 0.5f);
+        }
+    }
+};
+
+static PhaseFixEngineTests phaseFixEngineTestsInstance;
 
 //==============================================================================
 int main (int, char**)

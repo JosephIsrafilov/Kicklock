@@ -23,7 +23,12 @@ private:
     CorrelationDisplay correlationDisplay;
     juce::TextButton freezeButton;
     juce::TextButton analyzeButton;
+    juce::TextButton applyFixButton;
     juce::Label analyzeResultLabel;
+    juce::Label fixActionLabel;
+    juce::Label fixStatsLabel;
+    juce::Label fixSettingsLabel;
+    juce::Label fixTimelineLabel;
 
     juce::Slider timeZoomSlider;
     juce::Label timeZoomLabel;
@@ -38,6 +43,7 @@ private:
     juce::ComboBox delayInterpBox;
     juce::Label delayInterpLabel;
     juce::ToggleButton polarityInvertButton;
+    juce::ToggleButton phaseFilterEnabledButton;
     juce::Slider rotatorFreqSlider;
     juce::Label rotatorFreqLabel;
     juce::Slider rotatorQSlider;
@@ -52,6 +58,7 @@ private:
     std::unique_ptr<SliderAttachment> delayMsAttachment;
     std::unique_ptr<ComboBoxAttachment> delayInterpAttachment;
     std::unique_ptr<ButtonAttachment> polarityInvertAttachment;
+    std::unique_ptr<ButtonAttachment> phaseFilterEnabledAttachment;
     std::unique_ptr<SliderAttachment> rotatorFreqAttachment;
     std::unique_ptr<SliderAttachment> rotatorQAttachment;
     std::unique_ptr<ComboBoxAttachment> rotatorStagesAttachment;

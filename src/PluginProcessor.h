@@ -14,6 +14,7 @@
 #include "dsp/AnalyzerInstruction.h"
 #include "dsp/TransientDetector.h"
 #include "dsp/PerHitAnalyzer.h"
+#include "dsp/PhaseFixEngine.h"
 
 class KickLockAudioProcessor : public juce::AudioProcessor
 {
@@ -51,6 +52,10 @@ public:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     std::atomic<float> correlationPercent { 0.0f };
+    std::atomic<float> realtimeLowBandMatchPercent { 0.0f };
+    std::atomic<float> latestAnalyzedBeforePercent { 50.0f };
+    std::atomic<float> latestAnalyzedAfterPercent { 50.0f };
+    std::atomic<float> latestFixConfidence { 0.0f };
     ScopeFifo scopeFifo;
 
     // Runs cross-correlation over the captured raw bass/kick. Default behavior
@@ -60,11 +65,15 @@ public:
     AnalyzerInstruction analyzeAndApply (AnalyzeMode mode = AnalyzeMode::RecommendOnly);
     HitAnalysisResult analyzeLatestHit();
     int getLatestHitSequence() const noexcept;
+    PhaseFixResult analyzeFix();
+    bool applyLatestFix();
+    PhaseFixResult getLatestFixResult() const;
 
 private:
     std::atomic<float>* delayMsParam = nullptr;
     std::atomic<float>* delayInterpParam = nullptr;
     std::atomic<float>* polarityInvertParam = nullptr;
+    std::atomic<float>* phaseFilterEnabledParam = nullptr;
     std::atomic<float>* rotatorFreqParam = nullptr;
     std::atomic<float>* rotatorQParam = nullptr;
     std::atomic<float>* rotatorStagesParam = nullptr;
@@ -80,6 +89,13 @@ private:
     TransientDetector transientDetector;
     HitCaptureBuffer hitCapture;
     HitAnalysisHistory hitHistory;
+    PhaseFixResult latestFixResult;
+
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> phaseFilterWet;
+    juce::dsp::IIR::Filter<float> realtimeMainHighPass;
+    juce::dsp::IIR::Filter<float> realtimeMainLowPass;
+    juce::dsp::IIR::Filter<float> realtimeKickHighPass;
+    juce::dsp::IIR::Filter<float> realtimeKickLowPass;
 
     int lastInterpChoice = 0;
     int lastStageChoice = 0;
