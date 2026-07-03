@@ -2,16 +2,16 @@
 
 namespace
 {
-    constexpr auto scopeBackground = juce::Colour (0xff101418);
-    constexpr auto scopeBorder     = juce::Colour (0xff27313a);
-    constexpr auto gridMajor       = juce::Colour (0xff2d3943);
-    constexpr auto gridMinor       = juce::Colour (0xff1c252d);
-    constexpr auto labelColour     = juce::Colour (0xff8b99a6);
-    constexpr auto bassColour      = juce::Colour (0xff2dd4bf);
-    constexpr auto kickColour      = juce::Colour (0xfff97316);
-    constexpr auto constructive    = juce::Colour (0xff47c972);
-    constexpr auto destructive     = juce::Colour (0xffff5d5d);
-    constexpr auto traceColour     = juce::Colour (0xfff5f7fa);
+    const auto scopeBackground = juce::Colour (0xff101418);
+    const auto scopeBorder     = juce::Colour (0xff27313a);
+    const auto gridMajor       = juce::Colour (0xff2d3943);
+    const auto gridMinor       = juce::Colour (0xff1c252d);
+    const auto labelColour     = juce::Colour (0xff8b99a6);
+    const auto bassColour      = juce::Colour (0xff2dd4bf);
+    const auto kickColour      = juce::Colour (0xfff97316);
+    const auto constructive    = juce::Colour (0xff47c972);
+    const auto destructive     = juce::Colour (0xffff5d5d);
+    const auto traceColour     = juce::Colour (0xfff5f7fa);
 
     float chooseMajorStepMs (float visibleWindowMs) noexcept
     {
@@ -274,10 +274,13 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
         const float x = bounds.getX() + (float) i * xStep;
         const float bass = juce::jlimit (-1.0f, 1.0f, visibleMainBuffer[(size_t) i] * gain);
         const float kick = juce::jlimit (-1.0f, 1.0f, visibleSideBuffer[(size_t) i] * gain);
+        const float combined = juce::jlimit (-1.0f, 1.0f,
+                                             0.5f * (visibleMainBuffer[(size_t) i]
+                                                     + visibleSideBuffer[(size_t) i]) * gain);
         const float overlap = juce::jmin (std::abs (bass), std::abs (kick));
         const float signedOverlap = (bass >= 0.0f ? 1.0f : -1.0f) * overlap;
         const float overlapY = midY - signedOverlap * halfHeight;
-        const float bassY = midY - bass * halfHeight;
+        const float combinedY = midY - combined * halfHeight;
 
         const auto relation = classifyPhaseRelation (visibleMainBuffer[(size_t) i],
                                                      visibleSideBuffer[(size_t) i]);
@@ -289,9 +292,9 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
         }
 
         if (i == 0)
-            whiteTrace.startNewSubPath (x, bassY);
+            whiteTrace.startNewSubPath (x, combinedY);
         else
-            whiteTrace.lineTo (x, bassY);
+            whiteTrace.lineTo (x, combinedY);
     }
 
     g.setColour (traceColour.withAlpha (0.96f));
@@ -429,9 +432,9 @@ void Oscilloscope::drawTransientMarkers (juce::Graphics& g,
     g.drawLine (kickX, bounds.getY(), kickX, bounds.getBottom(), 1.0f);
     drawMarkerTriangle (g, kickX, bounds.getY() + 10.0f, kickColour);
 
-    g.setColour (traceColour.withAlpha (0.7f));
+    g.setColour (bassColour.withAlpha (0.7f));
     g.drawLine (bassX, bounds.getY(), bassX, bounds.getBottom(), 1.0f);
-    drawMarkerTriangle (g, bassX, bounds.getY() + 22.0f, traceColour);
+    drawMarkerTriangle (g, bassX, bounds.getY() + 22.0f, bassColour);
 
     g.setColour (juce::Colours::white.withAlpha (0.92f));
     g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
@@ -473,12 +476,12 @@ void Oscilloscope::rebuildVisibleBuffers (int visible)
 
     for (int i = 0; i < visible; ++i)
     {
-        const int historyIndex = resolveDisplayHistoryIndex (writeIndex, historyLength,
-                                                             firstVisible, i,
-                                                             visualOffsetSamples,
-                                                             decimationFactor);
-        visibleMainBuffer[(size_t) i] = mainHistory[(size_t) historyIndex];
-        visibleSideBuffer[(size_t) i] = sidechainHistory[(size_t) historyIndex];
+        const auto indices = resolveRelativeDisplayHistoryIndices (writeIndex, historyLength,
+                                                                   firstVisible, i,
+                                                                   visualOffsetSamples,
+                                                                   decimationFactor);
+        visibleMainBuffer[(size_t) i] = mainHistory[(size_t) indices.bassIndex];
+        visibleSideBuffer[(size_t) i] = sidechainHistory[(size_t) indices.kickIndex];
     }
 }
 

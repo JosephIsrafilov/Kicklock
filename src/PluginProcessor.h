@@ -100,7 +100,7 @@ private:
 
     // Rolling capture of raw (pre-processing) mono bass/kick for the Analyze
     // button. Sized in prepareToPlay (~2 s). Written on the audio thread,
-    // snapshotted on the message thread.
+    // then copied into a published buffer that the message thread snapshots.
     RawCaptureBuffer rawCapture;
     TransientDetector transientDetector;
     HitCaptureBuffer hitCapture;

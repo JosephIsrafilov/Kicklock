@@ -5,13 +5,13 @@
 
 namespace
 {
-    constexpr auto appBackground   = juce::Colour (0xff0c1014);
-    constexpr auto panelBackground = juce::Colour (0xff141a20);
-    constexpr auto panelBorder     = juce::Colour (0xff27313a);
-    constexpr auto accentTeal      = juce::Colour (0xff2dd4bf);
-    constexpr auto accentOrange    = juce::Colour (0xfff97316);
-    constexpr auto softText        = juce::Colour (0xff93a1ad);
-    constexpr auto strongText      = juce::Colour (0xffeef2f7);
+    const auto appBackground   = juce::Colour (0xff0c1014);
+    const auto panelBackground = juce::Colour (0xff141a20);
+    const auto panelBorder     = juce::Colour (0xff27313a);
+    const auto accentTeal      = juce::Colour (0xff2dd4bf);
+    const auto accentOrange    = juce::Colour (0xfff97316);
+    const auto softText        = juce::Colour (0xff93a1ad);
+    const auto strongText      = juce::Colour (0xffeef2f7);
 
     void styleCaptionLabel (juce::Label& label, const juce::String& text)
     {
@@ -524,7 +524,7 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
                                         ? "Quality: Waiting For Signal"
                                         : "Quality: Monitoring",
                                 juce::dontSendNotification);
-        fixStatsLabel.setText ("Original --   Predicted --   Verified --   Current "
+        fixStatsLabel.setText ("Analyze Score -- -> -- | Live 30-120 "
                                + juce::String ((int) std::round (currentMatch)) + "%",
                                juce::dontSendNotification);
         fixConfidenceLabel.setText ("Confidence --", juce::dontSendNotification);
@@ -542,15 +542,16 @@ void KickLockAudioProcessorEditor::updateStatusLabels()
                                 juce::dontSendNotification);
 
         juce::String matches;
-        matches << "Original " << juce::String ((int) std::round (audioProcessor.latestAnalyzedBeforePercent.load())) << "%"
-                << "   Predicted " << juce::String ((int) std::round (audioProcessor.latestAnalyzedAfterPercent.load())) << "%";
+        matches << "Analyze Score "
+                << juce::String ((int) std::round (audioProcessor.latestAnalyzedBeforePercent.load())) << "% -> "
+                << juce::String ((int) std::round (audioProcessor.latestAnalyzedAfterPercent.load())) << "%";
         const auto verified = audioProcessor.latestVerifiedAfterPercent.load();
         if (verified >= 0.0f)
-            matches << "   Verified " << juce::String ((int) std::round (verified)) << "%";
+            matches << " | Verified " << juce::String ((int) std::round (verified)) << "%";
         else
-            matches << "   Verified --";
+            matches << " | Verified --";
         matches
-                << "   Current " << juce::String ((int) std::round (currentMatch)) << "%";
+                << " | Live 30-120 " << juce::String ((int) std::round (currentMatch)) << "%";
         fixStatsLabel.setText (matches, juce::dontSendNotification);
 
         juce::String confidenceText;

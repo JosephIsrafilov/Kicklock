@@ -35,6 +35,12 @@ struct ScopePeakMarkers
     bool valid = false;
 };
 
+struct DisplayHistoryIndices
+{
+    int bassIndex = 0;
+    int kickIndex = 0;
+};
+
 inline ScopeViewMode scopeViewModeFromChoiceIndex (int index) noexcept
 {
     switch (index)
@@ -183,6 +189,21 @@ inline int resolveDisplayHistoryIndex (int writeIndex,
     const int displayOffset = visualOffsetToDisplaySamples (visualOffsetSamples, decimationFactor);
     return wrapHistoryIndex (writeIndex + firstVisibleSample + visibleIndex + displayOffset,
                              historyLength);
+}
+
+inline DisplayHistoryIndices resolveRelativeDisplayHistoryIndices (int writeIndex,
+                                                                   int historyLength,
+                                                                   int firstVisibleSample,
+                                                                   int visibleIndex,
+                                                                   int visualOffsetSamples,
+                                                                   int decimationFactor) noexcept
+{
+    const int baseIndex = wrapHistoryIndex (writeIndex + firstVisibleSample + visibleIndex,
+                                            historyLength);
+    const int displayOffset = visualOffsetToDisplaySamples (visualOffsetSamples, decimationFactor);
+
+    return { wrapHistoryIndex (baseIndex + displayOffset, historyLength),
+             baseIndex };
 }
 
 inline ScopePeakMarkers findScopePeakMarkers (const float* bass,

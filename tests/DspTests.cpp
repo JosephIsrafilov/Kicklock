@@ -14,6 +14,8 @@
 #include "PerHitAnalyzer.h"
 #include "PhaseFixEngine.h"
 #include "PluginProcessor.h"
+#include "util/HitCaptureBuffer.h"
+#include "util/RawCaptureBuffer.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/StatusHelpers.h"
 
@@ -830,10 +832,105 @@ public:
             expectEquals (visualOffsetToDisplaySamples (24, 4), 6);
             expectEquals (shifted, expected);
         }
+
+        beginTest ("Visual offset shifts bass relative to kick only");
+        {
+            const auto unshifted = resolveRelativeDisplayHistoryIndices (100, 2048, 1800, 12, 0, 4);
+            const auto shifted = resolveRelativeDisplayHistoryIndices (100, 2048, 1800, 12, 24, 4);
+
+            expectEquals (shifted.kickIndex, unshifted.kickIndex);
+            expectEquals (shifted.bassIndex, wrapHistoryIndex (unshifted.bassIndex + 6, 2048));
+            expectEquals (shifted.bassIndex - shifted.kickIndex, 6);
+        }
+
+        beginTest ("Visual offset wraps bass index without moving kick index");
+        {
+            const auto unshifted = resolveRelativeDisplayHistoryIndices (2038, 2048, 0, 8, 0, 2);
+            const auto shifted = resolveRelativeDisplayHistoryIndices (2038, 2048, 0, 8, 12, 2);
+
+            expectEquals (shifted.kickIndex, unshifted.kickIndex);
+            expectEquals (shifted.bassIndex, wrapHistoryIndex (unshifted.bassIndex + 6, 2048));
+        }
     }
 };
 
 static ScopeVisualTests scopeVisualTestsInstance;
+
+//==============================================================================
+class CaptureBufferTests : public juce::UnitTest
+{
+public:
+    CaptureBufferTests() : juce::UnitTest ("CaptureBuffers", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Raw snapshot returns only filled samples before ring is full");
+        {
+            RawCaptureBuffer buffer;
+            buffer.prepare (8);
+
+            for (int i = 0; i < 3; ++i)
+                buffer.push ((float) (10 + i), (float) (20 + i));
+
+            buffer.publishSnapshot();
+
+            std::vector<float> bass, kick;
+            const int count = buffer.snapshot (bass, kick);
+
+            expectEquals (count, 3);
+            expectEquals ((int) bass.size(), 3);
+            expectEquals ((int) kick.size(), 3);
+            expectWithinAbsoluteError (bass[0], 10.0f, 1.0e-7f);
+            expectWithinAbsoluteError (bass[2], 12.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[0], 20.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[2], 22.0f, 1.0e-7f);
+        }
+
+        beginTest ("Raw snapshot stays chronological after ring wraps");
+        {
+            RawCaptureBuffer buffer;
+            buffer.prepare (4);
+
+            for (int i = 0; i < 6; ++i)
+                buffer.push ((float) i, (float) (100 + i));
+
+            buffer.publishSnapshot();
+
+            std::vector<float> bass, kick;
+            const int count = buffer.snapshot (bass, kick);
+
+            expectEquals (count, 4);
+            expectWithinAbsoluteError (bass[0], 2.0f, 1.0e-7f);
+            expectWithinAbsoluteError (bass[3], 5.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[0], 102.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[3], 105.0f, 1.0e-7f);
+        }
+
+        beginTest ("Hit snapshot returns the latest completed published window");
+        {
+            HitCaptureBuffer buffer;
+            buffer.prepare (1000.0, 2.0f, 3.0f);
+
+            buffer.pushSample (1.0f, 11.0f, false);
+            buffer.pushSample (2.0f, 12.0f, false);
+            buffer.pushSample (3.0f, 13.0f, true);
+            buffer.pushSample (4.0f, 14.0f, false);
+            buffer.pushSample (5.0f, 15.0f, false);
+
+            std::vector<float> bass, kick;
+            const int count = buffer.snapshotLatest (bass, kick);
+
+            expectEquals (count, 5);
+            expectEquals (buffer.getSequence(), 1);
+            expectWithinAbsoluteError (bass[0], 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (bass[4], 5.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[0], 11.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[4], 15.0f, 1.0e-7f);
+        }
+    }
+};
+
+static CaptureBufferTests captureBufferTestsInstance;
 
 //==============================================================================
 class StatusHelperTests : public juce::UnitTest

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <vector>
@@ -19,8 +20,10 @@ public:
         preKick.assign ((size_t) preRollSamples, 0.0f);
         captureBass.assign ((size_t) windowSamples, 0.0f);
         captureKick.assign ((size_t) windowSamples, 0.0f);
-        latestBass.assign ((size_t) windowSamples, 0.0f);
-        latestKick.assign ((size_t) windowSamples, 0.0f);
+        for (auto& buffer : publishedBass)
+            buffer.assign ((size_t) windowSamples, 0.0f);
+        for (auto& buffer : publishedKick)
+            buffer.assign ((size_t) windowSamples, 0.0f);
 
         reset();
     }
@@ -31,14 +34,17 @@ public:
         std::fill (preKick.begin(), preKick.end(), 0.0f);
         std::fill (captureBass.begin(), captureBass.end(), 0.0f);
         std::fill (captureKick.begin(), captureKick.end(), 0.0f);
-        std::fill (latestBass.begin(), latestBass.end(), 0.0f);
-        std::fill (latestKick.begin(), latestKick.end(), 0.0f);
+        for (auto& buffer : publishedBass)
+            std::fill (buffer.begin(), buffer.end(), 0.0f);
+        for (auto& buffer : publishedKick)
+            std::fill (buffer.begin(), buffer.end(), 0.0f);
+        publishedSamples = {};
 
         preWriteIndex = 0;
         captureIndex = 0;
         capturing = false;
         sequence.store (0, std::memory_order_relaxed);
-        latestSamples.store (0, std::memory_order_relaxed);
+        publishedSlot.store (0, std::memory_order_release);
     }
 
     void pushSample (float bassValue, float kickValue, bool transientDetected) noexcept
@@ -74,7 +80,8 @@ public:
 
     int snapshotLatest (std::vector<float>& bassOut, std::vector<float>& kickOut) const
     {
-        const int samples = latestSamples.load (std::memory_order_acquire);
+        const int slot = publishedSlot.load (std::memory_order_acquire);
+        const int samples = publishedSamples[(size_t) slot];
         if (samples <= 0)
             return 0;
 
@@ -83,8 +90,8 @@ public:
 
         for (int i = 0; i < samples; ++i)
         {
-            bassOut[(size_t) i] = latestBass[(size_t) i];
-            kickOut[(size_t) i] = latestKick[(size_t) i];
+            bassOut[(size_t) i] = publishedBass[(size_t) slot][(size_t) i];
+            kickOut[(size_t) i] = publishedKick[(size_t) slot][(size_t) i];
         }
 
         return samples;
@@ -106,13 +113,16 @@ private:
 
     void finishCapture() noexcept
     {
+        const int slot = 1 - publishedSlot.load (std::memory_order_acquire);
+
         for (int i = 0; i < windowSamples; ++i)
         {
-            latestBass[(size_t) i] = captureBass[(size_t) i];
-            latestKick[(size_t) i] = captureKick[(size_t) i];
+            publishedBass[(size_t) slot][(size_t) i] = captureBass[(size_t) i];
+            publishedKick[(size_t) slot][(size_t) i] = captureKick[(size_t) i];
         }
 
-        latestSamples.store (windowSamples, std::memory_order_release);
+        publishedSamples[(size_t) slot] = windowSamples;
+        publishedSlot.store (slot, std::memory_order_release);
         sequence.fetch_add (1, std::memory_order_acq_rel);
 
         captureIndex = 0;
@@ -130,8 +140,9 @@ private:
     std::vector<float> preKick;
     std::vector<float> captureBass;
     std::vector<float> captureKick;
-    mutable std::vector<float> latestBass;
-    mutable std::vector<float> latestKick;
+    std::array<std::vector<float>, 2> publishedBass;
+    std::array<std::vector<float>, 2> publishedKick;
+    std::array<int, 2> publishedSamples {};
     std::atomic<int> sequence { 0 };
-    std::atomic<int> latestSamples { 0 };
+    std::atomic<int> publishedSlot { 0 };
 };
