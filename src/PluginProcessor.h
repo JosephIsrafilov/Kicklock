@@ -6,10 +6,14 @@
 
 #include "util/ScopeFifo.h"
 #include "util/RawCaptureBuffer.h"
+#include "util/HitCaptureBuffer.h"
 #include "dsp/CorrelationMeter.h"
 #include "dsp/FractionalDelayLine.h"
 #include "dsp/AllpassPhaseRotator.h"
 #include "dsp/AlignmentAnalyzer.h"
+#include "dsp/AnalyzerInstruction.h"
+#include "dsp/TransientDetector.h"
+#include "dsp/PerHitAnalyzer.h"
 
 class KickLockAudioProcessor : public juce::AudioProcessor
 {
@@ -49,10 +53,13 @@ public:
     std::atomic<float> correlationPercent { 0.0f };
     ScopeFifo scopeFifo;
 
-    // Runs cross-correlation over the captured raw bass/kick and applies the
-    // best delay + polarity to the parameters. Message thread only (allocates).
-    // Returns the recommendation and before/after match for the UI to report.
-    AlignmentResult analyzeAndApply();
+    // Runs cross-correlation over the captured raw bass/kick. Default behavior
+    // is recommend-only; AutoApplySafe may change bass-path parameters, but
+    // never delays or otherwise processes the sidechain/kick reference.
+    // Message thread only (allocates).
+    AnalyzerInstruction analyzeAndApply (AnalyzeMode mode = AnalyzeMode::RecommendOnly);
+    HitAnalysisResult analyzeLatestHit();
+    int getLatestHitSequence() const noexcept;
 
 private:
     std::atomic<float>* delayMsParam = nullptr;
@@ -62,7 +69,7 @@ private:
     std::atomic<float>* rotatorQParam = nullptr;
     std::atomic<float>* rotatorStagesParam = nullptr;
 
-    std::array<FractionalDelayLine, 2> mainDelay, sidechainDelay;
+    std::array<FractionalDelayLine, 2> mainDelay;
     std::array<AllpassPhaseRotator, 2> rotator;
     CorrelationMeter correlationMeter;
 
@@ -70,6 +77,9 @@ private:
     // button. Sized in prepareToPlay (~2 s). Written on the audio thread,
     // snapshotted on the message thread.
     RawCaptureBuffer rawCapture;
+    TransientDetector transientDetector;
+    HitCaptureBuffer hitCapture;
+    HitAnalysisHistory hitHistory;
 
     int lastInterpChoice = 0;
     int lastStageChoice = 0;

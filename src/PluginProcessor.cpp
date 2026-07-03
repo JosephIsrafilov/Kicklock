@@ -22,8 +22,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "delayMs", 1 },
-        "Delay",
-        juce::NormalisableRange<float> (-50.0f, 50.0f, 0.01f),
+        "Audio Bass Delay",
+        juce::NormalisableRange<float> (0.0f, 50.0f, 0.01f),
         0.0f));
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (
@@ -63,7 +63,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     for (int ch = 0; ch < 2; ++ch)
     {
         mainDelay[(size_t) ch].prepare (sampleRate, 50.0f);
-        sidechainDelay[(size_t) ch].prepare (sampleRate, 50.0f);
         rotator[(size_t) ch].prepare (sampleRate, 2);
     }
 
@@ -72,6 +71,13 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
 
     // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
     rawCapture.prepare ((int) (sampleRate * 2.0));
+    transientDetector.prepare (sampleRate);
+    transientDetector.setThreshold (0.004f);
+    transientDetector.setMinimumEnergyGate (0.0004f);
+    transientDetector.setAttackReleaseMs (2.0f, 60.0f);
+    transientDetector.setHoldoffMs (90.0f);
+    hitCapture.prepare (sampleRate, 25.0f, 180.0f);
+    hitHistory.reset();
 
     // Show roughly one second of audio across the 2048-sample scope buffer:
     // push 1 in N samples so the trace scrolls slowly enough to follow.
@@ -151,6 +157,8 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const float kickMono = scCh > 0 ? sSum / (float) scCh : 0.0f;
 
             rawCapture.push (bassMono, kickMono);
+            const bool transientDetected = transientDetector.processSample (kickMono);
+            hitCapture.pushSample (bassMono, kickMono, transientDetected);
         }
     }
 
@@ -161,29 +169,15 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             mainBuffer.applyGain (ch, 0, numSamples, -1.0f);
     }
 
-    // 2) Fractional delay: positive delayMs delays the main bus (sidechain
-    // acts as the timing reference), negative delayMs delays the sidechain.
-    const float delayMs = delayMsParam->load();
-    const double delaySamples = std::abs (delayMs) / 1000.0 * getSampleRate();
+    // 2) Fractional delay on the main/bass bus only. The sidechain/kick is a
+    // reference signal in normal DAW routing, not audible audio this plugin can
+    // move. Analyzer results that would require moving the kick are reported as
+    // timeline/edit recommendations instead of being applied here.
+    const float delayMs = juce::jmax (0.0f, delayMsParam->load());
+    const double delaySamples = delayMs / 1000.0 * getSampleRate();
 
     for (int ch = 0; ch < 2; ++ch)
-    {
-        if (delayMs > 0.0f)
-        {
-            mainDelay[(size_t) ch].setDelaySamples ((float) delaySamples);
-            sidechainDelay[(size_t) ch].setDelaySamples (0.0f);
-        }
-        else if (delayMs < 0.0f)
-        {
-            sidechainDelay[(size_t) ch].setDelaySamples ((float) delaySamples);
-            mainDelay[(size_t) ch].setDelaySamples (0.0f);
-        }
-        else
-        {
-            mainDelay[(size_t) ch].setDelaySamples (0.0f);
-            sidechainDelay[(size_t) ch].setDelaySamples (0.0f);
-        }
-    }
+        mainDelay[(size_t) ch].setDelaySamples ((float) delaySamples);
 
     // Only switch interpolation type on an actual change: it resets the
     // allpass interpolator's internal state, which would otherwise glitch
@@ -194,10 +188,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         const auto type = interpChoice == 0 ? InterpolationType::Linear : InterpolationType::Allpass;
 
         for (int ch = 0; ch < 2; ++ch)
-        {
             mainDelay[(size_t) ch].setInterpolationType (type);
-            sidechainDelay[(size_t) ch].setInterpolationType (type);
-        }
 
         lastInterpChoice = interpChoice;
     }
@@ -205,13 +196,6 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
         for (int i = 0; i < numSamples; ++i)
             mainBuffer.setSample (ch, i, mainDelay[(size_t) ch].processSample (mainBuffer.getSample (ch, i)));
-
-    if (hasSidechain)
-    {
-        for (int ch = 0; ch < sidechainBuffer.getNumChannels(); ++ch)
-            for (int i = 0; i < numSamples; ++i)
-                sidechainBuffer.setSample (ch, i, sidechainDelay[(size_t) ch].processSample (sidechainBuffer.getSample (ch, i)));
-    }
 
     // 3) Allpass phase rotator on the main bus.
     const int stageChoice = (int) rotatorStagesParam->load();
@@ -355,7 +339,7 @@ void KickLockAudioProcessor::setStateInformation (const void* data, int sizeInBy
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
-AlignmentResult KickLockAudioProcessor::analyzeAndApply()
+AnalyzerInstruction KickLockAudioProcessor::analyzeAndApply (AnalyzeMode mode)
 {
     // Snapshot the raw capture (message thread; allocation is fine here).
     std::vector<float> bass, kick;
@@ -363,14 +347,18 @@ AlignmentResult KickLockAudioProcessor::analyzeAndApply()
 
     const auto result = AlignmentAnalyzer::analyze (bass.data(), kick.data(), n,
                                                     getSampleRate(), 50.0f);
+    const auto instruction = AnalyzerInstructionBuilder::build (result, mode);
 
-    if (! result.valid)
-        return result;
+    if (! result.valid || mode != AnalyzeMode::AutoApplySafe
+        || instruction.action == AlignmentAction::LowConfidence)
+        return instruction;
 
-    // Auto-apply: write through the parameters so both the sliders and the host
-    // update. setValueNotifyingHost takes a normalised [0,1] value.
-    if (auto* delayParam = apvts.getParameter ("delayMs"))
-        delayParam->setValueNotifyingHost (delayParam->convertTo0to1 (result.delayMs));
+    // AutoApplySafe writes through parameters so both the sliders and the host
+    // update. Only bass-path changes are legal here. Negative analyzer delay
+    // means "move/delay the kick", so it remains a recommendation.
+    if (result.delayMs > 0.0f)
+        if (auto* delayParam = apvts.getParameter ("delayMs"))
+            delayParam->setValueNotifyingHost (delayParam->convertTo0to1 (result.delayMs));
 
     if (auto* polParam = apvts.getParameter ("polarityInvert"))
         polParam->setValueNotifyingHost (result.invertPolarity ? 1.0f : 0.0f);
@@ -392,7 +380,40 @@ AlignmentResult KickLockAudioProcessor::analyzeAndApply()
         }
     }
 
+    return instruction;
+}
+
+HitAnalysisResult KickLockAudioProcessor::analyzeLatestHit()
+{
+    std::vector<float> bass, kick;
+    const int n = hitCapture.snapshotLatest (bass, kick);
+
+    if (n <= 0)
+    {
+        HitAnalysisResult result;
+        result.instruction.action = AlignmentAction::NotEnoughSignal;
+        result.instruction.message = "Waiting for detected kick hit.";
+        return result;
+    }
+
+    auto result = PerHitAnalyzer::analyzeHit (bass.data(), kick.data(), n,
+                                              getSampleRate(), hitCapture.getSequence());
+
+    if (! result.valid)
+        return result;
+
+    hitHistory.push (result);
+
+    result.instruction.message << " | hit avg "
+                               << juce::String ((int) std::round (hitHistory.getRollingMatchPercent())) << "%"
+                               << " over " << juce::String (hitHistory.getCount());
+
     return result;
+}
+
+int KickLockAudioProcessor::getLatestHitSequence() const noexcept
+{
+    return hitCapture.getSequence();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

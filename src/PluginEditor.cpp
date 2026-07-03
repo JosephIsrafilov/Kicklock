@@ -22,35 +22,29 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     };
     addAndMakeVisible (freezeButton);
 
-    // Analyze inspects the raw kick + bass, then auto-applies the delay and
-    // polarity that best line them up. The result line reports what it did.
+    // Analyze inspects the raw kick + bass and reports the safest correction.
+    // Default mode is recommendation-only: the sidechain is a reference, not
+    // audible kick audio this plugin can move.
     analyzeButton.setButtonText ("Analyze");
     analyzeButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xfff97316));
-    analyzeButton.setTooltip ("Measure kick vs bass and auto-apply the best delay + polarity.");
+    analyzeButton.setTooltip ("Measure kick vs bass and recommend bass delay, polarity, or timeline edits.");
     analyzeButton.onClick = [this]
     {
-        const auto r = audioProcessor.analyzeAndApply();
+        const auto hit = audioProcessor.analyzeLatestHit();
 
-        if (! r.valid)
+        if (hit.valid)
         {
-            analyzeResultLabel.setText ("Analyze: needs kick + bass playing on both inputs.",
+            analyzeResultLabel.setText ("Latest hit: " + hit.instruction.message,
                                         juce::dontSendNotification);
             return;
         }
 
-        juce::String msg;
-        msg << "Delay " << (r.delayMs >= 0.0f ? "+" : "") << juce::String (r.delayMs, 2) << " ms";
-        msg << "  ·  Pol " << (r.invertPolarity ? "flip" : "keep");
-        if (r.adjustRotator)
-            msg << "  ·  Rot " << juce::String ((int) std::round (r.rotatorFreqHz)) << "Hz/Q"
-                << juce::String (r.rotatorQ, 1) << "/" << juce::String (r.rotatorStages) << "st";
-        msg << "  ·  match " << juce::String ((int) std::round (r.beforeMatch))
-            << "% -> "       << juce::String ((int) std::round (r.afterMatch)) << "%";
-        analyzeResultLabel.setText (msg, juce::dontSendNotification);
+        const auto instruction = audioProcessor.analyzeAndApply();
+        analyzeResultLabel.setText ("Capture: " + instruction.message, juce::dontSendNotification);
     };
     addAndMakeVisible (analyzeButton);
 
-    analyzeResultLabel.setText ("Press Analyze to auto-align kick and bass.",
+    analyzeResultLabel.setText ("Press Analyze for latest-hit kick/bass alignment.",
                                 juce::dontSendNotification);
     analyzeResultLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
     analyzeResultLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9ca3af));
@@ -108,10 +102,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     delayMsSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     delayMsSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
     delayMsSlider.setTextValueSuffix (" ms");
-    delayMsSlider.setTooltip ("Time-align the bass against the kick. Positive delays the bass.");
+    delayMsSlider.setTooltip ("Audio delay on the bass/main path only. Kick timing changes are shown as recommendations.");
     addAndMakeVisible (delayMsSlider);
 
-    delayMsLabel.setText ("Delay", juce::dontSendNotification);
+    delayMsLabel.setText ("Bass Delay", juce::dontSendNotification);
     addAndMakeVisible (delayMsLabel);
 
     // Interpolation: ComboBox item IDs are 1-based (param index 0 -> ID 1).
@@ -122,7 +116,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     delayInterpLabel.setText ("Interpolation", juce::dontSendNotification);
     addAndMakeVisible (delayInterpLabel);
 
-    polarityInvertButton.setButtonText ("Invert Polarity");
+    polarityInvertButton.setButtonText ("Invert Bass Polarity");
     polarityInvertButton.setTooltip ("Flip the bass polarity 180 degrees.");
     addAndMakeVisible (polarityInvertButton);
 

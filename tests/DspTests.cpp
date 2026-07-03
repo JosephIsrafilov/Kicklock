@@ -8,6 +8,10 @@
 #include "FractionalDelayLine.h"
 #include "AllpassPhaseRotator.h"
 #include "AlignmentAnalyzer.h"
+#include "AnalyzerInstruction.h"
+#include "TransientDetector.h"
+#include "MultiBandCorrelation.h"
+#include "PerHitAnalyzer.h"
 
 namespace
 {
@@ -187,10 +191,12 @@ public:
             return (float) (std::sin (kTwoPi * freq * t) * std::exp (-t * 6.0));
         };
 
-        beginTest ("Recovers a known lag: kick leads bass -> negative delay (delay the kick)");
+        beginTest ("Recovers a known lag: kick leads bass -> negative signed recommendation");
         {
             // Bass event starts 40 samples LATER than the kick event. The kick
-            // leads, so the fix is to delay the kick => negative delayMs.
+            // leads, so the analyzer returns a negative signed timing
+            // recommendation. The processor/UI layer must not process the
+            // sidechain with that value.
             const int lag = 40;
             std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
             for (int i = 0; i < n; ++i)
@@ -326,6 +332,156 @@ public:
 };
 
 static AlignmentAnalyzerTests alignmentAnalyzerTestsInstance;
+
+//==============================================================================
+class AnalyzerInstructionTests : public juce::UnitTest
+{
+public:
+    AnalyzerInstructionTests() : juce::UnitTest ("AnalyzerInstruction", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Negative analyzer delay becomes move-kick instruction");
+        {
+            AlignmentResult result;
+            result.valid = true;
+            result.delayMs = -1.25f;
+            result.beforeMatch = 45.0f;
+            result.afterMatch = 96.0f;
+
+            const auto instruction = AnalyzerInstructionBuilder::build (result);
+
+            expectEquals ((int) instruction.action, (int) AlignmentAction::RecommendMoveKick);
+            expectWithinAbsoluteError (instruction.delayMs, -1.25f, 0.001f);
+            expect (instruction.message.containsIgnoreCase ("move kick later"));
+        }
+
+        beginTest ("Positive analyzer delay can be applied as bass delay");
+        {
+            AlignmentResult result;
+            result.valid = true;
+            result.delayMs = 2.5f;
+            result.beforeMatch = 50.0f;
+            result.afterMatch = 98.0f;
+
+            const auto instruction = AnalyzerInstructionBuilder::build (result);
+
+            expectEquals ((int) instruction.action, (int) AlignmentAction::ApplyBassDelay);
+            expectWithinAbsoluteError (instruction.delayMs, 2.5f, 0.001f);
+            expect (instruction.message.containsIgnoreCase ("delay bass"));
+        }
+
+        beginTest ("Silence becomes waiting instruction");
+        {
+            AlignmentResult result;
+            const auto instruction = AnalyzerInstructionBuilder::build (result);
+
+            expectEquals ((int) instruction.action, (int) AlignmentAction::NotEnoughSignal);
+            expectEquals (instruction.confidence, 0.0f);
+            expect (instruction.message.containsIgnoreCase ("waiting"));
+        }
+    }
+};
+
+static AnalyzerInstructionTests analyzerInstructionTestsInstance;
+
+//==============================================================================
+class Stage2AnalysisTests : public juce::UnitTest
+{
+public:
+    Stage2AnalysisTests() : juce::UnitTest ("Stage2Analysis", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Transient detector gates repeated hits during holdoff");
+        {
+            TransientDetector detector;
+            detector.prepare (1000.0);
+            detector.setThreshold (0.01f);
+            detector.setMinimumEnergyGate (0.005f);
+            detector.setAttackReleaseMs (1.0f, 20.0f);
+            detector.setHoldoffMs (100.0f);
+
+            int detections = 0;
+            for (int i = 0; i < 500; ++i)
+            {
+                const bool isHit = i == 50 || i == 80 || i == 220;
+                if (detector.processSample (isHit ? 1.0f : 0.0f))
+                    ++detections;
+            }
+
+            expectEquals (detections, 2);
+        }
+
+        beginTest ("Multi-band scorer reports separate band polarity");
+        {
+            constexpr int n = 4096;
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const float low = (float) std::sin (kTwoPi * 60.0 * t);
+                const float high = (float) std::sin (kTwoPi * 150.0 * t);
+
+                bass[(size_t) i] = low + 0.5f * high;
+                kick[(size_t) i] = low - 0.5f * high;
+            }
+
+            const auto result = MultiBandCorrelation::analyze (bass.data(), kick.data(), n, kSampleRate);
+
+            expectGreaterThan (result.bands[1].correlation, 0.75f); // 50-80 Hz
+            expectLessThan (result.bands[3].correlation, -0.40f);   // 120-200 Hz
+            expectGreaterThan (result.confidence, 0.1f);
+        }
+
+        beginTest ("Per-hit analyzer can produce different delay recommendations");
+        {
+            constexpr int n = 8192;
+            constexpr int lag = 40;
+
+            auto fillHit = [] (std::vector<float>& bass, std::vector<float>& kick,
+                               int bassOffset, int kickOffset, double freq)
+            {
+                std::fill (bass.begin(), bass.end(), 0.0f);
+                std::fill (kick.begin(), kick.end(), 0.0f);
+
+                for (int i = 0; i < (int) bass.size(); ++i)
+                {
+                    const int bi = i - bassOffset;
+                    const int ki = i - kickOffset;
+
+                    if (bi >= 0)
+                    {
+                        const double t = (double) bi / kSampleRate;
+                        bass[(size_t) i] = (float) (std::sin (kTwoPi * freq * t) * std::exp (-t * 5.0));
+                    }
+
+                    if (ki >= 0)
+                    {
+                        const double t = (double) ki / kSampleRate;
+                        kick[(size_t) i] = (float) (std::sin (kTwoPi * freq * t) * std::exp (-t * 5.0));
+                    }
+                }
+            };
+
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+
+            fillHit (bass, kick, 1040, 1000, 60.0);
+            const auto first = PerHitAnalyzer::analyzeHit (bass.data(), kick.data(), n, kSampleRate, 1);
+
+            fillHit (bass, kick, 1000, 1040, 90.0);
+            const auto second = PerHitAnalyzer::analyzeHit (bass.data(), kick.data(), n, kSampleRate, 2);
+
+            expect (first.valid);
+            expect (second.valid);
+            expectLessThan (first.instruction.delayMs, -0.5f);
+            expectGreaterThan (second.instruction.delayMs, 0.5f);
+        }
+    }
+};
+
+static Stage2AnalysisTests stage2AnalysisTestsInstance;
 
 //==============================================================================
 int main (int, char**)

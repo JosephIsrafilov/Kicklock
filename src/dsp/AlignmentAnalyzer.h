@@ -22,7 +22,7 @@
 struct AlignmentResult
 {
     bool  valid          = false; // false when the low band is too quiet to judge
-    float delayMs        = 0.0f;  // recommended delay in the plugin's sign convention
+    float delayMs        = 0.0f;  // signed timing recommendation; only positive can be applied as bass delay
     bool  invertPolarity = false;
     float beforeMatch    = 50.0f; // low-band phase-match % at the current (zero) offset
     float afterMatch     = 50.0f; // low-band phase-match % after delay + polarity (+ rotator)
@@ -39,13 +39,15 @@ struct AlignmentResult
 class AlignmentAnalyzer
 {
 public:
-    // Sign convention matches the processor: a positive delayMs delays the
-    // main (bass) bus, a negative delayMs delays the sidechain (kick) bus.
+    // Sign convention: a positive delayMs means delay the main (bass) bus.
+    // A negative delayMs means the best mathematical fix is to move/delay the
+    // kick reference; the processor must report that as an instruction, not
+    // process the sidechain.
     //
     // Derivation: with c[D] = sum_n bass[n] * kick[n+D], the peak at D*>0 means
     // kick[m] ~= bass[m-D*], i.e. the bass event leads the kick, so we delay the
-    // bass (positive delayMs). D*<0 means the kick leads, so we delay the kick
-    // (negative delayMs). delayMs = D* / sampleRate * 1000.
+    // bass (positive delayMs). D*<0 means the kick leads, so the UI should
+    // recommend moving the kick later by abs(delayMs). delayMs = D* / sampleRate * 1000.
     static AlignmentResult analyze (const float* bass,
                                     const float* kick,
                                     int numSamples,
