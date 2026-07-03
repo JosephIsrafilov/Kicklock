@@ -1,6 +1,318 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+
+namespace
+{
+    struct AnalysisHitWindow
+    {
+        int start = 0;
+        int length = 0;
+        int peak = 0;
+    };
+
+    float medianOf (std::vector<float> values)
+    {
+        if (values.empty())
+            return 0.0f;
+
+        std::sort (values.begin(), values.end());
+        const auto mid = values.size() / 2;
+        return values.size() % 2 == 0
+            ? 0.5f * (values[mid - 1] + values[mid])
+            : values[mid];
+    }
+
+    float averageOf (const std::vector<float>& values)
+    {
+        if (values.empty())
+            return 0.0f;
+
+        return std::accumulate (values.begin(), values.end(), 0.0f) / (float) values.size();
+    }
+
+    float standardDeviationOf (const std::vector<float>& values, float mean)
+    {
+        if (values.size() < 2)
+            return 0.0f;
+
+        float accum = 0.0f;
+        for (auto value : values)
+        {
+            const float delta = value - mean;
+            accum += delta * delta;
+        }
+
+        return std::sqrt (accum / (float) values.size());
+    }
+
+    InterpolationType interpolationFromChoice (float choiceValue) noexcept
+    {
+        return (int) std::lround (choiceValue) == 0 ? InterpolationType::Linear
+                                                    : InterpolationType::Allpass;
+    }
+
+    std::vector<AnalysisHitWindow> extractRecentHitWindows (const std::vector<float>& kick,
+                                                            double sampleRate,
+                                                            int maxHits = 8)
+    {
+        std::vector<AnalysisHitWindow> hits;
+        if (kick.size() < 128 || sampleRate <= 0.0)
+            return hits;
+
+        float peak = 0.0f;
+        for (auto sample : kick)
+            peak = std::max (peak, std::abs (sample));
+
+        if (peak < 1.0e-4f)
+            return hits;
+
+        const float threshold = std::max (peak * 0.25f, 1.0e-4f);
+        const int holdoffSamples = juce::jmax (1, (int) std::lround (sampleRate * 0.070));
+        const int preSamples = juce::jmax (1, (int) std::lround (sampleRate * 0.006));
+        const int postSamples = juce::jmax (64, (int) std::lround (sampleRate * 0.110));
+
+        int lastAcceptedPeak = -holdoffSamples;
+        for (int i = 1; i < (int) kick.size() - 1; ++i)
+        {
+            const float v = std::abs (kick[(size_t) i]);
+            if (v < threshold)
+                continue;
+
+            if (v < std::abs (kick[(size_t) (i - 1)]) || v < std::abs (kick[(size_t) (i + 1)]))
+                continue;
+
+            if (i - lastAcceptedPeak < holdoffSamples)
+                continue;
+
+            AnalysisHitWindow hit;
+            hit.peak = i;
+            hit.start = juce::jlimit (0, (int) kick.size() - 1, i - preSamples);
+            hit.length = std::min ((int) kick.size() - hit.start, preSamples + postSamples);
+
+            if (hit.length > 96)
+            {
+                hits.push_back (hit);
+                lastAcceptedPeak = i;
+            }
+        }
+
+        if ((int) hits.size() > maxHits)
+            hits.erase (hits.begin(), hits.end() - maxHits);
+
+        return hits;
+    }
+
+    PhaseFixResult analyzeAggregatedHits (const std::vector<float>& bass,
+                                          const std::vector<float>& kick,
+                                          const std::vector<AnalysisHitWindow>& hits,
+                                          double sampleRate,
+                                          InterpolationType delayInterpolation)
+    {
+        PhaseFixResult aggregated;
+
+        if (bass.empty() || kick.empty())
+        {
+            PhaseFixEngine::updateDerivedResultFields (aggregated);
+            return aggregated;
+        }
+
+        if (hits.empty())
+        {
+            aggregated = PhaseFixEngine::analyze (bass.data(), kick.data(), (int) bass.size(),
+                                                  sampleRate, PhaseFixEngine::defaultAutoFixMaxDelayMs,
+                                                  delayInterpolation);
+            aggregated.contributingHits = aggregated.enoughSignal ? 1 : 0;
+            aggregated.singleHitAnalysis = true;
+            aggregated.confidence *= 0.85f;
+            PhaseFixEngine::updateDerivedResultFields (aggregated);
+            if (aggregated.enoughSignal && ! aggregated.message.containsIgnoreCase ("single-hit"))
+                aggregated.message << " Single-hit analysis.";
+            return aggregated;
+        }
+
+        std::vector<PhaseFixResult> perHitResults;
+        perHitResults.reserve (hits.size());
+
+        for (const auto& hit : hits)
+        {
+            auto hitResult = PhaseFixEngine::analyze (bass.data() + hit.start,
+                                                      kick.data() + hit.start,
+                                                      hit.length,
+                                                      sampleRate,
+                                                      PhaseFixEngine::defaultAutoFixMaxDelayMs,
+                                                      delayInterpolation);
+            if (hitResult.enoughSignal)
+                perHitResults.push_back (hitResult);
+        }
+
+        if (perHitResults.empty())
+        {
+            aggregated = PhaseFixEngine::analyze (bass.data(), kick.data(), (int) bass.size(),
+                                                  sampleRate, PhaseFixEngine::defaultAutoFixMaxDelayMs,
+                                                  delayInterpolation);
+            aggregated.contributingHits = 0;
+            PhaseFixEngine::updateDerivedResultFields (aggregated);
+            return aggregated;
+        }
+
+        aggregated.valid = true;
+        aggregated.enoughSignal = true;
+        aggregated.contributingHits = (int) perHitResults.size();
+        aggregated.singleHitAnalysis = perHitResults.size() == 1;
+
+        int polarityFlips = 0;
+        int phaseRecommendations = 0;
+        int improvementCount = 0;
+        int largeTimingCount = 0;
+        int timelineMoveCount = 0;
+        std::vector<float> confidences;
+        std::vector<float> safeDelays;
+        std::vector<float> safeImprovements;
+        std::vector<float> largeTimingOffsets;
+        std::vector<float> timelineMoves;
+        std::vector<float> phaseFreqs;
+        std::vector<float> phaseQs;
+        std::vector<float> phaseStages;
+
+        for (const auto& hitResult : perHitResults)
+        {
+            confidences.push_back (hitResult.confidence);
+
+            if (hitResult.bassPolarityInvert)
+                ++polarityFlips;
+
+            if (hitResult.improvementPercent >= 5.0f)
+                ++improvementCount;
+
+            if (hitResult.largeTimingOffset)
+            {
+                ++largeTimingCount;
+                largeTimingOffsets.push_back (hitResult.detectedTimingOffsetMs);
+                continue;
+            }
+
+            if (hitResult.requiresTimelineMove)
+            {
+                ++timelineMoveCount;
+                timelineMoves.push_back (hitResult.suggestedKickMoveMs);
+                continue;
+            }
+
+            safeDelays.push_back (hitResult.bassDelayMs);
+            safeImprovements.push_back (hitResult.improvementPercent);
+
+            if (hitResult.phaseFilterEnabled)
+            {
+                ++phaseRecommendations;
+                phaseFreqs.push_back (hitResult.phaseFilterFreqHz);
+                phaseQs.push_back (hitResult.phaseFilterQ);
+                phaseStages.push_back ((float) hitResult.phaseFilterStages);
+            }
+        }
+
+        const int validHits = (int) perHitResults.size();
+        const float polarityShare = validHits > 0 ? (float) polarityFlips / (float) validHits : 0.0f;
+        const bool majorityPolarity = polarityShare >= 0.5f;
+        const bool polarityStable = polarityShare >= 0.70f || polarityShare <= 0.30f;
+
+        if (largeTimingCount > validHits / 2)
+        {
+            aggregated.largeTimingOffset = true;
+            aggregated.detectedTimingOffsetMs = medianOf (largeTimingOffsets);
+            aggregated.confidence = averageOf (confidences);
+            PhaseFixEngine::updateDerivedResultFields (aggregated);
+            return aggregated;
+        }
+
+        if (timelineMoveCount > validHits / 2)
+        {
+            aggregated.requiresTimelineMove = true;
+            aggregated.suggestedKickMoveMs = medianOf (timelineMoves);
+            aggregated.confidence = averageOf (confidences);
+            PhaseFixEngine::updateDerivedResultFields (aggregated);
+            return aggregated;
+        }
+
+        if (safeDelays.empty())
+        {
+            aggregated.confidence = averageOf (confidences);
+            PhaseFixEngine::updateDerivedResultFields (aggregated);
+            return aggregated;
+        }
+
+        const float medianDelay = medianOf (safeDelays);
+        const float delayStdDev = standardDeviationOf (safeDelays, averageOf (safeDelays));
+        const float phaseShare = validHits > 0 ? (float) phaseRecommendations / (float) validHits : 0.0f;
+        const bool phaseStable = phaseShare >= 0.60f || phaseShare <= 0.40f;
+        const bool phaseEnabled = phaseShare >= 0.60f;
+        const bool improvementStable = improvementCount >= (int) std::ceil ((float) validHits * 0.60f);
+
+        aggregated.bassPolarityInvert = majorityPolarity;
+        aggregated.bassDelayMs = medianDelay;
+        aggregated.phaseFilterEnabled = phaseEnabled;
+        aggregated.phaseFilterFreqHz = phaseEnabled ? medianOf (phaseFreqs) : 200.0f;
+        aggregated.phaseFilterQ = phaseEnabled ? medianOf (phaseQs) : 0.7f;
+        aggregated.phaseFilterStages = phaseEnabled
+            ? juce::jlimit (2, 4, (int) std::lround (medianOf (phaseStages)))
+            : 2;
+
+        PhaseFixRenderSettings settings;
+        settings.bassPolarityInvert = aggregated.bassPolarityInvert;
+        settings.bassDelayMs = aggregated.bassDelayMs;
+        settings.phaseFilterEnabled = aggregated.phaseFilterEnabled;
+        settings.phaseFilterFreqHz = aggregated.phaseFilterFreqHz;
+        settings.phaseFilterQ = aggregated.phaseFilterQ;
+        settings.phaseFilterStages = aggregated.phaseFilterStages;
+        settings.delayInterpolation = delayInterpolation;
+
+        const auto before = PhaseFixEngine::scoreSettings (bass.data(), kick.data(), (int) bass.size(),
+                                                           sampleRate, {}, PhaseFixEngine::absoluteManualMaxDelayMs);
+        const auto after = PhaseFixEngine::scoreSettings (bass.data(), kick.data(), (int) bass.size(),
+                                                          sampleRate, settings, PhaseFixEngine::absoluteManualMaxDelayMs);
+
+        aggregated.beforeMatchPercent = before.matchPercent;
+        aggregated.afterMatchPercent = after.matchPercent;
+        aggregated.predictedAfterMatchPercent = after.matchPercent;
+        aggregated.improvementPercent = aggregated.afterMatchPercent - aggregated.beforeMatchPercent;
+
+        const float averageConfidence = averageOf (confidences);
+        const float delayConsistency = medianDelay <= PhaseFixEngine::defaultAutoFixMaxDelayMs
+            ? std::clamp (1.0f - (delayStdDev / 1.0f), 0.0f, 1.0f)
+            : 0.0f;
+        const float polarityConsistency = polarityStable ? 1.0f : 0.35f;
+        const float phaseConsistency = phaseStable ? 1.0f : 0.50f;
+        const float consistency = delayConsistency * polarityConsistency * phaseConsistency;
+
+        aggregated.confidence = std::clamp (averageConfidence * consistency
+                                            * (aggregated.singleHitAnalysis ? 0.85f : 1.0f),
+                                            0.0f, 1.0f);
+
+        if (! polarityStable
+            || ! phaseStable
+            || ! improvementStable
+            || (safeDelays.size() >= 2
+                && medianDelay <= PhaseFixEngine::defaultAutoFixMaxDelayMs
+                && delayStdDev > 1.0f))
+        {
+            aggregated.unstableRecommendation = true;
+        }
+
+        PhaseFixEngine::updateDerivedResultFields (aggregated);
+
+        if (aggregated.singleHitAnalysis && aggregated.enoughSignal
+            && ! aggregated.message.containsIgnoreCase ("single-hit"))
+        {
+            aggregated.message << " Single-hit analysis.";
+        }
+
+        return aggregated;
+    }
+}
+
 KickLockAudioProcessor::KickLockAudioProcessor()
     : AudioProcessor (BusesProperties()
                            .withInput ("Input", juce::AudioChannelSet::stereo(), true)
@@ -32,6 +344,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         "Delay Interpolation",
         juce::StringArray { "Linear", "Allpass" },
         0));
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "gridDivision", 1 },
+        "Grid Division",
+        juce::StringArray { "1/4", "1/8", "1/16", "1/32", "Bar", "ms" },
+        5));
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "scopeViewMode", 1 },
+        "Scope View",
+        juce::StringArray { "Phase Delta", "Overlay", "Separate" },
+        0));
+
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { "visualOffsetSamples", 1 },
+        "Visual Offset Samples",
+        -4096, 4096, 0));
 
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "polarityInvert", 1 },
@@ -72,17 +401,26 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
         rotator[(size_t) ch].prepare (sampleRate, 2);
     }
 
-    correlationMeter.prepare (sampleRate, (int) sampleRate / 20);
+    dryInputCorrelationMeter.prepare (sampleRate, (int) sampleRate / 20);
+    processedCorrelationMeter.prepare (sampleRate, (int) sampleRate / 20);
     scopeFifo.prepare (8192);
 
-    realtimeMainHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
-    realtimeMainLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
-    realtimeKickHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
-    realtimeKickLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
-    realtimeMainHighPass.reset();
-    realtimeMainLowPass.reset();
-    realtimeKickHighPass.reset();
-    realtimeKickLowPass.reset();
+    dryMainHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
+    dryMainLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
+    dryKickHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
+    dryKickLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
+    processedMainHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
+    processedMainLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
+    processedKickHighPass.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 30.0f);
+    processedKickLowPass.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 120.0f);
+    dryMainHighPass.reset();
+    dryMainLowPass.reset();
+    dryKickHighPass.reset();
+    dryKickLowPass.reset();
+    processedMainHighPass.reset();
+    processedMainLowPass.reset();
+    processedKickHighPass.reset();
+    processedKickLowPass.reset();
     phaseFilterWet.reset (sampleRate, 0.005);
     phaseFilterWet.setCurrentAndTargetValue (0.0f);
 
@@ -96,15 +434,21 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     hitCapture.prepare (sampleRate, 25.0f, 180.0f);
     hitHistory.reset();
 
-    // Show roughly one second of audio across the 2048-sample scope buffer:
-    // push 1 in N samples so the trace scrolls slowly enough to follow.
+    // Decimate the scope feed so the UI ring can show a multi-beat view
+    // without allocating on the audio thread.
     scopeDecimationFactor = juce::jmax (1, (int) (sampleRate / 2048.0));
     scopeDecimationCounter = 0;
+    sidechainReferenceAvailable.store (false);
+    tempoAvailable.store (false);
+    latestBpm.store (0.0f);
+    bassSignalRms.store (0.0f);
+    kickSignalRms.store (0.0f);
 
     lastInterpChoice = 0;
     lastStageChoice = 0;
     lastRotatorFreq = -1.0f;
     lastRotatorQ = -1.0f;
+    lastDelayActive = false;
     latestFixResult = {};
 }
 
@@ -135,9 +479,38 @@ bool KickLockAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts)
     return true;
 }
 
+bool KickLockAudioProcessor::isBassProcessingNeutral() const noexcept
+{
+    constexpr float epsilon = 1.0e-6f;
+
+    const float delayMs = delayMsParam != nullptr ? delayMsParam->load() : 0.0f;
+    const bool polarity = polarityInvertParam != nullptr && polarityInvertParam->load() > 0.5f;
+    const bool phaseFilter = phaseFilterEnabledParam != nullptr && phaseFilterEnabledParam->load() > 0.5f;
+
+    return normaliseBassDelayMs (delayMs) <= epsilon && ! polarity && ! phaseFilter;
+}
+
 void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
+
+    bool bpmDetected = false;
+    float bpmValue = 0.0f;
+
+    if (auto* playHead = getPlayHead())
+    {
+        if (const auto position = playHead->getPosition())
+        {
+            if (const auto bpm = position->getBpm())
+            {
+                bpmValue = (float) *bpm;
+                bpmDetected = bpmValue > 0.0f;
+            }
+        }
+    }
+
+    tempoAvailable.store (bpmDetected);
+    latestBpm.store (bpmDetected ? bpmValue : 0.0f);
 
     const auto totalNumInputChannels = getTotalNumInputChannels();
     const auto totalNumOutputChannels = getTotalNumOutputChannels();
@@ -152,11 +525,14 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     const auto* sidechainBus = getBus (true, 1);
     const bool hasSidechain = sidechainBus != nullptr && sidechainBus->isEnabled() && sidechainBuffer.getNumChannels() > 0;
+    sidechainReferenceAvailable.store (hasSidechain);
 
     const int numSamples = mainBuffer.getNumSamples();
+    double bassEnergySum = 0.0;
+    double kickEnergySum = 0.0;
 
-    // Capture RAW (pre-processing) mono bass/kick for the Analyze button, before
-    // polarity/delay/rotator touch the buffers. Skipped without a sidechain.
+    // Capture and meter RAW mono bass/kick before polarity/delay/rotator touch
+    // the audible bass buffer. Skipped without a sidechain.
     if (hasSidechain)
     {
         const int mainCh = mainBuffer.getNumChannels();
@@ -168,92 +544,135 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             for (int ch = 0; ch < mainCh; ++ch)
                 mSum += mainBuffer.getSample (ch, i);
             const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
+            bassEnergySum += (double) bassMono * (double) bassMono;
 
             float sSum = 0.0f;
             for (int ch = 0; ch < scCh; ++ch)
                 sSum += sidechainBuffer.getSample (ch, i);
             const float kickMono = scCh > 0 ? sSum / (float) scCh : 0.0f;
+            kickEnergySum += (double) kickMono * (double) kickMono;
 
             rawCapture.push (bassMono, kickMono);
             const bool transientDetected = transientDetector.processSample (kickMono);
             hitCapture.pushSample (bassMono, kickMono, transientDetected);
+
+            const float lowBass = dryMainLowPass.processSample (
+                dryMainHighPass.processSample (bassMono));
+            const float lowKick = dryKickLowPass.processSample (
+                dryKickHighPass.processSample (kickMono));
+            dryInputCorrelationMeter.pushSample (lowBass, lowKick);
+        }
+    }
+    else
+    {
+        const int mainCh = mainBuffer.getNumChannels();
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float mSum = 0.0f;
+            for (int ch = 0; ch < mainCh; ++ch)
+                mSum += mainBuffer.getSample (ch, i);
+
+            const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
+            bassEnergySum += (double) bassMono * (double) bassMono;
         }
     }
 
-    // 1) Polarity invert on the main bus.
-    if (polarityInvertParam->load() > 0.5f)
+    const double safeCount = (double) juce::jmax (1, numSamples);
+    bassSignalRms.store ((float) std::sqrt (bassEnergySum / safeCount));
+    kickSignalRms.store (hasSidechain ? (float) std::sqrt (kickEnergySum / safeCount) : 0.0f);
+
+    const bool neutral = isBassProcessingNeutral();
+    const float delayMs = normaliseBassDelayMs (delayMsParam->load());
+    const bool delayActive = delayMs > 1.0e-6f;
+    const bool phaseFilterEnabled = phaseFilterEnabledParam->load() > 0.5f;
+
+    if (! delayActive && lastDelayActive)
     {
-        for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
-            mainBuffer.applyGain (ch, 0, numSamples, -1.0f);
+        for (auto& delay : mainDelay)
+            delay.reset();
     }
+    lastDelayActive = delayActive;
 
-    // 2) Fractional delay on the main/bass bus only. The sidechain/kick is a
-    // reference signal in normal DAW routing, not audible audio this plugin can
-    // move. Analyzer results that would require moving the kick are reported as
-    // timeline/edit recommendations instead of being applied here.
-    const float delayMs = juce::jmax (0.0f, delayMsParam->load());
-    const double delaySamples = delayMs / 1000.0 * getSampleRate();
-
-    for (int ch = 0; ch < 2; ++ch)
-        mainDelay[(size_t) ch].setDelaySamples ((float) delaySamples);
-
-    // Only switch interpolation type on an actual change: it resets the
-    // allpass interpolator's internal state, which would otherwise glitch
-    // the signal every single block if called unconditionally.
-    const int interpChoice = (int) delayInterpParam->load();
-    if (interpChoice != lastInterpChoice)
+    if (neutral)
     {
-        const auto type = interpChoice == 0 ? InterpolationType::Linear : InterpolationType::Allpass;
-
-        for (int ch = 0; ch < 2; ++ch)
-            mainDelay[(size_t) ch].setInterpolationType (type);
-
-        lastInterpChoice = interpChoice;
+        phaseFilterWet.setCurrentAndTargetValue (0.0f);
     }
-
-    for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
-        for (int i = 0; i < numSamples; ++i)
-            mainBuffer.setSample (ch, i, mainDelay[(size_t) ch].processSample (mainBuffer.getSample (ch, i)));
-
-    // 3) Allpass phase rotator on the main bus.
-    const int stageChoice = (int) rotatorStagesParam->load();
-    if (stageChoice != lastStageChoice)
+    else
     {
-        // Re-preparing changes the active stage count but also resets filter
-        // state, so this is likewise gated on an actual change rather than
-        // done every block.
-        for (int ch = 0; ch < 2; ++ch)
-            rotator[(size_t) ch].prepare (getSampleRate(), stageChoice + 2);
-
-        lastStageChoice = stageChoice;
-    }
-
-    // setParameters() rebuilds allpass coefficients, which allocates. Only
-    // call it when the frequency or Q actually changed (or on the first block
-    // after prepareToPlay, forced by the -1 sentinels) so the audio thread
-    // never allocates in steady state. Coefficients survive a stage-change
-    // prepare() (which only resets filter state), so no re-apply is needed
-    // there.
-    const float rotatorFreq = rotatorFreqParam->load();
-    const float rotatorQ = rotatorQParam->load();
-    if (rotatorFreq != lastRotatorFreq || rotatorQ != lastRotatorQ)
-    {
-        for (int ch = 0; ch < 2; ++ch)
-            rotator[(size_t) ch].setParameters (rotatorFreq, rotatorQ);
-
-        lastRotatorFreq = rotatorFreq;
-        lastRotatorQ = rotatorQ;
-    }
-
-    phaseFilterWet.setTargetValue (phaseFilterEnabledParam->load() > 0.5f ? 1.0f : 0.0f);
-    for (int i = 0; i < numSamples; ++i)
-    {
-        const float mix = phaseFilterWet.getNextValue();
-        for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
+        // 1) Polarity invert on the main bus.
+        if (polarityInvertParam->load() > 0.5f)
         {
-            const float dry = mainBuffer.getSample (ch, i);
-            const float wet = rotator[(size_t) ch].processSample (dry);
-            mainBuffer.setSample (ch, i, dry + mix * (wet - dry));
+            for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
+                mainBuffer.applyGain (ch, 0, numSamples, -1.0f);
+        }
+
+        // 2) Fractional delay on the main/bass bus only. Do not run the delay
+        // line at exactly zero delay; the neutral/default path must be a real
+        // pass-through, not an assumed-transparent DSP path.
+        if (delayActive)
+        {
+            const double delaySamples = delayMs / 1000.0 * getSampleRate();
+
+            for (int ch = 0; ch < 2; ++ch)
+                mainDelay[(size_t) ch].setDelaySamples ((float) delaySamples);
+
+            const int interpChoice = (int) delayInterpParam->load();
+            if (interpChoice != lastInterpChoice)
+            {
+                const auto type = interpChoice == 0 ? InterpolationType::Linear : InterpolationType::Allpass;
+
+                for (int ch = 0; ch < 2; ++ch)
+                    mainDelay[(size_t) ch].setInterpolationType (type);
+
+                lastInterpChoice = interpChoice;
+            }
+
+            for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
+                for (int i = 0; i < numSamples; ++i)
+                    mainBuffer.setSample (ch, i, mainDelay[(size_t) ch].processSample (mainBuffer.getSample (ch, i)));
+        }
+
+        // 3) Allpass phase rotator on the main bus. Frequency / Q / stages are
+        // inert until the Phase Filter toggle is on; when off, the bass stays
+        // fully dry regardless of stored rotator settings.
+        if (phaseFilterEnabled)
+        {
+            const int stageChoice = (int) rotatorStagesParam->load();
+            if (stageChoice != lastStageChoice)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                    rotator[(size_t) ch].prepare (getSampleRate(), stageChoice + 2);
+
+                lastStageChoice = stageChoice;
+            }
+
+            const float rotatorFreq = rotatorFreqParam->load();
+            const float rotatorQ = rotatorQParam->load();
+            if (rotatorFreq != lastRotatorFreq || rotatorQ != lastRotatorQ)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                    rotator[(size_t) ch].setParameters (rotatorFreq, rotatorQ);
+
+                lastRotatorFreq = rotatorFreq;
+                lastRotatorQ = rotatorQ;
+            }
+
+            phaseFilterWet.setTargetValue (1.0f);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float mix = phaseFilterWet.getNextValue();
+                for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
+                {
+                    const float dry = mainBuffer.getSample (ch, i);
+                    const float wet = rotator[(size_t) ch].processSample (dry);
+                    mainBuffer.setSample (ch, i, dry + mix * (wet - dry));
+                }
+            }
+        }
+        else
+        {
+            phaseFilterWet.setCurrentAndTargetValue (0.0f);
         }
     }
 
@@ -277,15 +696,15 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                 sidechainSum += sidechainBuffer.getSample (ch, i);
             const float sidechainMono = sidechainChannels > 0 ? sidechainSum / (float) sidechainChannels : 0.0f;
 
-            const float lowMain = realtimeMainLowPass.processSample (
-                realtimeMainHighPass.processSample (mainMono));
-            const float lowKick = realtimeKickLowPass.processSample (
-                realtimeKickHighPass.processSample (sidechainMono));
+            const float lowMain = processedMainLowPass.processSample (
+                processedMainHighPass.processSample (mainMono));
+            const float lowKick = processedKickLowPass.processSample (
+                processedKickHighPass.processSample (sidechainMono));
 
-            correlationMeter.pushSample (lowMain, lowKick);
+            processedCorrelationMeter.pushSample (lowMain, lowKick);
 
             // Decimate the scope feed only: the meter still sees every sample,
-            // but the scope gets 1 in N so its window spans ~1 second.
+            // but the UI keeps a slower, longer history for the musical grid.
             if (++scopeDecimationCounter >= scopeDecimationFactor)
             {
                 scopeDecimationCounter = 0;
@@ -294,9 +713,14 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    const float lowBandMatch = correlationMeter.getCorrelation();
-    realtimeLowBandMatchPercent.store (lowBandMatch);
-    correlationPercent.store (lowBandMatch);
+    const float dryMatch = hasSidechain ? dryInputCorrelationMeter.getCorrelation() : 50.0f;
+    const float processedMatch = hasSidechain ? processedCorrelationMeter.getCorrelation() : 50.0f;
+    const float activeMatch = hasSidechain ? (neutral ? dryMatch : processedMatch) : 50.0f;
+
+    dryInputMatchPercent.store (dryMatch);
+    processedMatchPercent.store (processedMatch);
+    realtimeLowBandMatchPercent.store (activeMatch);
+    correlationPercent.store (activeMatch);
 }
 
 juce::AudioProcessorEditor* KickLockAudioProcessor::createEditor()
@@ -390,12 +814,18 @@ AnalyzerInstruction KickLockAudioProcessor::analyzeAndApply (AnalyzeMode mode)
 
     if (! fix.enoughSignal)
         instruction.action = AlignmentAction::NotEnoughSignal;
+    else if (fix.largeTimingOffset)
+        instruction.action = AlignmentAction::LowConfidence;
     else if (fix.requiresTimelineMove)
     {
         instruction.action = AlignmentAction::RecommendMoveKick;
         instruction.delayMs = -fix.suggestedKickMoveMs;
     }
-    else if (! PhaseFixEngine::canApply (fix))
+    else if (fix.unstableRecommendation)
+        instruction.action = AlignmentAction::LowConfidence;
+    else if (fix.quality == PhaseFixQuality::AlreadyGood && fix.phaseFilterEnabled)
+        instruction.action = AlignmentAction::RecommendPhaseFilter;
+    else if (fix.quality == PhaseFixQuality::NoUsefulChange)
         instruction.action = AlignmentAction::LowConfidence;
     else if (fix.bassDelayMs > 0.02f)
         instruction.action = AlignmentAction::ApplyBassDelay;
@@ -441,16 +871,29 @@ HitAnalysisResult KickLockAudioProcessor::analyzeLatestHit()
 PhaseFixResult KickLockAudioProcessor::analyzeFix()
 {
     std::vector<float> bass, kick;
-    int n = hitCapture.snapshotLatest (bass, kick);
+    const int n = rawCapture.snapshot (bass, kick);
+    const auto delayInterpolation = interpolationFromChoice (delayInterpParam != nullptr
+                                                                 ? delayInterpParam->load()
+                                                                 : 0.0f);
 
-    if (n <= 0)
-        n = rawCapture.snapshot (bass, kick);
+    lastAnalyzedBassWindow = bass;
+    lastAnalyzedKickWindow = kick;
 
-    latestFixResult = PhaseFixEngine::analyze (bass.data(), kick.data(), n,
-                                               getSampleRate(), 50.0f);
+    if (n > 32)
+    {
+        const auto hits = extractRecentHitWindows (kick, getSampleRate(), 8);
+        latestFixResult = analyzeAggregatedHits (bass, kick, hits, getSampleRate(), delayInterpolation);
+    }
+    else
+    {
+        latestFixResult = {};
+        PhaseFixEngine::updateDerivedResultFields (latestFixResult);
+    }
 
     latestAnalyzedBeforePercent.store (latestFixResult.beforeMatchPercent);
-    latestAnalyzedAfterPercent.store (latestFixResult.afterMatchPercent);
+    latestAnalyzedAfterPercent.store (latestFixResult.predictedAfterMatchPercent);
+    latestVerifiedAfterPercent.store (latestFixResult.verifiedAfterMatchPercent);
+    latestVerificationDeltaPercent.store (latestFixResult.verificationDeltaPercent);
     latestFixConfidence.store (latestFixResult.confidence * 100.0f);
 
     return latestFixResult;
@@ -458,15 +901,18 @@ PhaseFixResult KickLockAudioProcessor::analyzeFix()
 
 bool KickLockAudioProcessor::applyLatestFix()
 {
-    if (! PhaseFixEngine::canApply (latestFixResult))
+    if (! latestFixResult.applyAllowed
+        && ! latestFixResult.optionalApplyAllowed)
+    {
         return false;
+    }
 
     if (auto* polParam = apvts.getParameter ("polarityInvert"))
         polParam->setValueNotifyingHost (latestFixResult.bassPolarityInvert ? 1.0f : 0.0f);
 
     if (auto* delayParam = apvts.getParameter ("delayMs"))
         delayParam->setValueNotifyingHost (
-            delayParam->convertTo0to1 (juce::jmax (0.0f, latestFixResult.bassDelayMs)));
+            delayParam->convertTo0to1 (normaliseBassDelayMs (latestFixResult.bassDelayMs)));
 
     if (auto* enabledParam = apvts.getParameter ("phaseFilterEnabled"))
         enabledParam->setValueNotifyingHost (latestFixResult.phaseFilterEnabled ? 1.0f : 0.0f);
@@ -488,6 +934,32 @@ bool KickLockAudioProcessor::applyLatestFix()
         }
     }
 
+    if (! lastAnalyzedBassWindow.empty()
+        && lastAnalyzedBassWindow.size() == lastAnalyzedKickWindow.size())
+    {
+        PhaseFixRenderSettings settings;
+        settings.bassPolarityInvert = latestFixResult.bassPolarityInvert;
+        settings.bassDelayMs = latestFixResult.bassDelayMs;
+        settings.phaseFilterEnabled = latestFixResult.phaseFilterEnabled;
+        settings.phaseFilterFreqHz = latestFixResult.phaseFilterFreqHz;
+        settings.phaseFilterQ = latestFixResult.phaseFilterQ;
+        settings.phaseFilterStages = latestFixResult.phaseFilterStages;
+        settings.delayInterpolation = interpolationFromChoice (delayInterpParam != nullptr
+                                                                   ? delayInterpParam->load()
+                                                                   : 0.0f);
+
+        const auto verified = PhaseFixEngine::scoreSettings (lastAnalyzedBassWindow.data(),
+                                                             lastAnalyzedKickWindow.data(),
+                                                             (int) lastAnalyzedBassWindow.size(),
+                                                             getSampleRate(),
+                                                             settings,
+                                                             PhaseFixEngine::absoluteManualMaxDelayMs);
+
+        PhaseFixEngine::applyVerification (latestFixResult, verified.matchPercent);
+        latestVerifiedAfterPercent.store (latestFixResult.verifiedAfterMatchPercent);
+        latestVerificationDeltaPercent.store (latestFixResult.verificationDeltaPercent);
+    }
+
     return true;
 }
 
@@ -499,6 +971,41 @@ PhaseFixResult KickLockAudioProcessor::getLatestFixResult() const
 int KickLockAudioProcessor::getLatestHitSequence() const noexcept
 {
     return hitCapture.getSequence();
+}
+
+int KickLockAudioProcessor::getScopeDecimationFactor() const noexcept
+{
+    return scopeDecimationFactor;
+}
+
+bool KickLockAudioProcessor::hasSidechainReference() const noexcept
+{
+    return sidechainReferenceAvailable.load();
+}
+
+bool KickLockAudioProcessor::isTempoAvailable() const noexcept
+{
+    return tempoAvailable.load();
+}
+
+float KickLockAudioProcessor::getLatestBpm() const noexcept
+{
+    return latestBpm.load();
+}
+
+float KickLockAudioProcessor::getBassSignalRms() const noexcept
+{
+    return bassSignalRms.load();
+}
+
+float KickLockAudioProcessor::getKickSignalRms() const noexcept
+{
+    return kickSignalRms.load();
+}
+
+void KickLockAudioProcessor::setLatestFixResultForTesting (const PhaseFixResult& result)
+{
+    latestFixResult = result;
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

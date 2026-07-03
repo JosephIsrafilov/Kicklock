@@ -1,6 +1,59 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cmath>
+
+namespace
+{
+    constexpr auto appBackground   = juce::Colour (0xff0c1014);
+    constexpr auto panelBackground = juce::Colour (0xff141a20);
+    constexpr auto panelBorder     = juce::Colour (0xff27313a);
+    constexpr auto accentTeal      = juce::Colour (0xff2dd4bf);
+    constexpr auto accentOrange    = juce::Colour (0xfff97316);
+    constexpr auto softText        = juce::Colour (0xff93a1ad);
+    constexpr auto strongText      = juce::Colour (0xffeef2f7);
+
+    void styleCaptionLabel (juce::Label& label, const juce::String& text)
+    {
+        label.setText (text, juce::dontSendNotification);
+        label.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+        label.setColour (juce::Label::textColourId, softText);
+    }
+
+    void styleValueLabel (juce::Label& label, float size, juce::Colour colour, bool bold = false)
+    {
+        auto font = juce::Font (juce::FontOptions (size));
+        if (bold)
+            font = font.boldened();
+
+        label.setFont (font);
+        label.setColour (juce::Label::textColourId, colour);
+        label.setJustificationType (juce::Justification::centredLeft);
+    }
+
+    juce::String qualityLabel (PhaseFixQuality quality)
+    {
+        switch (quality)
+        {
+            case PhaseFixQuality::StrongImprovement:   return "Strong Fix";
+            case PhaseFixQuality::PartialImprovement:  return "Partial Fix";
+            case PhaseFixQuality::AlreadyGood:         return "Already Good";
+            case PhaseFixQuality::LargeTimingOffset:   return "Large Timing Offset";
+            case PhaseFixQuality::TimelineMoveRequired:return "Timeline Move";
+            case PhaseFixQuality::Unstable:            return "Unstable";
+            case PhaseFixQuality::NotEnoughSignal:     return "Waiting For Signal";
+            case PhaseFixQuality::NoUsefulChange:      return "No Useful Fix";
+        }
+
+        return "No Useful Fix";
+    }
+
+    bool hasApplyAction (const PhaseFixResult& result)
+    {
+        return result.applyAllowed || result.optionalApplyAllowed;
+    }
+}
+
 KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcessor& p)
     : AudioProcessorEditor (&p),
       audioProcessor (p),
@@ -12,300 +65,586 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     addAndMakeVisible (oscilloscope);
     addAndMakeVisible (correlationDisplay);
 
-    // Freeze toggles the scope's scrolling so the waveform can be inspected.
+    analysisHeaderLabel.setText ("ANALYZER", juce::dontSendNotification);
+    analysisHeaderLabel.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+    analysisHeaderLabel.setColour (juce::Label::textColourId, softText);
+    addAndMakeVisible (analysisHeaderLabel);
+
+    styleValueLabel (processingStatusLabel, 14.0f, accentTeal, true);
+    styleValueLabel (processingDetailLabel, 12.0f, strongText);
+    styleValueLabel (analyzeResultLabel, 13.0f, strongText, true);
+    styleValueLabel (fixActionLabel, 12.0f, strongText);
+    styleValueLabel (fixStatsLabel, 12.0f, strongText);
+    styleValueLabel (fixConfidenceLabel, 12.0f, strongText);
+    styleValueLabel (fixSettingsLabel, 12.0f, strongText);
+    styleValueLabel (fixTimelineLabel, 12.0f, strongText);
+    styleValueLabel (sidechainStatusLabel, 13.0f, accentTeal, true);
+    styleValueLabel (bpmValueLabel, 13.0f, strongText, true);
+
+    for (auto* label : { &processingStatusLabel, &processingDetailLabel, &analyzeResultLabel,
+                         &fixActionLabel, &fixStatsLabel, &fixConfidenceLabel,
+                         &fixSettingsLabel, &fixTimelineLabel, &sidechainStatusLabel,
+                         &bpmValueLabel })
+        addAndMakeVisible (*label);
+
+    styleCaptionLabel (gridDivisionLabel, "GRID");
+    styleCaptionLabel (viewModeLabel, "VIEW");
+    styleCaptionLabel (visualOffsetLabel, "PDC");
+    styleCaptionLabel (delayMsLabel, "DELAY");
+    styleCaptionLabel (delayInterpLabel, "INTERP");
+    styleCaptionLabel (phaseSectionLabel, "PHASE");
+    styleCaptionLabel (rotatorFreqLabel, "FREQ");
+    styleCaptionLabel (rotatorQLabel, "Q");
+    styleCaptionLabel (rotatorStagesLabel, "STAGES");
+    styleCaptionLabel (timeZoomLabel, "TIME");
+    styleCaptionLabel (ampZoomLabel, "AMP");
+    styleCaptionLabel (bpmLabel, "BPM");
+
+    for (auto* label : { &gridDivisionLabel, &viewModeLabel, &visualOffsetLabel, &delayMsLabel,
+                         &phaseSectionLabel,
+                         &delayInterpLabel, &rotatorFreqLabel, &rotatorQLabel,
+                         &rotatorStagesLabel, &timeZoomLabel, &ampZoomLabel, &bpmLabel })
+        addAndMakeVisible (*label);
+
     freezeButton.setButtonText ("Freeze");
     freezeButton.setClickingTogglesState (true);
-    freezeButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff2dd4bf));
-    freezeButton.onClick = [this]
-    {
-        oscilloscope.setFrozen (freezeButton.getToggleState());
-    };
+    freezeButton.setColour (juce::TextButton::buttonOnColourId, accentTeal);
+    freezeButton.onClick = [this] { oscilloscope.setFrozen (freezeButton.getToggleState()); };
     addAndMakeVisible (freezeButton);
 
-    // Analyze inspects the raw kick + bass and reports the safest correction.
-    // Default mode is recommendation-only: the sidechain is a reference, not
-    // audible kick audio this plugin can move.
     analyzeButton.setButtonText ("Analyze");
-    analyzeButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xfff97316));
-    analyzeButton.setTooltip ("Measure kick vs bass and find the best safe bass-path fix.");
+    analyzeButton.setColour (juce::TextButton::buttonColourId, accentOrange);
+    analyzeButton.setTooltip ("Measure kick against bass and prepare a safe bass-path fix.");
     analyzeButton.onClick = [this]
     {
         const auto fix = audioProcessor.analyzeFix();
-
+        hasAnalyzedResult = true;
+        hasFixReady = hasApplyAction (fix);
         analyzeResultLabel.setText (fix.message, juce::dontSendNotification);
-
-        fixActionLabel.setText (fix.valid ? "Action: " + fix.message : "Action: Waiting for signal",
-                                juce::dontSendNotification);
-
-        juce::String stats;
-        stats << "Before " << juce::String ((int) std::round (fix.beforeMatchPercent)) << "%"
-              << "   After " << juce::String ((int) std::round (fix.afterMatchPercent)) << "%"
-              << "   +" << juce::String ((int) std::round (fix.improvementPercent)) << "%"
-              << "   Confidence " << juce::String ((int) std::round (fix.confidence * 100.0f)) << "%";
-        fixStatsLabel.setText (stats, juce::dontSendNotification);
-
-        juce::String settings;
-        settings << "Bass Delay " << juce::String (fix.bassDelayMs, 2) << " ms"
-                 << "   Polarity " << (fix.bassPolarityInvert ? "Inverted" : "Normal")
-                 << "   Phase Filter ";
-        if (fix.phaseFilterEnabled)
-            settings << juce::String ((int) std::round (fix.phaseFilterFreqHz)) << " Hz / Q "
-                     << juce::String (fix.phaseFilterQ, 1) << " / "
-                     << juce::String (fix.phaseFilterStages) << " st";
-        else
-            settings << "Off";
-        fixSettingsLabel.setText (settings, juce::dontSendNotification);
-
-        fixTimelineLabel.setText (fix.requiresTimelineMove
-                                      ? "Timeline: move kick later by " + juce::String (fix.suggestedKickMoveMs, 2) + " ms in the DAW."
-                                      : "Timeline: no DAW move needed.",
-                                  juce::dontSendNotification);
-
-        applyFixButton.setEnabled (PhaseFixEngine::canApply (fix));
+        updateStatusLabels();
     };
     addAndMakeVisible (analyzeButton);
 
     applyFixButton.setButtonText ("Apply Fix");
-    applyFixButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff2dd4bf));
-    applyFixButton.setTooltip ("Apply the latest safe bass-path fix. Timeline-only recommendations cannot be applied here.");
+    applyFixButton.setColour (juce::TextButton::buttonColourId, accentTeal);
+    applyFixButton.setTooltip ("Apply the latest safe bass correction. This never moves the kick reference.");
     applyFixButton.setEnabled (false);
     applyFixButton.onClick = [this]
     {
         if (audioProcessor.applyLatestFix())
-            analyzeResultLabel.setText ("Applied fix to bass controls.", juce::dontSendNotification);
+        {
+            hasFixReady = false;
+            const auto latest = audioProcessor.getLatestFixResult();
+            analyzeResultLabel.setText (
+                latest.verificationWarning
+                    ? "Applied fix, but verified match is lower than predicted. Re-analyze or adjust manually."
+                    : latest.quality == PhaseFixQuality::AlreadyGood && latest.phaseFilterEnabled
+                    ? "Applied optional phase refinement to the bass path."
+                    : latest.quality == PhaseFixQuality::PartialImprovement
+                        ? "Applied partial fix to the bass path. Listen and decide."
+                        : "Applied fix to the bass path.",
+                juce::dontSendNotification);
+        }
         else
-            analyzeResultLabel.setText ("No safe fix to apply. Run Analyze again.", juce::dontSendNotification);
+        {
+            analyzeResultLabel.setText ("No bass-path fix or refinement is ready. Run Analyze again.",
+                                        juce::dontSendNotification);
+        }
+
+        updateStatusLabels();
     };
     addAndMakeVisible (applyFixButton);
 
-    analyzeResultLabel.setText ("Press Analyze to find a bass-path fix.",
-                                juce::dontSendNotification);
-    analyzeResultLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
-    analyzeResultLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9ca3af));
-    addAndMakeVisible (analyzeResultLabel);
+    gridDivisionBox.addItem ("1/4", 1);
+    gridDivisionBox.addItem ("1/8", 2);
+    gridDivisionBox.addItem ("1/16", 3);
+    gridDivisionBox.addItem ("1/32", 4);
+    gridDivisionBox.addItem ("Bar", 5);
+    gridDivisionBox.addItem ("ms", 6);
+    gridDivisionBox.setTooltip ("Beat-synced grid when tempo is available, or a fixed millisecond grid as fallback.");
+    gridDivisionBox.onChange = [this] { syncScopeSettings(); };
+    addAndMakeVisible (gridDivisionBox);
 
-    for (auto* label : { &fixActionLabel, &fixStatsLabel, &fixSettingsLabel, &fixTimelineLabel })
+    viewModeBox.addItem ("Phase Delta", 1);
+    viewModeBox.addItem ("Overlay", 2);
+    viewModeBox.addItem ("Separate", 3);
+    viewModeBox.setTooltip ("Choose the scope display style.");
+    viewModeBox.onChange = [this] { syncScopeSettings(); };
+    addAndMakeVisible (viewModeBox);
+
+    visualOffsetSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    visualOffsetSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 68, 22);
+    visualOffsetSlider.setNumDecimalPlacesToDisplay (0);
+    visualOffsetSlider.setTextValueSuffix (" smp");
+    visualOffsetSlider.setTooltip ("Visual waveform offset for compensating DAW/plugin latency. Does not process audio.");
+    visualOffsetSlider.onValueChange = [this] { syncScopeSettings(); };
+    addAndMakeVisible (visualOffsetSlider);
+
+    delayMsSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    delayMsSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 68, 22);
+    delayMsSlider.setNumDecimalPlacesToDisplay (2);
+    delayMsSlider.setTextValueSuffix (" ms");
+    delayMsSlider.setTooltip ("Bass-path delay only. Kick movement remains a DAW-side recommendation.");
+    delayMsSlider.textFromValueFunction = [] (double value)
     {
-        label->setFont (juce::Font (juce::FontOptions (12.0f)));
-        label->setColour (juce::Label::textColourId, juce::Colour (0xffd1d5db));
-        addAndMakeVisible (*label);
-    }
+        return formatBassDelayMs ((float) value);
+    };
+    delayMsSlider.valueFromTextFunction = [] (const juce::String& text)
+    {
+        auto cleaned = text.upToFirstOccurrenceOf ("ms", false, false).trim();
+        return (double) normaliseBassDelayMs ((float) cleaned.getFloatValue());
+    };
+    addAndMakeVisible (delayMsSlider);
 
-    fixActionLabel.setText ("Action: none", juce::dontSendNotification);
-    fixStatsLabel.setText ("Before --   After --   Confidence --", juce::dontSendNotification);
-    fixSettingsLabel.setText ("Bass Delay --   Polarity --   Phase Filter --", juce::dontSendNotification);
-    fixTimelineLabel.setText ("Timeline: --", juce::dontSendNotification);
+    delayInterpBox.addItem ("Linear", 1);
+    delayInterpBox.addItem ("Allpass", 2);
+    delayInterpBox.setTooltip ("Interpolation used by the bass delay line.");
+    addAndMakeVisible (delayInterpBox);
 
-    // Zoom controls mirror the scope's time/amplitude zoom; the scope's mouse
-    // wheel writes back here through onZoomChanged so the two stay in sync.
+    polarityInvertButton.setButtonText ("Invert Polarity");
+    polarityInvertButton.setTooltip ("Flip the bass polarity by 180 degrees.");
+    addAndMakeVisible (polarityInvertButton);
+
+    phaseFilterEnabledButton.setButtonText ("Enable");
+    phaseFilterEnabledButton.setTooltip ("Enables the bass phase rotator. When off, Hz/Q/stages do not affect audio.");
+    addAndMakeVisible (phaseFilterEnabledButton);
+
+    rotatorFreqSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    rotatorFreqSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 68, 22);
+    rotatorFreqSlider.setTextValueSuffix (" Hz");
+    rotatorFreqSlider.setNumDecimalPlacesToDisplay (0);
+    rotatorFreqSlider.setTooltip ("Phase rotator frequency. Only affects audio when Phase Filter is enabled.");
+    addAndMakeVisible (rotatorFreqSlider);
+
+    rotatorQSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    rotatorQSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 60, 22);
+    rotatorQSlider.setNumDecimalPlacesToDisplay (2);
+    rotatorQSlider.setTooltip ("Phase rotator Q. Only affects audio when Phase Filter is enabled.");
+    addAndMakeVisible (rotatorQSlider);
+
+    rotatorStagesBox.addItem ("2", 1);
+    rotatorStagesBox.addItem ("3", 2);
+    rotatorStagesBox.addItem ("4", 3);
+    rotatorStagesBox.setTooltip ("Phase rotator stage count. Only affects audio when Phase Filter is enabled.");
+    addAndMakeVisible (rotatorStagesBox);
+
     timeZoomSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     timeZoomSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 46, 20);
     timeZoomSlider.setRange (1.0, 16.0, 0.1);
     timeZoomSlider.setValue (1.0, juce::dontSendNotification);
-    timeZoomSlider.setTooltip ("Horizontal zoom. Scroll over the scope to zoom too.");
-    timeZoomSlider.onValueChange = [this]
-    {
-        oscilloscope.setTimeZoom ((float) timeZoomSlider.getValue());
-    };
+    timeZoomSlider.setTooltip ("Horizontal zoom for the scope. Mouse wheel also works over the scope.");
+    timeZoomSlider.onValueChange = [this] { oscilloscope.setTimeZoom ((float) timeZoomSlider.getValue()); };
     addAndMakeVisible (timeZoomSlider);
-
-    timeZoomLabel.setText ("H Zoom", juce::dontSendNotification);
-    addAndMakeVisible (timeZoomLabel);
 
     ampZoomSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     ampZoomSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 46, 20);
     ampZoomSlider.setRange (1.0, 8.0, 0.1);
     ampZoomSlider.setValue (1.0, juce::dontSendNotification);
-    ampZoomSlider.setTooltip ("Vertical zoom. Shift+scroll over the scope to zoom too.");
-    ampZoomSlider.onValueChange = [this]
-    {
-        oscilloscope.setAmpZoom ((float) ampZoomSlider.getValue());
-    };
+    ampZoomSlider.setTooltip ("Vertical scope zoom. Shift+wheel also works over the scope.");
+    ampZoomSlider.onValueChange = [this] { oscilloscope.setAmpZoom ((float) ampZoomSlider.getValue()); };
     addAndMakeVisible (ampZoomSlider);
 
-    ampZoomLabel.setText ("V Zoom", juce::dontSendNotification);
-    addAndMakeVisible (ampZoomLabel);
-
-    // Wheel-zoom on the scope pushes values back into the sliders.
     oscilloscope.onZoomChanged = [this]
     {
         timeZoomSlider.setValue (oscilloscope.getTimeZoom(), juce::dontSendNotification);
-        ampZoomSlider.setValue  (oscilloscope.getAmpZoom(),  juce::dontSendNotification);
+        ampZoomSlider.setValue (oscilloscope.getAmpZoom(), juce::dontSendNotification);
     };
 
-    // Section headers.
-    auto configureHeader = [this] (juce::Label& header, const juce::String& text)
-    {
-        header.setText (text, juce::dontSendNotification);
-        header.setFont (juce::Font (juce::FontOptions (13.0f)).boldened());
-        header.setColour (juce::Label::textColourId, juce::Colour (0xff9ca3af));
-        addAndMakeVisible (header);
-    };
-    configureHeader (alignmentHeader, "ALIGNMENT");
-    configureHeader (rotatorHeader,   "PHASE ROTATOR");
-
-    // Delay (ms): horizontal linear slider, value box to the right.
-    delayMsSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    delayMsSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
-    delayMsSlider.setTextValueSuffix (" ms");
-    delayMsSlider.setTooltip ("Audio delay on the bass/main path only. Kick timing changes are shown as recommendations.");
-    addAndMakeVisible (delayMsSlider);
-
-    delayMsLabel.setText ("Bass Delay", juce::dontSendNotification);
-    addAndMakeVisible (delayMsLabel);
-
-    // Interpolation: ComboBox item IDs are 1-based (param index 0 -> ID 1).
-    delayInterpBox.addItem ("Linear", 1);
-    delayInterpBox.addItem ("Allpass", 2);
-    addAndMakeVisible (delayInterpBox);
-
-    delayInterpLabel.setText ("Interpolation", juce::dontSendNotification);
-    addAndMakeVisible (delayInterpLabel);
-
-    polarityInvertButton.setButtonText ("Invert Bass Polarity");
-    polarityInvertButton.setTooltip ("Flip the bass polarity 180 degrees.");
-    addAndMakeVisible (polarityInvertButton);
-
-    phaseFilterEnabledButton.setButtonText ("Phase Filter");
-    phaseFilterEnabledButton.setTooltip ("Enable the bass allpass phase filter.");
-    addAndMakeVisible (phaseFilterEnabledButton);
-
-    rotatorFreqSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    rotatorFreqSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
-    rotatorFreqSlider.setTextValueSuffix (" Hz");
-    rotatorFreqSlider.setNumDecimalPlacesToDisplay (0);
-    addAndMakeVisible (rotatorFreqSlider);
-
-    rotatorFreqLabel.setText ("Frequency", juce::dontSendNotification);
-    addAndMakeVisible (rotatorFreqLabel);
-
-    rotatorQSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    rotatorQSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
-    rotatorQSlider.setNumDecimalPlacesToDisplay (2);
-    addAndMakeVisible (rotatorQSlider);
-
-    rotatorQLabel.setText ("Resonance (Q)", juce::dontSendNotification);
-    addAndMakeVisible (rotatorQLabel);
-
-    rotatorStagesBox.addItem ("2", 1);
-    rotatorStagesBox.addItem ("3", 2);
-    rotatorStagesBox.addItem ("4", 3);
-    addAndMakeVisible (rotatorStagesBox);
-
-    rotatorStagesLabel.setText ("Stages", juce::dontSendNotification);
-    addAndMakeVisible (rotatorStagesLabel);
-
-    // Attachments: bind each control to its APVTS parameter.
-    delayMsAttachment        = std::make_unique<SliderAttachment>   (audioProcessor.apvts, "delayMs", delayMsSlider);
-    delayInterpAttachment    = std::make_unique<ComboBoxAttachment> (audioProcessor.apvts, "delayInterp", delayInterpBox);
-    polarityInvertAttachment = std::make_unique<ButtonAttachment>   (audioProcessor.apvts, "polarityInvert", polarityInvertButton);
+    delayMsAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, "delayMs", delayMsSlider);
+    delayInterpAttachment = std::make_unique<ComboBoxAttachment> (audioProcessor.apvts, "delayInterp", delayInterpBox);
+    gridDivisionAttachment = std::make_unique<ComboBoxAttachment> (audioProcessor.apvts, "gridDivision", gridDivisionBox);
+    viewModeAttachment = std::make_unique<ComboBoxAttachment> (audioProcessor.apvts, "scopeViewMode", viewModeBox);
+    visualOffsetAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, "visualOffsetSamples", visualOffsetSlider);
+    polarityInvertAttachment = std::make_unique<ButtonAttachment> (audioProcessor.apvts, "polarityInvert", polarityInvertButton);
     phaseFilterEnabledAttachment = std::make_unique<ButtonAttachment> (audioProcessor.apvts, "phaseFilterEnabled", phaseFilterEnabledButton);
-    rotatorFreqAttachment    = std::make_unique<SliderAttachment>   (audioProcessor.apvts, "rotatorFreq", rotatorFreqSlider);
-    rotatorQAttachment       = std::make_unique<SliderAttachment>   (audioProcessor.apvts, "rotatorQ", rotatorQSlider);
-    rotatorStagesAttachment  = std::make_unique<ComboBoxAttachment> (audioProcessor.apvts, "rotatorStages", rotatorStagesBox);
+    rotatorFreqAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, "rotatorFreq", rotatorFreqSlider);
+    rotatorQAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, "rotatorQ", rotatorQSlider);
+    rotatorStagesAttachment = std::make_unique<ComboBoxAttachment> (audioProcessor.apvts, "rotatorStages", rotatorStagesBox);
 
-    setSize (760, 660);
+    setSize (1120, 720);
+    syncScopeSettings();
+    updateStatusLabels();
+    startTimerHz (12);
 }
 
 KickLockAudioProcessorEditor::~KickLockAudioProcessorEditor()
 {
+    stopTimer();
     setLookAndFeel (nullptr);
 }
 
 void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colour (0xff1a1a1a));
+    g.fillAll (appBackground);
 
-    // Title bar.
-    g.setColour (juce::Colour (0xff2dd4bf));
-    g.setFont (juce::Font (juce::FontOptions (20.0f)).boldened());
-    g.drawText ("KICKLOCK", 16, 10, 300, 28, juce::Justification::centredLeft);
+    auto bounds = getLocalBounds().reduced (16);
+    const auto topBar = bounds.removeFromTop (112).toFloat();
+    bounds.removeFromTop (12);
+    auto content = bounds.removeFromTop (430);
+    const auto sidePanel = content.removeFromRight (300).toFloat();
+    content.removeFromRight (12);
+    const auto scopePanel = content.toFloat();
+    bounds.removeFromTop (12);
+    const auto footerPanel = bounds.removeFromTop (44).toFloat();
 
-    g.setColour (juce::Colour (0xff6b7280));
+    for (auto panel : { topBar, scopePanel, sidePanel, footerPanel })
+    {
+        g.setColour (panelBackground);
+        g.fillRoundedRectangle (panel, 14.0f);
+        g.setColour (panelBorder);
+        g.drawRoundedRectangle (panel, 14.0f, 1.2f);
+    }
+
+    g.setColour (accentTeal);
+    g.setFont (juce::Font (juce::FontOptions (28.0f)).boldened());
+    g.drawText ("KICKLOCK",
+                juce::Rectangle<int> ((int) topBar.getX() + 18, (int) topBar.getY() + 16, 220, 28),
+                juce::Justification::centredLeft);
+
+    g.setColour (softText);
     g.setFont (juce::Font (juce::FontOptions (12.0f)));
-    g.drawText ("phase alignment", 150, 14, 300, 22, juce::Justification::centredLeft);
+    g.drawText ("Phase Alignment Tool",
+                juce::Rectangle<int> ((int) topBar.getX() + 20, (int) topBar.getY() + 48, 180, 16),
+                juce::Justification::centredLeft);
 }
 
 void KickLockAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds().reduced (16);
 
-    bounds.removeFromTop (34); // title bar
+    auto topBar = bounds.removeFromTop (112);
+    bounds.removeFromTop (12);
+    auto content = bounds.removeFromTop (430);
+    auto sidePanel = content.removeFromRight (300);
+    content.removeFromRight (12);
+    auto scopePanel = content;
+    bounds.removeFromTop (12);
+    auto footerPanel = bounds.removeFromTop (44);
 
-    // --- Scope + correlation panel side by side --------------------------
-    auto topArea = bounds.removeFromTop (200);
+    auto brandArea = topBar.removeFromLeft (250);
+    topBar.removeFromLeft (16);
+    auto controlsArea = topBar;
 
-    // Correlation panel gets a fixed column on the right.
-    auto corrArea = topArea.removeFromRight (150);
-    topArea.removeFromRight (10); // gap
-    oscilloscope.setBounds (topArea);
-    correlationDisplay.setBounds (corrArea);
+    brandArea.removeFromTop (58);
+    processingDetailLabel.setBounds (brandArea.removeFromTop (18));
+    sidechainStatusLabel.setBounds (brandArea.removeFromTop (18));
+    processingStatusLabel.setBounds (brandArea.removeFromTop (20));
 
-    bounds.removeFromTop (6);
+    auto row1 = controlsArea.removeFromTop (34);
+    auto row2 = controlsArea.removeFromTop (34);
 
-    // --- Toolbar row: zoom sliders (left) + Analyze/Freeze (right) --------
-    auto toolbar = bounds.removeFromTop (26);
-
-    freezeButton.setBounds  (toolbar.removeFromRight (84).reduced (0, 2));
-    toolbar.removeFromRight (8);
-    applyFixButton.setBounds (toolbar.removeFromRight (96).reduced (0, 2));
-    toolbar.removeFromRight (8);
-    analyzeButton.setBounds (toolbar.removeFromRight (96).reduced (0, 2));
-    toolbar.removeFromRight (16);
-
-    // Remaining toolbar width holds the two zoom sliders.
-    auto zoomArea = toolbar;
-    auto timeZoomArea = zoomArea.removeFromLeft (zoomArea.getWidth() / 2 - 6);
-    zoomArea.removeFromLeft (12);
-    auto ampZoomArea = zoomArea;
-
-    timeZoomLabel.setBounds (timeZoomArea.removeFromLeft (52));
-    timeZoomSlider.setBounds (timeZoomArea);
-    ampZoomLabel.setBounds (ampZoomArea.removeFromLeft (52));
-    ampZoomSlider.setBounds (ampZoomArea);
-
-    bounds.removeFromTop (4);
-
-    // --- Analyze result line ---------------------------------------------
-    analyzeResultLabel.setBounds (bounds.removeFromTop (20));
-    fixActionLabel.setBounds (bounds.removeFromTop (20));
-    fixStatsLabel.setBounds (bounds.removeFromTop (20));
-    fixSettingsLabel.setBounds (bounds.removeFromTop (20));
-    fixTimelineLabel.setBounds (bounds.removeFromTop (20));
-
-    bounds.removeFromTop (6);
-
-    // --- Two control columns ---------------------------------------------
-    auto controlsArea = bounds;
-    auto leftCol  = controlsArea.removeFromLeft (controlsArea.getWidth() / 2 - 8);
-    controlsArea.removeFromLeft (16); // gutter
-    auto rightCol = controlsArea;
-
-    alignmentHeader.setBounds (leftCol.removeFromTop (22));
-    rotatorHeader.setBounds  (rightCol.removeFromTop (22));
-
-    leftCol.removeFromTop (4);
-    rightCol.removeFromTop (4);
-
-    const int rowH = 30;
-
-    auto layoutRow = [] (juce::Rectangle<int>& col, juce::Label& label, juce::Component& control, int h)
+    auto layoutCompact = [] (juce::Rectangle<int>& row, juce::Label& label, juce::Component& control,
+                             int labelWidth, int controlWidth)
     {
-        auto row = col.removeFromTop (h);
-        label.setBounds (row.removeFromLeft (96));
-        control.setBounds (row);
-        col.removeFromTop (8); // row spacing
+        label.setBounds (row.removeFromLeft (labelWidth));
+        control.setBounds (row.removeFromLeft (controlWidth));
     };
 
-    // Left: alignment controls.
-    layoutRow (leftCol, delayMsLabel,     delayMsSlider,  rowH);
-    layoutRow (leftCol, delayInterpLabel, delayInterpBox, rowH);
-    polarityInvertButton.setBounds (leftCol.removeFromTop (rowH));
-    leftCol.removeFromTop (8);
-    phaseFilterEnabledButton.setBounds (leftCol.removeFromTop (rowH));
+    layoutCompact (row1, gridDivisionLabel, gridDivisionBox, 34, 82);
+    row1.removeFromLeft (10);
+    layoutCompact (row1, viewModeLabel, viewModeBox, 36, 110);
+    row1.removeFromLeft (12);
+    layoutCompact (row1, bpmLabel, bpmValueLabel, 28, 86);
+    row1.removeFromLeft (12);
+    layoutCompact (row1, visualOffsetLabel, visualOffsetSlider, 30, 220);
+    row1.removeFromLeft (12);
+    analyzeButton.setBounds (row1.removeFromLeft (100).reduced (0, 2));
+    row1.removeFromLeft (8);
+    applyFixButton.setBounds (row1.removeFromLeft (100).reduced (0, 2));
 
-    // Right: rotator controls.
-    layoutRow (rightCol, rotatorFreqLabel,   rotatorFreqSlider, rowH);
-    layoutRow (rightCol, rotatorQLabel,      rotatorQSlider,    rowH);
-    layoutRow (rightCol, rotatorStagesLabel, rotatorStagesBox,  rowH);
+    layoutCompact (row2, delayMsLabel, delayMsSlider, 40, 220);
+    row2.removeFromLeft (12);
+    polarityInvertButton.setBounds (row2.removeFromLeft (128));
+
+    auto scopeArea = scopePanel.reduced (10);
+    oscilloscope.setBounds (scopeArea);
+
+    auto rightArea = sidePanel.reduced (12);
+    correlationDisplay.setBounds (rightArea.removeFromTop (170));
+    rightArea.removeFromTop (12);
+
+    analysisHeaderLabel.setBounds (rightArea.removeFromTop (18));
+    rightArea.removeFromTop (4);
+    analyzeResultLabel.setBounds (rightArea.removeFromTop (38));
+    fixActionLabel.setBounds (rightArea.removeFromTop (24));
+    fixStatsLabel.setBounds (rightArea.removeFromTop (38));
+    fixConfidenceLabel.setBounds (rightArea.removeFromTop (24));
+    fixSettingsLabel.setBounds (rightArea.removeFromTop (42));
+    fixTimelineLabel.setBounds (rightArea.removeFromTop (42));
+
+    auto footerArea = footerPanel.reduced (12, 8);
+    auto layoutFooter = [] (juce::Rectangle<int>& row, juce::Label& label, juce::Component& control,
+                            int labelWidth, int controlWidth)
+    {
+        label.setBounds (row.removeFromLeft (labelWidth));
+        control.setBounds (row.removeFromLeft (controlWidth));
+    };
+
+    layoutFooter (footerArea, phaseSectionLabel, phaseFilterEnabledButton, 84, 92);
+    footerArea.removeFromLeft (12);
+    layoutFooter (footerArea, rotatorFreqLabel, rotatorFreqSlider, 36, 160);
+    footerArea.removeFromLeft (12);
+    layoutFooter (footerArea, rotatorQLabel, rotatorQSlider, 18, 140);
+    footerArea.removeFromLeft (12);
+    layoutFooter (footerArea, rotatorStagesLabel, rotatorStagesBox, 52, 70);
+    footerArea.removeFromLeft (12);
+    layoutFooter (footerArea, delayInterpLabel, delayInterpBox, 42, 108);
+    footerArea.removeFromLeft (12);
+    layoutFooter (footerArea, timeZoomLabel, timeZoomSlider, 38, 140);
+    footerArea.removeFromLeft (12);
+    layoutFooter (footerArea, ampZoomLabel, ampZoomSlider, 34, 140);
+    footerArea.removeFromLeft (12);
+    freezeButton.setBounds (footerArea.removeFromLeft (84).reduced (0, 1));
+}
+
+void KickLockAudioProcessorEditor::timerCallback()
+{
+    syncScopeSettings();
+    updateStatusLabels();
+}
+
+void KickLockAudioProcessorEditor::syncScopeSettings()
+{
+    oscilloscope.setTimebase (audioProcessor.getSampleRate(), audioProcessor.getScopeDecimationFactor());
+
+    if (const auto* gridParam = audioProcessor.apvts.getRawParameterValue ("gridDivision"))
+        oscilloscope.setGridDivision (gridDivisionFromChoiceIndex ((int) std::lround (gridParam->load())));
+
+    oscilloscope.setTempoInfo (audioProcessor.getLatestBpm(), audioProcessor.isTempoAvailable());
+
+    if (const auto* viewModeParam = audioProcessor.apvts.getRawParameterValue ("scopeViewMode"))
+        oscilloscope.setViewMode (scopeViewModeFromChoiceIndex ((int) std::lround (viewModeParam->load())));
+
+    if (const auto* offsetParam = audioProcessor.apvts.getRawParameterValue ("visualOffsetSamples"))
+        oscilloscope.setVisualOffsetSamples ((int) std::lround (offsetParam->load()));
+}
+
+void KickLockAudioProcessorEditor::updateStatusLabels()
+{
+    const bool neutral = audioProcessor.isBassProcessingNeutral();
+    const bool hasSidechain = audioProcessor.hasSidechainReference();
+    const auto latest = audioProcessor.getLatestFixResult();
+    const auto sidechainStatus = classifySidechainSignalStatus (hasSidechain,
+                                                                audioProcessor.getBassSignalRms(),
+                                                                audioProcessor.getKickSignalRms());
+    const auto workflowStatus = classifyProcessingWorkflowStatus (neutral,
+                                                                  hasFixReady
+                                                                      && sidechainStatus == SidechainSignalStatus::SidechainActive);
+
+    const auto* delayParam = audioProcessor.apvts.getRawParameterValue ("delayMs");
+    const auto* polarityParam = audioProcessor.apvts.getRawParameterValue ("polarityInvert");
+    const auto* phaseParam = audioProcessor.apvts.getRawParameterValue ("phaseFilterEnabled");
+
+    const float delayMs = delayParam != nullptr ? delayParam->load() : 0.0f;
+    const bool polarity = polarityParam != nullptr && polarityParam->load() > 0.5f;
+    const bool phase = phaseParam != nullptr && phaseParam->load() > 0.5f;
+    const float currentMatch = audioProcessor.correlationPercent.load();
+
+    switch (sidechainStatus)
+    {
+        case SidechainSignalStatus::WaitingForSidechain:
+            sidechainStatusLabel.setText ("WAITING FOR SIDECHAIN", juce::dontSendNotification);
+            sidechainStatusLabel.setColour (juce::Label::textColourId, accentOrange);
+            processingDetailLabel.setText ("Connect the kick reference to the sidechain input.",
+                                           juce::dontSendNotification);
+            break;
+
+        case SidechainSignalStatus::SignalTooLow:
+            sidechainStatusLabel.setText ("SIGNAL TOO LOW", juce::dontSendNotification);
+            sidechainStatusLabel.setColour (juce::Label::textColourId, accentOrange);
+            processingDetailLabel.setText ("Kick or bass is too quiet for a reliable low-end phase read.",
+                                           juce::dontSendNotification);
+            break;
+
+        case SidechainSignalStatus::SidechainActive:
+            sidechainStatusLabel.setText ("SIDECHAIN ACTIVE", juce::dontSendNotification);
+            sidechainStatusLabel.setColour (juce::Label::textColourId, accentTeal);
+            break;
+    }
+
+    if (audioProcessor.isTempoAvailable())
+        bpmValueLabel.setText (juce::String ((int) std::round (audioProcessor.getLatestBpm())) + " BPM",
+                               juce::dontSendNotification);
+    else
+        bpmValueLabel.setText ("BPM --", juce::dontSendNotification);
+
+    switch (workflowStatus)
+    {
+        case ProcessingWorkflowStatus::ProcessingBass:
+        {
+            processingStatusLabel.setText ("PROCESSING BASS", juce::dontSendNotification);
+            processingStatusLabel.setColour (juce::Label::textColourId, accentTeal);
+
+            if (sidechainStatus == SidechainSignalStatus::SidechainActive)
+            {
+                juce::String detail;
+                detail << "Delay " << formatBassDelayMs (delayMs)
+                       << "  |  Polarity " << (polarity ? "Inverted" : "Normal")
+                       << "  |  Phase " << (phase ? "On" : "Off");
+                processingDetailLabel.setText (detail, juce::dontSendNotification);
+            }
+            break;
+        }
+
+        case ProcessingWorkflowStatus::FixReady:
+            processingStatusLabel.setText ("FIX READY", juce::dontSendNotification);
+            processingStatusLabel.setColour (juce::Label::textColourId, accentOrange);
+            if (sidechainStatus == SidechainSignalStatus::SidechainActive)
+            {
+                processingDetailLabel.setText (
+                    latest.quality == PhaseFixQuality::PartialImprovement
+                        ? "Analyze found a partial bass-path improvement. Audio stays dry until Apply Fix."
+                        : latest.quality == PhaseFixQuality::AlreadyGood && latest.phaseFilterEnabled
+                            ? "Analyze found an optional phase refinement. Audio stays dry until Apply Fix."
+                            : "Analyze found a bass-path fix. Audio stays dry until Apply Fix.",
+                    juce::dontSendNotification);
+            }
+            break;
+
+        case ProcessingWorkflowStatus::MonitoringDryInput:
+            processingStatusLabel.setText ("MONITORING DRY INPUT", juce::dontSendNotification);
+            processingStatusLabel.setColour (juce::Label::textColourId, accentTeal);
+            if (sidechainStatus == SidechainSignalStatus::SidechainActive)
+                processingDetailLabel.setText ("Bass path is dry. Scope and meter are reading the live low-end relationship.",
+                                               juce::dontSendNotification);
+            break;
+    }
+
+    if (! hasAnalyzedResult)
+    {
+        analyzeResultLabel.setText (sidechainStatus == SidechainSignalStatus::WaitingForSidechain
+                                        ? "Waiting for kick sidechain."
+                                        : sidechainStatus == SidechainSignalStatus::SignalTooLow
+                                            ? "Needs stronger kick and bass signal before analysis."
+                                            : "Analyze the current window to prepare a bass-path fix.",
+                                    juce::dontSendNotification);
+        fixActionLabel.setText (sidechainStatus == SidechainSignalStatus::WaitingForSidechain
+                                    ? "Quality: Waiting For Signal"
+                                    : sidechainStatus == SidechainSignalStatus::SignalTooLow
+                                        ? "Quality: Waiting For Signal"
+                                        : "Quality: Monitoring",
+                                juce::dontSendNotification);
+        fixStatsLabel.setText ("Original --   Predicted --   Verified --   Current "
+                               + juce::String ((int) std::round (currentMatch)) + "%",
+                               juce::dontSendNotification);
+        fixConfidenceLabel.setText ("Confidence --", juce::dontSendNotification);
+        fixSettingsLabel.setText ("Bass Delay: 0.00 ms   Polarity: Normal   Phase: OFF",
+                                  juce::dontSendNotification);
+        fixTimelineLabel.setText ("Timeline note: Apply Fix stays disabled until Analyze finds a usable bass-path result.",
+                                  juce::dontSendNotification);
+    }
+    else
+    {
+        if (analyzeResultLabel.getText().isEmpty())
+            analyzeResultLabel.setText (latest.message, juce::dontSendNotification);
+
+        fixActionLabel.setText ("Quality: " + qualityLabel (latest.quality),
+                                juce::dontSendNotification);
+
+        juce::String matches;
+        matches << "Original " << juce::String ((int) std::round (audioProcessor.latestAnalyzedBeforePercent.load())) << "%"
+                << "   Predicted " << juce::String ((int) std::round (audioProcessor.latestAnalyzedAfterPercent.load())) << "%";
+        const auto verified = audioProcessor.latestVerifiedAfterPercent.load();
+        if (verified >= 0.0f)
+            matches << "   Verified " << juce::String ((int) std::round (verified)) << "%";
+        else
+            matches << "   Verified --";
+        matches
+                << "   Current " << juce::String ((int) std::round (currentMatch)) << "%";
+        fixStatsLabel.setText (matches, juce::dontSendNotification);
+
+        juce::String confidenceText;
+        confidenceText << "Confidence "
+                       << juce::String ((int) std::round (audioProcessor.latestFixConfidence.load())) << "%";
+        if (latest.singleHitAnalysis)
+            confidenceText << "   Single-hit analysis";
+        if (latest.verificationWarning)
+            confidenceText << "   Verify delta "
+                           << juce::String ((int) std::round (audioProcessor.latestVerificationDeltaPercent.load()))
+                           << "%";
+        fixConfidenceLabel.setText (confidenceText,
+                                    juce::dontSendNotification);
+
+        juce::String settings;
+        settings << "Bass Delay: " << formatBassDelayMs (latest.bassDelayMs)
+                 << "   Polarity: " << (latest.bassPolarityInvert ? "Flip" : "Normal")
+                 << "   Phase: ";
+        if (latest.phaseFilterEnabled)
+            settings << "ON"
+                     << (latest.quality == PhaseFixQuality::AlreadyGood ? " (Optional refinement)" : "")
+                     << " | " << juce::String ((int) std::round (latest.phaseFilterFreqHz)) << " Hz / Q "
+                     << juce::String (latest.phaseFilterQ, 1) << " / "
+                     << juce::String (latest.phaseFilterStages) << " st";
+        else
+            settings << "OFF";
+        fixSettingsLabel.setText (settings, juce::dontSendNotification);
+
+        juce::String timeline;
+        timeline << "Timeline note: ";
+        if (phase && ! latest.phaseFilterEnabled)
+        {
+            timeline << "New fix disables previous phase filter. ";
+
+            if (latest.requiresTimelineMove)
+                timeline << "Move kick later by " << juce::String (latest.suggestedKickMoveMs, 2) << " ms in the DAW.";
+            else if (hasApplyAction (latest))
+                timeline << "Apply Fix to clear it.";
+            else
+                timeline << "New analysis does not recommend phase filter. Turn Phase off manually or re-analyze when the signal is clearer.";
+        }
+        else if (latest.requiresTimelineMove)
+            timeline << "Move kick later by " << juce::String (latest.suggestedKickMoveMs, 2) << " ms in the DAW.";
+        else if (latest.quality == PhaseFixQuality::LargeTimingOffset)
+            timeline << "Large timing offset. Move the clip/sample in the DAW timeline instead of auto-delaying bass.";
+        else if (latest.quality == PhaseFixQuality::Unstable)
+            timeline << "Different hits disagree. Use a shorter loop or adjust the arrangement before applying a fix.";
+        else if (latest.quality == PhaseFixQuality::AlreadyGood && latest.phaseFilterEnabled)
+            timeline << (hasFixReady
+                            ? "Already close overall. Apply Fix only if you want the optional phase refinement."
+                            : "Optional phase refinement has already been applied.");
+        else if (latest.verificationWarning)
+            timeline << "Prediction mismatch after apply. Re-analyze or adjust manually.";
+        else if (PhaseFixEngine::canApply (latest))
+            timeline << (latest.quality == PhaseFixQuality::PartialImprovement
+                            ? (hasFixReady
+                                ? "Apply Fix for a partial improvement, then listen and decide."
+                                : "Partial fix has already been applied. Listen and decide.")
+                            : (hasFixReady
+                                ? "Apply Fix to change bass."
+                                : "Latest fix has already been applied."));
+        else if (latest.quality == PhaseFixQuality::AlreadyGood)
+            timeline << "Already close.";
+        else
+            timeline << "No useful bass-path fix is available yet.";
+        fixTimelineLabel.setText (timeline, juce::dontSendNotification);
+    }
+
+    if (latest.quality == PhaseFixQuality::PartialImprovement)
+    {
+        applyFixButton.setButtonText ("Apply Partial");
+        applyFixButton.setTooltip ("Applies a partial improvement to the bass path. Listen and decide.");
+    }
+    else if (latest.quality == PhaseFixQuality::AlreadyGood && latest.phaseFilterEnabled)
+    {
+        applyFixButton.setButtonText ("Apply Refinement");
+        applyFixButton.setTooltip ("Applies the optional phase refinement to the bass path.");
+    }
+    else
+    {
+        applyFixButton.setButtonText ("Apply Fix");
+        applyFixButton.setTooltip ("Apply the latest safe bass correction. This never moves the kick reference.");
+    }
+
+    applyFixButton.setEnabled (hasFixReady
+                               && sidechainStatus == SidechainSignalStatus::SidechainActive);
+
+    for (auto* c : { static_cast<juce::Component*> (&rotatorFreqSlider),
+                     static_cast<juce::Component*> (&rotatorFreqLabel),
+                     static_cast<juce::Component*> (&rotatorQSlider),
+                     static_cast<juce::Component*> (&rotatorQLabel),
+                     static_cast<juce::Component*> (&rotatorStagesBox),
+                     static_cast<juce::Component*> (&rotatorStagesLabel) })
+    {
+        c->setEnabled (phase);
+    }
 }

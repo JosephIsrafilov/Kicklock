@@ -42,6 +42,11 @@ public:
         g.drawText ("PHASE MATCH", area.removeFromTop (16.0f).toNearestInt(),
                     juce::Justification::centred);
 
+        g.setColour (juce::Colour (0xff6f7d89));
+        g.setFont (juce::Font (juce::FontOptions (10.0f)));
+        g.drawText ("30-120 Hz", area.removeFromTop (14.0f).toNearestInt(),
+                    juce::Justification::centred);
+
         // Big percent.
         g.setColour (accent);
         g.setFont (juce::Font (juce::FontOptions (44.0f)).boldened());
@@ -50,9 +55,9 @@ public:
                     juce::Justification::centred);
 
         // Status word.
-        const juce::String status = pct >= 80.0f ? "ALIGNED"
-                                   : pct >= 50.0f ? "PARTIAL"
-                                                  : "FIGHTING";
+        const juce::String status = pct >= 75.0f ? "% ALIGNED"
+                                   : pct >= 50.0f ? "MIXED"
+                                                  : "CANCELING";
         g.setColour (accent);
         g.setFont (juce::Font (juce::FontOptions (13.0f)).boldened());
         g.drawText (status, area.removeFromTop (18.0f).toNearestInt(),

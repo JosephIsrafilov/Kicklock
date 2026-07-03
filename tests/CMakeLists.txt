@@ -4,7 +4,10 @@ add_executable(KickLockDspTests
 
 target_include_directories(KickLockDspTests
     PRIVATE
+        ../src
         ../src/dsp
+        ../src/util
+        ${CMAKE_BINARY_DIR}/KickLock_artefacts/JuceLibraryCode
 )
 
 target_compile_features(KickLockDspTests
@@ -19,8 +22,10 @@ set_target_properties(KickLockDspTests PROPERTIES
 
 target_link_libraries(KickLockDspTests
     PRIVATE
+        KickLock
         juce::juce_core
         juce::juce_dsp
+        juce::juce_audio_utils
 )
 
 add_test(NAME KickLockDspTests COMMAND KickLockDspTests)
