@@ -1,5 +1,9 @@
 add_executable(KickLockDspTests
-    DspTests.cpp
+    DspCoreTests.cpp
+    DspTestMain.cpp
+    P10Tests.cpp
+    ProcessorTests.cpp
+    UiHelperTests.cpp
 )
 
 target_include_directories(KickLockDspTests
@@ -29,3 +33,7 @@ target_link_libraries(KickLockDspTests
 )
 
 add_test(NAME KickLockDspTests COMMAND KickLockDspTests)
+add_test(NAME KickLockDspTests.DSP COMMAND KickLockDspTests DSP)
+add_test(NAME KickLockDspTests.Processor COMMAND KickLockDspTests Processor)
+add_test(NAME KickLockDspTests.P10 COMMAND KickLockDspTests P10)
+add_test(NAME KickLockDspTests.UIHelpers COMMAND KickLockDspTests "UI Helpers")
