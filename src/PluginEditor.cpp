@@ -58,7 +58,9 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     : AudioProcessorEditor (&p),
       audioProcessor (p),
       oscilloscope (p.scopeFifo),
-      correlationDisplay (p.correlationPercent)
+      correlationDisplay (p.liveMultiBandMatchPercent,
+                          p.liveLowEndMatchPercent,
+                          p.liveBroadbandMatchPercent)
 {
     setLookAndFeel (&lookAndFeel);
 
@@ -378,7 +380,7 @@ void KickLockAudioProcessorEditor::resized()
     // Vertical budget is tight (406 px); the score/timeline labels render as
     // two lines each, so heights below are sized for wrapped text, not clipped.
     auto rightArea = sidePanel.reduced (12);
-    correlationDisplay.setBounds (rightArea.removeFromTop (156));
+    correlationDisplay.setBounds (rightArea.removeFromTop (174));
     rightArea.removeFromTop (10);
 
     analysisHeaderLabel.setBounds (rightArea.removeFromTop (18));

@@ -555,7 +555,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     transientDetector.setAttackReleaseMs (2.0f, 60.0f);
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 25.0f, 180.0f);
-    hitHistory.reset();
 
     // Held-activity trackers for the P3 status. ~500 ms hold so a steady loop
     // never flickers to "no signal" in the gaps between kick transients. The
@@ -990,78 +989,6 @@ void KickLockAudioProcessor::setStateInformation (const void* data, int sizeInBy
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
-AnalyzerInstruction KickLockAudioProcessor::analyzeAndApply (AnalyzeMode mode)
-{
-    const auto fix = analyzeFix();
-
-    AnalyzerInstruction instruction;
-    instruction.delayMs = fix.bassDelayMs;
-    instruction.flipPolarity = fix.bassPolarityInvert;
-    instruction.phaseFilterRecommended = fix.phaseFilterEnabled;
-    instruction.phaseFilterFreqHz = fix.phaseFilterFreqHz;
-    instruction.phaseFilterQ = fix.phaseFilterQ;
-    instruction.phaseFilterStages = fix.phaseFilterStages;
-    instruction.beforeMatchPercent = fix.beforeMatchPercent;
-    instruction.afterMatchPercent = fix.afterMatchPercent;
-    instruction.confidence = fix.confidence;
-    instruction.message = fix.message;
-
-    if (! fix.enoughSignal)
-        instruction.action = AlignmentAction::NotEnoughSignal;
-    else if (fix.largeTimingOffset)
-        instruction.action = AlignmentAction::LowConfidence;
-    else if (fix.requiresTimelineMove)
-    {
-        instruction.action = AlignmentAction::RecommendMoveKick;
-        instruction.delayMs = -fix.suggestedKickMoveMs;
-    }
-    else if (fix.unstableRecommendation)
-        instruction.action = AlignmentAction::LowConfidence;
-    else if (fix.quality == PhaseFixQuality::AlreadyGood && fix.phaseFilterEnabled)
-        instruction.action = AlignmentAction::RecommendPhaseFilter;
-    else if (fix.quality == PhaseFixQuality::NoUsefulChange)
-        instruction.action = AlignmentAction::LowConfidence;
-    else if (fix.bassDelayMs > 0.02f)
-        instruction.action = AlignmentAction::ApplyBassDelay;
-    else if (fix.bassPolarityInvert)
-        instruction.action = AlignmentAction::FlipBassPolarity;
-    else if (fix.phaseFilterEnabled)
-        instruction.action = AlignmentAction::RecommendPhaseFilter;
-
-    if (mode == AnalyzeMode::AutoApplySafe)
-        applyLatestFix();
-
-    return instruction;
-}
-
-HitAnalysisResult KickLockAudioProcessor::analyzeLatestHit()
-{
-    std::vector<float> bass, kick;
-    const int n = hitCapture.snapshotLatest (bass, kick);
-
-    if (n <= 0)
-    {
-        HitAnalysisResult result;
-        result.instruction.action = AlignmentAction::NotEnoughSignal;
-        result.instruction.message = "Waiting for detected kick hit.";
-        return result;
-    }
-
-    auto result = PerHitAnalyzer::analyzeHit (bass.data(), kick.data(), n,
-                                              getSampleRate(), hitCapture.getSequence());
-
-    if (! result.valid)
-        return result;
-
-    hitHistory.push (result);
-
-    result.instruction.message << " | hit avg "
-                               << juce::String ((int) std::round (hitHistory.getRollingMatchPercent())) << "%"
-                               << " over " << juce::String (hitHistory.getCount());
-
-    return result;
-}
-
 PhaseFixResult KickLockAudioProcessor::analyzeFix()
 {
     std::vector<float> bass, kick;
@@ -1240,11 +1167,6 @@ PhaseFixResult KickLockAudioProcessor::getLatestFixResult() const
 {
     const std::lock_guard<std::mutex> lock (resultMutex);
     return latestFixResult;
-}
-
-int KickLockAudioProcessor::getLatestHitSequence() const noexcept
-{
-    return hitCapture.getSequence();
 }
 
 int KickLockAudioProcessor::getScopeDecimationFactor() const noexcept

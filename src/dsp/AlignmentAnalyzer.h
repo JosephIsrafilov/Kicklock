@@ -65,30 +65,35 @@ public:
 
         juce::dsp::FFT fft (fftOrder);
 
-        // juce::dsp::FFT::performRealOnlyForwardTransform expects interleaved
-        // real/imag pairs, size = 2 * fftSize
+        // juce::dsp::FFT::performRealOnlyForwardTransform expects the real
+        // input packed contiguously in the first fftSize floats of a
+        // 2 * fftSize scratch buffer. Writing the samples into every other slot
+        // makes the transform see an effectively upsampled signal and doubles
+        // the recovered lag.
         std::vector<float> fftA (2 * (size_t) fftSize, 0.0f);
         std::vector<float> fftB (2 * (size_t) fftSize, 0.0f);
 
         for (int i = 0; i < window; ++i)
         {
-            fftA[2 * (size_t) i] = a[(size_t) i];
-            fftB[2 * (size_t) i] = b[(size_t) i];
+            fftA[(size_t) i] = a[(size_t) i];
+            fftB[(size_t) i] = b[(size_t) i];
         }
 
         fft.performRealOnlyForwardTransform (fftA.data(), true);
         fft.performRealOnlyForwardTransform (fftB.data(), true);
 
-        // Multiply FFT(a) * conj(FFT(b)) in-place into fftA
+        // We want c[d] = sum_n a[n] * b[n + d], so the frequency-domain form
+        // is conj(FFT(a)) * FFT(b). Using FFT(a) * conj(FFT(b)) mirrors the lag
+        // axis and flips the sign convention the processor relies on.
         for (int i = 0; i <= fftSize / 2; ++i)
         {
             const float ar = fftA[2 * i];
             const float ai = fftA[2 * i + 1];
             const float br = fftB[2 * i];
             const float bi = fftB[2 * i + 1];
-            // (ar + j*ai) * (br - j*bi)
+            // (ar - j*ai) * (br + j*bi)
             fftA[2 * i]     = ar * br + ai * bi;
-            fftA[2 * i + 1] = ai * br - ar * bi;
+            fftA[2 * i + 1] = ar * bi - ai * br;
         }
 
         fft.performRealOnlyInverseTransform (fftA.data());
