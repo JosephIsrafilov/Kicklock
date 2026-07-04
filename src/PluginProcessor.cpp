@@ -1305,14 +1305,27 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float activeLowEnd = hasSidechain ? activeMeter.getLowEndMatchPercent() : 50.0f;
     const float activeBroad = hasSidechain ? activeMeter.getBroadbandMatchPercent() : 50.0f;
 
-    dryInputMatchPercent.store (dryMatch);
-    processedMatchPercent.store (processedMatch);
+    // Smooth the UI values with a slow ~500ms EMA to prevent the numbers from dancing too fast
+    const float dt = (float)buffer.getNumSamples() / (float)getSampleRate();
+    const float uiAlpha = 1.0f - std::exp(-dt / 0.5f);
+
+    auto smoothAtomic = [uiAlpha](std::atomic<float>& target, float newValue) {
+        float current = target.load();
+        if (current < 0.0f || std::abs(current - 50.0f) < 0.001f) // uninitialized or exactly 50
+            target.store(newValue);
+        else
+            target.store(current + uiAlpha * (newValue - current));
+    };
+
+    smoothAtomic(dryInputMatchPercent, dryMatch);
+    smoothAtomic(processedMatchPercent, processedMatch);
 
     // P5/P8 live read-outs: overall multi-band, sub/low only, broad 20-500.
-    liveMultiBandMatchPercent.store (activeMatch);
-    liveLowEndMatchPercent.store (activeLowEnd);
-    liveBroadbandMatchPercent.store (activeBroad);
-    realtimeLowBandMatchPercent.store (activeLowEnd); // legacy alias (sub/low)
+    smoothAtomic(liveMultiBandMatchPercent, activeMatch);
+    smoothAtomic(liveLowEndMatchPercent, activeLowEnd);
+    smoothAtomic(liveBroadbandMatchPercent, activeBroad);
+    smoothAtomic(realtimeLowBandMatchPercent, activeLowEnd); // legacy alias (sub/low)
+
     correlationPercent.store ((realtimeCorrelation.load() + 1.0f) * 50.0f);
 }
 
