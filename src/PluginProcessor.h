@@ -159,6 +159,7 @@ private:
     // filter internally, so no separate pre-filter members are needed.
     RealtimeMultiBandMeter dryMultiBandMeter;
     RealtimeMultiBandMeter processedMultiBandMeter;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> processedMeterSidechainDelay;
 
     // Rolling capture of raw (pre-processing) mono bass/kick for the Analyze
     // button. Sized in prepareToPlay (~2 s). Written on the audio thread,

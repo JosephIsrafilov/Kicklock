@@ -18,6 +18,7 @@ struct AlignmentResult
     float rotatorFreqHz  = 200.0f;
     float rotatorQ       = 0.7f;
     int   rotatorStages  = 2;
+    bool  hitSearchLimit  = false;
 };
 
 class AlignmentAnalyzer
@@ -213,6 +214,7 @@ public:
         result.invertPolarity = bestVal < 0.0;
         result.beforeMatch    = toPercent (r0);
         result.afterMatch     = toPercent (std::abs (bestVal));
+        result.hitSearchLimit = std::abs (bestLag) >= maxLag;
 
         // --- Phase-rotator search ---
         const int   intLag = (int) std::llround (refinedLag);

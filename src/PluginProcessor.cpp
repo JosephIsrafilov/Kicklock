@@ -331,6 +331,11 @@ namespace
         if (consensus.hasConsensus)
         {
             const auto& domCluster = consensus.clusters[(size_t)consensus.dominantClusterIndex];
+            aggregated.unstableRecommendation =
+                consensus.clusters.size() > 1
+                || domCluster.memberIndices.size() < perHitResults.size()
+                || ! consensus.outlierIndices.empty();
+
             aggregated.bassPolarityInvert = domCluster.centroidPolarity;
             aggregated.bassDelayMs = domCluster.centroidDelayMs;
             aggregated.phaseFilterEnabled = domCluster.centroidPhaseEnabled;
@@ -341,6 +346,8 @@ namespace
         }
         else
         {
+            aggregated.unstableRecommendation = perHitResults.size() > 1;
+
             // Priority 2: Highest energy single hit
             int bestIdx = 0;
             float maxE = -1.0f;
@@ -456,8 +463,6 @@ namespace
 
         aggregated.predictedAfterMatchPercent = aggregated.afterMatchPercent;
         aggregated.improvementPercent = aggregated.afterMatchPercent - aggregated.beforeMatchPercent;
-
-        // Note: we removed unstableRecommendation flag here, as low confidence handles it
 
         PhaseFixEngine::updateDerivedResultFields (aggregated);
 
@@ -1014,6 +1019,9 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     const int liveWindow = juce::jmax (256, (int) (sampleRate * 0.25));
     dryMultiBandMeter.prepare (sampleRate, liveWindow);
     processedMultiBandMeter.prepare (sampleRate, liveWindow);
+    processedMeterSidechainDelay.setMaximumDelayInSamples (maxDelaySamples + 4);
+    processedMeterSidechainDelay.prepare ({ sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), 1 });
+    processedMeterSidechainDelay.reset();
     scopeFifo.prepare (8192);
 
     // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
@@ -1305,17 +1313,20 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             for (int ch = 0; ch < sidechainChannels; ++ch)
                 sidechainSum += sidechainBuffer.getSample (ch, i);
             const float sidechainMono = sidechainChannels > 0 ? sidechainSum / (float) sidechainChannels : 0.0f;
+            processedMeterSidechainDelay.pushSample (0, sidechainMono);
+            const float meteredSidechainMono =
+                processedMeterSidechainDelay.popSample (0, (float) getLatencySamples());
 
             // Post-processing multi-band phase read. The meter band-passes both
             // signals internally per band; feed it the raw mono pair.
-            processedMultiBandMeter.pushSample (mainMono, sidechainMono);
-            hitCapture.pushSample (mainMono, sidechainMono,
+            processedMultiBandMeter.pushSample (mainMono, meteredSidechainMono);
+            hitCapture.pushSample (mainMono, meteredSidechainMono,
                                    canReadTransientFlags && transientFlags[(size_t) i] != 0);
 
             constexpr float alpha = 0.005f;
-            correlationProductLpf += alpha * ((mainMono * sidechainMono) - correlationProductLpf);
+            correlationProductLpf += alpha * ((mainMono * meteredSidechainMono) - correlationProductLpf);
             correlationMainEnergyLpf += alpha * ((mainMono * mainMono) - correlationMainEnergyLpf);
-            correlationSideEnergyLpf += alpha * ((sidechainMono * sidechainMono) - correlationSideEnergyLpf);
+            correlationSideEnergyLpf += alpha * ((meteredSidechainMono * meteredSidechainMono) - correlationSideEnergyLpf);
 
             constexpr float noiseFloorEnergy = 1.0e-8f; // -80 dBFS squared
             const auto denominator = std::sqrt (correlationMainEnergyLpf * correlationSideEnergyLpf);
@@ -1331,7 +1342,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             if (++scopeDecimationCounter >= scopeDecimationFactor)
             {
                 scopeDecimationCounter = 0;
-                scopeFifo.pushSample (mainMono, sidechainMono);
+                scopeFifo.pushSample (mainMono, meteredSidechainMono);
             }
         }
     }

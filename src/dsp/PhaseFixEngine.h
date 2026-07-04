@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 #include <juce_core/juce_core.h>
 
@@ -157,6 +158,15 @@ public:
         if (bass != nullptr && kick != nullptr && numSamples > 32 && sampleRate > 0.0)
         {
             const int peak = locateDominantTransient (kick, numSamples, sampleRate);
+            const int bassPeak = locateDominantTransient (bass, numSamples, sampleRate);
+            if (peak >= 0 && bassPeak >= 0)
+            {
+                const float transientOffsetMs = (float) ((double) (peak - bassPeak) * 1000.0 / sampleRate);
+                if (std::abs (transientOffsetMs) > maxDelayMs + 0.25f)
+                    return analyzeCore (bass, kick, numSamples, sampleRate,
+                                        maxDelayMs, delayInterpolation, searchRotator);
+            }
+
             if (peak >= 0)
             {
                 const int preSamples  = juce::jmax (1, (int) std::lround (sampleRate * (double) hitPreRollMs  / 1000.0));
@@ -195,6 +205,13 @@ public:
             return result;
         }
 
+        const int bassPeak = locateDominantTransient (bass, numSamples, sampleRate);
+        const int kickPeak = locateDominantTransient (kick, numSamples, sampleRate);
+        const bool hasTransientOffset = bassPeak >= 0 && kickPeak >= 0;
+        const float transientOffsetMs = hasTransientOffset
+            ? (float) ((double) (kickPeak - bassPeak) * 1000.0 / sampleRate)
+            : 0.0f;
+
         const auto align = AlignmentAnalyzer::analyze (bass, kick, numSamples,
                                                        sampleRate, maxDelayMs,
                                                        30.0f, 120.0f, 16384, searchRotator);
@@ -207,41 +224,93 @@ public:
 
         result.valid = true;
         result.enoughSignal = true; 
-        result.bassPolarityInvert = align.invertPolarity;
-        result.bassDelayMs = std::max (0.0f, align.delayMs);
-        result.phaseFilterEnabled = align.adjustRotator;
-        result.phaseFilterFreqHz = align.rotatorFreqHz;
-        result.phaseFilterQ = align.rotatorQ;
-        result.phaseFilterStages = align.rotatorStages;
-        
-        PhaseFixRenderSettings settings;
-        settings.bassPolarityInvert = result.bassPolarityInvert;
-        settings.bassDelayMs = result.bassDelayMs;
-        settings.phaseFilterEnabled = result.phaseFilterEnabled;
-        settings.phaseFilterFreqHz = result.phaseFilterFreqHz;
-        settings.phaseFilterQ = result.phaseFilterQ;
-        settings.phaseFilterStages = result.phaseFilterStages;
-        settings.delayInterpolation = delayInterpolation;
-
         const auto before = score (bass, kick, numSamples, sampleRate);
-        const auto after = scoreSettings (bass, kick, numSamples, sampleRate,
-                                          settings, absoluteManualMaxDelayMs);
+        PhaseFixRenderSettings bestSettings;
+        bestSettings.delayInterpolation = delayInterpolation;
+        float bestMatch = before.match;
+        float bestConfidence = before.confidence;
+
+        auto scoreCandidate = [&] (bool invert, float delayMs, bool useRotator)
+        {
+            PhaseFixRenderSettings settings;
+            settings.bassPolarityInvert = invert;
+            settings.bassDelayMs = std::max (0.0f, delayMs);
+            settings.phaseFilterEnabled = useRotator && align.adjustRotator;
+            settings.phaseFilterFreqHz = align.rotatorFreqHz;
+            settings.phaseFilterQ = align.rotatorQ;
+            settings.phaseFilterStages = align.rotatorStages;
+            settings.delayInterpolation = delayInterpolation;
+
+            const auto candidate = scoreSettings (bass, kick, numSamples, sampleRate,
+                                                  settings, absoluteManualMaxDelayMs);
+            return std::pair<PhaseFixRenderSettings, PhaseFixScore> { settings, candidate };
+        };
+
+        auto considerCandidate = [&] (const PhaseFixRenderSettings& settings,
+                                      const PhaseFixScore& candidate)
+        {
+            if (candidate.matchPercent > bestMatch + 0.01f)
+            {
+                bestMatch = candidate.matchPercent;
+                bestConfidence = candidate.confidence;
+                bestSettings = settings;
+            }
+        };
+
+        const float candidateDelayMs = (hasTransientOffset && transientOffsetMs > 0.1f)
+            ? transientOffsetMs
+            : std::max (0.0f, align.delayMs);
+        const bool polarityCandidates[] = { align.invertPolarity, ! align.invertPolarity };
+        const bool useTimingCandidate = candidateDelayMs > 0.1f;
+        const float delayCandidates[] = { candidateDelayMs, useTimingCandidate ? candidateDelayMs : 0.0f };
+
+        for (const bool invert : polarityCandidates)
+        {
+            for (const float delayMs : delayCandidates)
+            {
+                const auto withoutRotator = scoreCandidate (invert, delayMs, false);
+                considerCandidate (withoutRotator.first, withoutRotator.second);
+
+                if (align.adjustRotator)
+                {
+                    const auto withRotator = scoreCandidate (invert, delayMs, true);
+                    if (withRotator.second.matchPercent >= withoutRotator.second.matchPercent + 3.0f)
+                        considerCandidate (withRotator.first, withRotator.second);
+                }
+            }
+        }
+
+        result.bassPolarityInvert = bestSettings.bassPolarityInvert;
+        result.bassDelayMs = bestSettings.bassDelayMs;
+        result.phaseFilterEnabled = bestSettings.phaseFilterEnabled;
+        result.phaseFilterFreqHz = bestSettings.phaseFilterFreqHz;
+        result.phaseFilterQ = bestSettings.phaseFilterQ;
+        result.phaseFilterStages = bestSettings.phaseFilterStages;
 
         result.beforeMatchPercent = before.match;
-        result.afterMatchPercent = after.matchPercent;
-        result.predictedAfterMatchPercent = after.matchPercent;
+        result.afterMatchPercent = bestMatch;
+        result.predictedAfterMatchPercent = bestMatch;
         result.improvementPercent = result.afterMatchPercent - result.beforeMatchPercent;
-        result.confidence = std::min (before.confidence, after.confidence);
+        result.confidence = std::min (before.confidence, bestConfidence);
 
-        if (align.delayMs < -0.02f && result.improvementPercent < 5.0f)
+        if (hasTransientOffset && transientOffsetMs < -0.02f && result.improvementPercent < 5.0f)
+        {
+            result.requiresTimelineMove = true;
+            result.suggestedKickMoveMs = std::abs (transientOffsetMs);
+        }
+        else if (align.delayMs < -0.02f && result.improvementPercent < 5.0f)
         {
             result.requiresTimelineMove = true;
             result.suggestedKickMoveMs = std::abs (align.delayMs);
         }
-        else if (std::abs(align.delayMs) > maxDelayMs + 0.25f)
+        else if ((hasTransientOffset && transientOffsetMs > maxDelayMs + 0.25f)
+                 || std::abs(align.delayMs) > maxDelayMs + 0.25f
+                 || (align.hitSearchLimit && std::abs (align.delayMs) >= maxDelayMs - 0.25f))
         {
             result.largeTimingOffset = true;
-            result.detectedTimingOffsetMs = std::abs(align.delayMs);
+            result.detectedTimingOffsetMs = hasTransientOffset ? std::abs (transientOffsetMs)
+                                                               : std::abs (align.delayMs);
+            result.bassDelayMs = std::min (result.bassDelayMs, maxDelayMs);
         }
 
         updateDerivedResultFields (result);

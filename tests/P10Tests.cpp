@@ -961,4 +961,3 @@ public:
 };
 
 static PhaseDeltaHelperTests phaseDeltaHelperTestsInstance;
-

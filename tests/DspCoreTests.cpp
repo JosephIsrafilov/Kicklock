@@ -641,7 +641,7 @@ public:
             expect (r.afterMatchPercent > r.beforeMatchPercent + 5.0f, phaseDebug);
         }
 
-        beginTest ("Optional phase refinement is kept when overall match is already good");
+        beginTest ("Already good without useful phase refinement does not offer apply");
         {
             std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
 
@@ -666,10 +666,10 @@ public:
             expect (r.valid);
             expectGreaterThan (r.beforeMatchPercent, 85.0f);
             expectEquals ((int) r.quality, (int) PhaseFixQuality::AlreadyGood);
-            expect (r.phaseFilterEnabled);
-            expect (r.optionalApplyAllowed);
+            expect (! r.phaseFilterEnabled);
+            expect (! r.optionalApplyAllowed);
             expect (! PhaseFixEngine::canApply (r));
-            expect (r.message.containsIgnoreCase ("optional phase filter"));
+            expect (r.message.containsIgnoreCase ("already close"));
         }
 
         beginTest ("Bass late suggests timeline movement instead of negative delay");
