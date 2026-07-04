@@ -1,5 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "dsp/HitConsensus.h"
+#include "dsp/MultiBandCorrelation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -251,13 +253,17 @@ namespace
         }
 
         std::vector<PhaseFixResult> perHitResults;
+        std::vector<HitObservation> hitObservations;
         perHitResults.reserve (hits.size());
+        hitObservations.reserve (hits.size());
+        
         std::vector<float> allHitBass;
         std::vector<float> allHitKick;
         appendHitWindows (bass, kick, hits, allHitBass, allHitKick);
 
-        for (const auto& hit : hits)
+        for (int i = 0; i < (int)hits.size(); ++i)
         {
+            const auto& hit = hits[(size_t)i];
             if (hit.start < 0 || hit.length <= 0
                 || hit.start + hit.length > (int) bass.size()
                 || hit.start + hit.length > (int) kick.size())
@@ -271,9 +277,32 @@ namespace
                                                       sampleRate,
                                                       PhaseFixEngine::defaultAutoFixMaxDelayMs,
                                                       delayInterpolation);
+                                                      
             if (hitResult.enoughSignal)
             {
                 perHitResults.push_back (hitResult);
+                
+                auto multiBandResult = MultiBandCorrelation::analyze (bass.data() + hit.start,
+                                                                      kick.data() + hit.start,
+                                                                      hit.length,
+                                                                      sampleRate);
+                                                                      
+                HitObservation obs;
+                obs.hitIndex = i;
+                obs.delayMs = hitResult.bassDelayMs;
+                obs.polarityInvert = hitResult.bassPolarityInvert;
+                obs.phaseFilterFreqHz = hitResult.phaseFilterFreqHz;
+                obs.phaseFilterEnabled = hitResult.phaseFilterEnabled;
+                obs.matchPercent = hitResult.afterMatchPercent;
+                obs.signalConfidence = hitResult.confidence;
+                
+                // Weight energy toward SUB and LOW bands
+                obs.energy = PhaseBands::table[0].weight * multiBandResult.bands[0].kickEnergy
+                           + PhaseBands::table[1].weight * multiBandResult.bands[1].kickEnergy
+                           + PhaseBands::table[2].weight * multiBandResult.bands[2].kickEnergy
+                           + PhaseBands::table[3].weight * multiBandResult.bands[3].kickEnergy;
+                           
+                hitObservations.push_back (obs);
             }
         }
 
@@ -291,121 +320,60 @@ namespace
             return aggregated;
         }
 
+        // --- NEW CLUSTERING CONSENSUS ---
+        auto consensus = HitConsensus::analyze(hitObservations);
+        
         aggregated.valid = true;
         aggregated.enoughSignal = true;
         aggregated.contributingHits = (int) perHitResults.size();
         aggregated.singleHitAnalysis = perHitResults.size() == 1;
 
-        int polarityFlips = 0;
-        int phaseRecommendations = 0;
-        int improvementCount = 0;
-        int largeTimingCount = 0;
-        int timelineMoveCount = 0;
-        std::vector<float> confidences;
-        std::vector<float> safeDelays;
-        std::vector<float> safeImprovements;
-        std::vector<float> largeTimingOffsets;
-        std::vector<float> timelineMoves;
-        std::vector<float> phaseFreqs;
-        std::vector<float> phaseQs;
-        std::vector<float> phaseStages;
-
-        for (const auto& hitResult : perHitResults)
+        if (consensus.hasConsensus)
         {
-            confidences.push_back (hitResult.confidence);
-
-            if (hitResult.bassPolarityInvert)
-                ++polarityFlips;
-
-            if (hitResult.improvementPercent >= 5.0f
-                || hitResult.bassDelayMs >= 0.40f
-                || hitResult.bassPolarityInvert
-                || hitResult.phaseFilterEnabled)
+            const auto& domCluster = consensus.clusters[(size_t)consensus.dominantClusterIndex];
+            aggregated.bassPolarityInvert = domCluster.centroidPolarity;
+            aggregated.bassDelayMs = domCluster.centroidDelayMs;
+            aggregated.phaseFilterEnabled = domCluster.centroidPhaseEnabled;
+            aggregated.phaseFilterFreqHz = domCluster.centroidPhaseEnabled ? domCluster.centroidPhaseFreqHz : 200.0f;
+            aggregated.phaseFilterQ = 0.7f;
+            aggregated.phaseFilterStages = 2; // Keep simple for now
+            aggregated.confidence = consensus.consensusConfidence;
+        }
+        else
+        {
+            // Priority 2: Highest energy single hit
+            int bestIdx = 0;
+            float maxE = -1.0f;
+            for (size_t i = 0; i < hitObservations.size(); ++i)
             {
-                ++improvementCount;
+                if (hitObservations[i].energy > maxE)
+                {
+                    maxE = hitObservations[i].energy;
+                    bestIdx = (int)i;
+                }
             }
-
-            if (hitResult.largeTimingOffset)
-            {
-                ++largeTimingCount;
-                largeTimingOffsets.push_back (hitResult.detectedTimingOffsetMs);
-                continue;
-            }
-
-            if (hitResult.requiresTimelineMove)
-            {
-                ++timelineMoveCount;
-                timelineMoves.push_back (hitResult.suggestedKickMoveMs);
-                continue;
-            }
-
-            safeDelays.push_back (hitResult.bassDelayMs);
-            safeImprovements.push_back (hitResult.improvementPercent);
-
-            if (hitResult.phaseFilterEnabled)
-            {
-                ++phaseRecommendations;
-                phaseFreqs.push_back (hitResult.phaseFilterFreqHz);
-                phaseQs.push_back (hitResult.phaseFilterQ);
-                phaseStages.push_back ((float) hitResult.phaseFilterStages);
-            }
+            aggregated.bassPolarityInvert = hitObservations[(size_t)bestIdx].polarityInvert;
+            aggregated.bassDelayMs = hitObservations[(size_t)bestIdx].delayMs;
+            aggregated.phaseFilterEnabled = hitObservations[(size_t)bestIdx].phaseFilterEnabled;
+            aggregated.phaseFilterFreqHz = hitObservations[(size_t)bestIdx].phaseFilterFreqHz;
+            aggregated.phaseFilterQ = 0.7f;
+            aggregated.phaseFilterStages = 2;
+            aggregated.confidence = hitObservations[(size_t)bestIdx].signalConfidence * 0.4f; // Penalized fallback
         }
 
-        const int validHits = (int) perHitResults.size();
-        const float polarityShare = validHits > 0 ? (float) polarityFlips / (float) validHits : 0.0f;
-        const bool majorityPolarity = polarityShare >= 0.5f;
-        const bool polarityStable = polarityShare >= 0.70f || polarityShare <= 0.30f;
-
-        if (largeTimingCount > validHits / 2)
+        // Clamp the delay to physics limits, but keep track if we exceeded it
+        if (aggregated.bassDelayMs > PhaseFixEngine::defaultAutoFixMaxDelayMs + 0.25f)
         {
             aggregated.largeTimingOffset = true;
-            aggregated.detectedTimingOffsetMs = medianOf (largeTimingOffsets);
-            aggregated.confidence = averageOf (confidences);
-            PhaseFixEngine::updateDerivedResultFields (aggregated);
-            return aggregated;
+            aggregated.detectedTimingOffsetMs = aggregated.bassDelayMs;
+            aggregated.bassDelayMs = PhaseFixEngine::defaultAutoFixMaxDelayMs; // CLAMP FOR BEST EFFORT
         }
-
-        if (timelineMoveCount > validHits / 2)
+        else if (aggregated.bassDelayMs < -0.02f)
         {
             aggregated.requiresTimelineMove = true;
-            aggregated.suggestedKickMoveMs = medianOf (timelineMoves);
-            aggregated.confidence = averageOf (confidences);
-            PhaseFixEngine::updateDerivedResultFields (aggregated);
-            return aggregated;
+            aggregated.suggestedKickMoveMs = -aggregated.bassDelayMs;
+            aggregated.bassDelayMs = 0.0f; // CLAMP FOR BEST EFFORT
         }
-
-        if (safeDelays.empty())
-        {
-            aggregated.confidence = averageOf (confidences);
-            PhaseFixEngine::updateDerivedResultFields (aggregated);
-            return aggregated;
-        }
-
-        const float medianDelay = medianOf (safeDelays);
-        const float delayStdDev = standardDeviationOf (safeDelays, averageOf (safeDelays));
-        const float phaseShare = validHits > 0 ? (float) phaseRecommendations / (float) validHits : 0.0f;
-        const bool phaseStable = phaseShare >= 0.60f || phaseShare <= 0.40f;
-        const bool phaseEnabled = phaseShare >= 0.60f;
-        // "Stable" means the hits AGREE with each other, not that a majority of
-        // them happen to need a correction. The previous check only tested
-        // improvementCount against a 60% floor, so a perfectly-aligned loop
-        // where every single hit agrees "no correction needed" (improvementCount
-        // == 0) failed that floor and was misclassified as Unstable - which
-        // unconditionally blocks Apply Fix in classifyQuality(). Consensus on
-        // EITHER "needs a fix" or "already fine" across hits is stable; only
-        // genuine disagreement (a mix of both) should count as unstable.
-        const float improvementShare = validHits > 0 ? (float) improvementCount / (float) validHits : 0.0f;
-        const bool improvementStable = validHits <= 1
-            || improvementShare >= 0.60f || improvementShare <= 0.40f;
-
-        aggregated.bassPolarityInvert = majorityPolarity;
-        aggregated.bassDelayMs = medianDelay;
-        aggregated.phaseFilterEnabled = phaseEnabled;
-        aggregated.phaseFilterFreqHz = phaseEnabled ? medianOf (phaseFreqs) : 200.0f;
-        aggregated.phaseFilterQ = phaseEnabled ? medianOf (phaseQs) : 0.7f;
-        aggregated.phaseFilterStages = phaseEnabled
-            ? juce::jlimit (2, 4, (int) std::lround (medianOf (phaseStages)))
-            : 2;
 
         PhaseFixRenderSettings settings;
         settings.bassPolarityInvert = aggregated.bassPolarityInvert;
@@ -473,27 +441,7 @@ namespace
         aggregated.predictedAfterMatchPercent = aggregated.afterMatchPercent;
         aggregated.improvementPercent = aggregated.afterMatchPercent - aggregated.beforeMatchPercent;
 
-        const float averageConfidence = averageOf (confidences);
-        const float delayConsistency = medianDelay <= PhaseFixEngine::defaultAutoFixMaxDelayMs
-            ? std::clamp (1.0f - (delayStdDev / 1.0f), 0.0f, 1.0f)
-            : 0.0f;
-        const float polarityConsistency = polarityStable ? 1.0f : 0.35f;
-        const float phaseConsistency = phaseStable ? 1.0f : 0.50f;
-        const float consistency = delayConsistency * polarityConsistency * phaseConsistency;
-
-        aggregated.confidence = std::clamp (averageConfidence * consistency
-                                            * (aggregated.singleHitAnalysis ? 0.85f : 1.0f),
-                                            0.0f, 1.0f);
-
-        if (! polarityStable
-            || ! phaseStable
-            || ! improvementStable
-            || (safeDelays.size() >= 2
-                && medianDelay <= PhaseFixEngine::defaultAutoFixMaxDelayMs
-                && delayStdDev > 1.0f))
-        {
-            aggregated.unstableRecommendation = true;
-        }
+        // Note: we removed unstableRecommendation flag here, as low confidence handles it
 
         PhaseFixEngine::updateDerivedResultFields (aggregated);
 

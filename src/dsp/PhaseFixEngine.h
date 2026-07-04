@@ -226,22 +226,25 @@ public:
     static void updateDerivedResultFields (PhaseFixResult& result)
     {
         result.quality = classifyQuality (result);
+        
+        // BEST EFFORT MODE: We allow Apply Fix even if large timing offset or timeline move is required,
+        // because we clamped the values to safe boundaries in analyzeAggregatedHits.
         result.applyAllowed = result.valid
             && result.enoughSignal
-            && ! result.requiresTimelineMove
-            && ! result.largeTimingOffset
             && ! result.unstableRecommendation
             && (result.quality == PhaseFixQuality::StrongImprovement
-                || result.quality == PhaseFixQuality::PartialImprovement);
+                || result.quality == PhaseFixQuality::PartialImprovement
+                || result.quality == PhaseFixQuality::LargeTimingOffset
+                || result.quality == PhaseFixQuality::TimelineMoveRequired);
 
         result.optionalApplyAllowed =
             result.valid
             && result.enoughSignal
-            && ! result.requiresTimelineMove
-            && ! result.largeTimingOffset
             && ! result.unstableRecommendation
             && ((result.quality == PhaseFixQuality::PartialImprovement)
-                || (result.quality == PhaseFixQuality::AlreadyGood && result.phaseFilterEnabled));
+                || (result.quality == PhaseFixQuality::AlreadyGood && result.phaseFilterEnabled)
+                || (result.quality == PhaseFixQuality::LargeTimingOffset)
+                || (result.quality == PhaseFixQuality::TimelineMoveRequired));
 
         result.message = makeMessage (result);
     }
@@ -633,13 +636,17 @@ private:
         if (result.requiresTimelineMove)
             return PhaseFixQuality::TimelineMoveRequired;
 
-        const bool meaningfulTimingCorrection = result.bassDelayMs >= 0.10f;
+        const bool meaningfulTimingCorrection = std::abs(result.bassDelayMs) >= 0.10f;
         const bool meaningfulPolarityCorrection = result.bassPolarityInvert;
         const bool meaningfulPhaseCorrection = result.phaseFilterEnabled;
 
-        if (result.improvementPercent > 1.0f || meaningfulTimingCorrection || meaningfulPolarityCorrection || meaningfulPhaseCorrection)
+        if (result.improvementPercent >= 5.0f || meaningfulTimingCorrection || meaningfulPolarityCorrection || meaningfulPhaseCorrection)
         {
             return PhaseFixQuality::StrongImprovement;
+        }
+        else if (result.improvementPercent > 0.0f)
+        {
+            return PhaseFixQuality::PartialImprovement;
         }
         
         if (result.beforeMatchPercent >= 80.0f)

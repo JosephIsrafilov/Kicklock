@@ -324,14 +324,7 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
             }
             else
             {
-                if (latestResult.largeTimingOffset)
-                    body << "\n\nDetected offset: " << juce::String (latestResult.detectedTimingOffsetMs, 1)
-                         << " ms. Apply Fix is disabled; move the sample/clip in your DAW timeline.";
-                else if (latestResult.requiresTimelineMove)
-                    body << "\n\nApply Fix is disabled because this correction needs a DAW timeline move.";
-                else if (latestResult.unstableRecommendation)
-                    body << "\n\nApply Fix is disabled because the captured hits disagree.";
-                else if (latestResult.quality == PhaseFixQuality::AlreadyGood)
+                if (latestResult.quality == PhaseFixQuality::AlreadyGood)
                     body << "\n\nNo applicable correction is needed.";
                 else
                     body << "\n\nNo applicable bass-path change was found.";
@@ -343,10 +336,12 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
                  << "Low-end match: " << juce::String ((int) std::round (latestResult.beforeMatchPercent))
                  << "% -> " << juce::String ((int) std::round (latestResult.predictedAfterMatchPercent)) << "%";
 
-            if (resultCanApply && (latestResult.largeTimingOffset || latestResult.requiresTimelineMove))
-                body << "\n\nWarning: Large timing offset detected. Manual DAW movement may sound more natural.";
+            if (resultCanApply && latestResult.largeTimingOffset)
+                body << "\n\nWarning: Detected offset is " << juce::String (latestResult.detectedTimingOffsetMs, 1) << " ms, which exceeds the max delay of " << juce::String(PhaseFixEngine::defaultAutoFixMaxDelayMs, 1) << " ms. A best-effort delay was calculated, but manual DAW movement may sound more natural.";
+            else if (resultCanApply && latestResult.requiresTimelineMove)
+                body << "\n\nWarning: This correction conceptually needs a DAW timeline move (" << juce::String(latestResult.suggestedKickMoveMs, 1) << " ms). Delay was clamped to 0 ms for a best-effort fix.";
             else if (resultCanApply && latestResult.unstableRecommendation)
-                body << "\n\nWarning: Different hits need different corrections; result is unstable.";
+                body << "\n\nWarning: Different hits need different corrections; result is a best-effort consensus.";
 
             analyzerBody.setText (body, juce::dontSendNotification);
         }
