@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../util/ScopeFifo.h"
+#include "../util/HitCaptureBuffer.h"
 #include "ScopeVisuals.h"
 
 // Timer-polled scope. Reads paired main/sidechain samples from a ScopeFifo
@@ -16,11 +17,15 @@
 class Oscilloscope : public juce::Component, private juce::Timer
 {
 public:
-    explicit Oscilloscope (ScopeFifo& fifoToRead);
+    Oscilloscope (ScopeFifo& fifoToRead, const HitCaptureBuffer& hitCaptureToRead);
     ~Oscilloscope() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
 
     void setFrozen (bool shouldFreeze) noexcept { frozen = shouldFreeze; }
     bool isFrozen() const noexcept              { return frozen; }
@@ -54,6 +59,7 @@ public:
         }
     }
     void setTimebase (double newSampleRate, int newDecimationFactor) noexcept;
+    void setDelayParameter (juce::RangedAudioParameter* parameter) noexcept { delayParameter = parameter; }
 
     // Time zoom: 1x shows the whole history, higher values show only the most
     // recent slice stretched across the width. Amplitude zoom multiplies the
@@ -72,16 +78,20 @@ private:
     void timerCallback() override;
     void drawGrid (juce::Graphics&, juce::Rectangle<float>, float, bool, int) const;
     void drawPhaseDeltaMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
+    void drawTriggeredMode (juce::Graphics&, juce::Rectangle<float>, float);
     void drawOverlayMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
     void drawSeparateMode (juce::Graphics&, juce::Rectangle<float>, int, float);
     void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void rebuildVisibleBuffers (int visible);
+    void refreshTriggeredSnapshot();
+    void setDelayFromDrag (const juce::MouseEvent&);
 
     static constexpr int historyLength = 8192;
     static constexpr int scratchSize   = 256;
 
     ScopeFifo& fifo;
+    const HitCaptureBuffer& hitCapture;
 
     // Ring buffers sized once in the ctor, never reallocated.
     std::vector<float> mainHistory;
@@ -92,7 +102,7 @@ private:
     float displayGain = 1.0f;   // smoothed auto-gain applied to both traces
     float timeZoom    = 1.0f;   // horizontal zoom (1..16)
     float ampZoom     = 1.0f;   // vertical zoom (1..8)
-    ScopeViewMode viewMode = ScopeViewMode::PhaseDelta;
+    ScopeViewMode viewMode = ScopeViewMode::Triggered;
     GridDivision gridDivision = GridDivision::Milliseconds;
     int visualOffsetSamples = 0;
     double sampleRate = 44100.0;
@@ -109,6 +119,19 @@ private:
     // content instead of broadband sample jitter.
     std::array<float, historyLength> smoothedMainBuffer {};
     std::array<float, historyLength> smoothedSideBuffer {};
+
+    static constexpr int ghostCount = 3;
+    std::vector<float> triggeredBass;
+    std::vector<float> triggeredKick;
+    std::array<std::vector<float>, ghostCount> ghostBass;
+    std::array<std::vector<float>, ghostCount> ghostKick;
+    int latestTriggeredSequence = 0;
+    int triggeredPreRollSamples = 0;
+
+    juce::RangedAudioParameter* delayParameter = nullptr;
+    bool delayGestureActive = false;
+    float dragStartX = 0.0f;
+    float dragStartDelayMs = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Oscilloscope)
 };

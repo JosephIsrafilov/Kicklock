@@ -803,6 +803,59 @@ public:
             expectWithinAbsoluteError (kick[0], 11.0f, 1.0e-7f);
             expectWithinAbsoluteError (kick[4], 15.0f, 1.0e-7f);
         }
+
+        beginTest ("Hit snapshot does not return torn windows under concurrent handoff");
+        {
+            HitCaptureBuffer buffer;
+            buffer.prepare (1000.0, 4.0f, 4.0f);
+
+            std::atomic<bool> done { false };
+            std::atomic<bool> torn { false };
+
+            std::thread writer ([&]
+            {
+                for (int seq = 1; seq <= 400; ++seq)
+                {
+                    const float bass = (float) seq;
+                    const float kick = 10000.0f + (float) seq;
+
+                    for (int i = 0; i < 4; ++i)
+                        buffer.pushSample (bass, kick, false);
+
+                    buffer.pushSample (bass, kick, true);
+
+                    for (int i = 0; i < 4; ++i)
+                        buffer.pushSample (bass, kick, false);
+                }
+
+                done.store (true, std::memory_order_release);
+            });
+
+            while (! done.load (std::memory_order_acquire))
+            {
+                std::vector<float> bass, kick;
+                const int count = buffer.snapshotLatest (bass, kick);
+                if (count <= 0)
+                {
+                    std::this_thread::yield();
+                    continue;
+                }
+
+                const float expectedBass = bass[0];
+                const float expectedKick = kick[0];
+                for (int i = 0; i < count; ++i)
+                {
+                    if (bass[(size_t) i] != expectedBass || kick[(size_t) i] != expectedKick)
+                    {
+                        torn.store (true, std::memory_order_relaxed);
+                        break;
+                    }
+                }
+            }
+
+            writer.join();
+            expect (! torn.load (std::memory_order_relaxed), "snapshot returned mixed samples from different hit windows");
+        }
     }
 };
 

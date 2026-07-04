@@ -105,6 +105,7 @@ public:
     float getLatestBpm() const noexcept;
     float getBassSignalRms() const noexcept;
     float getKickSignalRms() const noexcept;
+    const HitCaptureBuffer& getTriggeredHitCapture() const noexcept { return hitCapture; }
 
     // Musically-aware activity flags for P3 status. These hold "active" for a
     // window after the last transient/level crossing, so a normal beat does not
@@ -180,6 +181,7 @@ private:
     // from the sample rate.
     int scopeDecimationFactor = 1;
     int scopeDecimationCounter = 0;
+    std::vector<unsigned char> transientFlags;
     std::atomic<bool> sidechainReferenceAvailable { false };
     std::atomic<bool> tempoAvailable { false };
     std::atomic<float> latestBpm { 0.0f };

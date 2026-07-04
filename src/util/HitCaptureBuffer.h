@@ -80,21 +80,28 @@ public:
 
     int snapshotLatest (std::vector<float>& bassOut, std::vector<float>& kickOut) const
     {
-        const int slot = publishedSlot.load (std::memory_order_acquire);
-        const int samples = publishedSamples[(size_t) slot];
-        if (samples <= 0)
-            return 0;
-
-        bassOut.resize ((size_t) samples);
-        kickOut.resize ((size_t) samples);
-
-        for (int i = 0; i < samples; ++i)
+        for (int attempt = 0; attempt < 3; ++attempt)
         {
-            bassOut[(size_t) i] = publishedBass[(size_t) slot][(size_t) i];
-            kickOut[(size_t) i] = publishedKick[(size_t) slot][(size_t) i];
+            const int sequenceBefore = sequence.load (std::memory_order_acquire);
+            const int slot = publishedSlot.load (std::memory_order_acquire);
+            const int samples = publishedSamples[(size_t) slot];
+            if (samples <= 0)
+                return 0;
+
+            bassOut.resize ((size_t) samples);
+            kickOut.resize ((size_t) samples);
+
+            for (int i = 0; i < samples; ++i)
+            {
+                bassOut[(size_t) i] = publishedBass[(size_t) slot][(size_t) i];
+                kickOut[(size_t) i] = publishedKick[(size_t) slot][(size_t) i];
+            }
+
+            if (sequenceBefore == sequence.load (std::memory_order_acquire))
+                return samples;
         }
 
-        return samples;
+        return 0;
     }
 
 private:

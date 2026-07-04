@@ -25,7 +25,7 @@ namespace
 KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcessor& p)
     : AudioProcessorEditor (&p),
       audioProcessor (p),
-      oscilloscope (p.scopeFifo),
+      oscilloscope (p.scopeFifo, p.getTriggeredHitCapture()),
       correlationDisplay (p.liveMultiBandMatchPercent,
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent)
@@ -35,7 +35,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     // --- Top bar controls --------------------------------------------------
     configureCombo (gridCombo, { "1/4", "1/8", "1/16", "1/32", "Bar", "ms" });
-    configureCombo (viewCombo, { "Phase Delta", "Overlay", "Separate" });
+    configureCombo (viewCombo, { "Triggered", "Phase Delta", "Overlay", "Separate" });
 
     analyzeButton.setButtonText ("Analyze");
     analyzeButton.setColour (juce::TextButton::buttonColourId, teal);
@@ -175,6 +175,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
+    oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
     pushScopeSettings();
 
     setSize (1000, 680);

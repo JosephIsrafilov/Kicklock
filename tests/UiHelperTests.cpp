@@ -90,6 +90,21 @@ public:
             expectEquals (shifted.kickIndex, unshifted.kickIndex);
             expectEquals (shifted.bassIndex, wrapHistoryIndex (unshifted.bassIndex + 6, 2048));
         }
+
+        beginTest ("Triggered scope is the default first view mode");
+        {
+            expectEquals ((int) scopeViewModeFromChoiceIndex (0), (int) ScopeViewMode::Triggered);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (1), (int) ScopeViewMode::PhaseDelta);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (2), (int) ScopeViewMode::Overlay);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (3), (int) ScopeViewMode::Separate);
+        }
+
+        beginTest ("Triggered scope drag maps pixels to delay nudges");
+        {
+            expectWithinAbsoluteError (scopeDragPixelsToDelayDeltaMs (4.0f, false), 0.1f, 1.0e-7f);
+            expectWithinAbsoluteError (scopeDragPixelsToDelayDeltaMs (-8.0f, false), -0.2f, 1.0e-7f);
+            expectWithinAbsoluteError (scopeDragPixelsToDelayDeltaMs (4.0f, true), 0.01f, 1.0e-7f);
+        }
     }
 };
 

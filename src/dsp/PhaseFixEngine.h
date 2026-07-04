@@ -188,6 +188,7 @@ public:
         PhaseFixResult result;
         result.contributingHits = 1;
         result.singleHitAnalysis = true;
+        juce::ignoreUnused (delayInterpolation);
 
         if (bass == nullptr || kick == nullptr || numSamples <= 32 || sampleRate <= 0.0)
         {

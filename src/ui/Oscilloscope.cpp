@@ -48,8 +48,9 @@ namespace
     }
 }
 
-Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead)
+Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, const HitCaptureBuffer& hitCaptureToRead)
     : fifo (fifoToRead),
+      hitCapture (hitCaptureToRead),
       mainHistory ((size_t) historyLength, 0.0f),
       sidechainHistory ((size_t) historyLength, 0.0f)
 {
@@ -97,6 +98,12 @@ void Oscilloscope::timerCallback()
     if (frozen)
         return;
 
+    if (viewMode == ScopeViewMode::Triggered)
+    {
+        refreshTriggeredSnapshot();
+        return;
+    }
+
     for (int i = 0; i < count; ++i)
     {
         mainHistory[(size_t) writeIndex]      = mainScratch[(size_t) i];
@@ -123,6 +130,39 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
                                                       timeZoom, gridDivision, tempoAvailable, bpm);
+
+    if (viewMode == ScopeViewMode::Triggered)
+    {
+        float peak = 0.0f;
+        for (size_t i = 0; i < triggeredBass.size() && i < triggeredKick.size(); ++i)
+        {
+            peak = juce::jmax (peak, std::abs (triggeredBass[i]));
+            peak = juce::jmax (peak, std::abs (triggeredKick[i]));
+        }
+
+        const float targetGain = peak > 1.0e-4f ? juce::jlimit (1.0f, 40.0f, 0.88f / peak) : 1.0f;
+        displayGain += 0.18f * (targetGain - displayGain);
+        drawTriggeredMode (g, plotBounds, displayGain * ampZoom);
+
+        g.setColour (juce::Colours::white.withAlpha (0.9f));
+        g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+        g.drawText ("TRIGGERED",
+                    plotBounds.removeFromTop (16.0f).toNearestInt(),
+                    juce::Justification::centredLeft);
+
+        if (frozen)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.85f));
+            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+            g.drawText ("FROZEN",
+                        juce::Rectangle<int> ((int) (panelBounds.getRight() - 76.0f),
+                                              (int) (panelBounds.getY() + 8.0f), 64, 14),
+                        juce::Justification::centredRight);
+        }
+
+        return;
+    }
+
     rebuildVisibleBuffers (visible);
 
     float peak = 0.0f;
@@ -140,6 +180,7 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     switch (viewMode)
     {
+        case ScopeViewMode::Triggered:  break;
         case ScopeViewMode::PhaseDelta: drawPhaseDeltaMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::Overlay:    drawOverlayMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::Separate:   drawSeparateMode (g, plotBounds, visible, gain); break;
@@ -165,6 +206,102 @@ void Oscilloscope::paint (juce::Graphics& g)
                                           (int) (panelBounds.getY() + 8.0f), 64, 14),
                     juce::Justification::centredRight);
     }
+}
+
+void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
+                                      juce::Rectangle<float> bounds,
+                                      float gain)
+{
+    const int n = juce::jmin ((int) triggeredBass.size(), (int) triggeredKick.size());
+    const float midY = bounds.getCentreY();
+    const float halfHeight = bounds.getHeight() * 0.46f;
+
+    g.setColour (gridMajor.brighter (0.25f));
+    g.drawHorizontalLine ((int) std::round (midY), bounds.getX(), bounds.getRight());
+    g.setColour (gridMinor.brighter (0.15f));
+    g.drawHorizontalLine ((int) std::round (midY - halfHeight * 0.5f), bounds.getX(), bounds.getRight());
+    g.drawHorizontalLine ((int) std::round (midY + halfHeight * 0.5f), bounds.getX(), bounds.getRight());
+
+    if (n <= 1)
+    {
+        g.setColour (labelColour);
+        g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+        g.drawText ("WAITING FOR KICK",
+                    bounds.withSizeKeepingCentre (180.0f, 18.0f).toNearestInt(),
+                    juce::Justification::centred);
+        return;
+    }
+
+    const int safePreRoll = juce::jlimit (0, n - 1, triggeredPreRollSamples);
+    const float triggerX = bounds.getX() + bounds.getWidth() * (float) safePreRoll / (float) (n - 1);
+
+    const float totalMs = samplesToMs (n, sampleRate);
+    const float preMs = samplesToMs (safePreRoll, sampleRate);
+    const float postMs = totalMs - preMs;
+    const float xStep = bounds.getWidth() / (float) (n - 1);
+
+    g.setColour (gridMinor);
+    for (float ms = -20.0f; ms <= 150.0f; ms += 10.0f)
+    {
+        const float x = triggerX + bounds.getWidth() * (ms / juce::jmax (1.0f, preMs + postMs));
+        if (x >= bounds.getX() && x <= bounds.getRight())
+            g.drawVerticalLine ((int) std::round (x), bounds.getY(), bounds.getBottom());
+    }
+
+    g.setColour (juce::Colours::white.withAlpha (0.65f));
+    g.drawVerticalLine ((int) std::round (triggerX), bounds.getY(), bounds.getBottom());
+
+    auto drawPair = [&] (const std::vector<float>& bass,
+                         const std::vector<float>& kick,
+                         float alpha)
+    {
+        const int samples = juce::jmin ((int) bass.size(), (int) kick.size());
+        if (samples <= 1)
+            return;
+
+        juce::Path bassPath, kickPath;
+        for (int i = 0; i < samples; ++i)
+        {
+            const float x = bounds.getX() + (float) i * xStep;
+            const float bassY = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) i] * gain) * halfHeight;
+            const float kickY = midY - juce::jlimit (-1.0f, 1.0f, kick[(size_t) i] * gain) * halfHeight;
+
+            if (i == 0)
+            {
+                bassPath.startNewSubPath (x, bassY);
+                kickPath.startNewSubPath (x, kickY);
+            }
+            else
+            {
+                bassPath.lineTo (x, bassY);
+                kickPath.lineTo (x, kickY);
+            }
+        }
+
+        g.setColour (kickColour.withAlpha (alpha));
+        g.strokePath (kickPath, juce::PathStrokeType (1.25f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+        g.setColour (bassColour.withAlpha (juce::jmin (1.0f, alpha + 0.04f)));
+        g.strokePath (bassPath, juce::PathStrokeType (1.45f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+    };
+
+    for (int i = ghostCount - 1; i >= 0; --i)
+        drawPair (ghostBass[(size_t) i], ghostKick[(size_t) i], 0.20f);
+
+    drawPair (triggeredBass, triggeredKick, 0.95f);
+
+    g.setColour (labelColour);
+    g.setFont (juce::Font (juce::FontOptions (10.5f)));
+    g.drawText ("-" + juce::String (preMs, 0) + " ms",
+                juce::Rectangle<int> ((int) bounds.getX(), (int) (bounds.getBottom() - 14.0f), 64, 12),
+                juce::Justification::centredLeft);
+    g.drawText ("0",
+                juce::Rectangle<int> ((int) triggerX - 18, (int) (bounds.getBottom() - 14.0f), 36, 12),
+                juce::Justification::centred);
+    g.drawText ("+" + juce::String (postMs, 0) + " ms",
+                juce::Rectangle<int> ((int) bounds.getRight() - 64, (int) (bounds.getBottom() - 14.0f), 64, 12),
+                juce::Justification::centredRight);
 }
 
 void Oscilloscope::drawGrid (juce::Graphics& g,
@@ -502,6 +639,83 @@ void Oscilloscope::rebuildVisibleBuffers (int visible)
     const double scopeRate = sampleRate / (double) juce::jmax (1, decimationFactor);
     smoothScopeEnvelope (visibleMainBuffer.data(), smoothedMainBuffer.data(), visible, scopeRate);
     smoothScopeEnvelope (visibleSideBuffer.data(), smoothedSideBuffer.data(), visible, scopeRate);
+}
+
+void Oscilloscope::refreshTriggeredSnapshot()
+{
+    const int sequence = hitCapture.getSequence();
+    if (sequence == latestTriggeredSequence)
+        return;
+
+    std::vector<float> bass;
+    std::vector<float> kick;
+    const int samples = hitCapture.snapshotLatest (bass, kick);
+    if (samples <= 0)
+        return;
+
+    if (! triggeredBass.empty())
+    {
+        for (int i = ghostCount - 1; i > 0; --i)
+        {
+            ghostBass[(size_t) i] = std::move (ghostBass[(size_t) (i - 1)]);
+            ghostKick[(size_t) i] = std::move (ghostKick[(size_t) (i - 1)]);
+        }
+
+        ghostBass[0] = triggeredBass;
+        ghostKick[0] = triggeredKick;
+    }
+
+    triggeredBass = std::move (bass);
+    triggeredKick = std::move (kick);
+    triggeredPreRollSamples = hitCapture.getPreRollSamples();
+    latestTriggeredSequence = sequence;
+    repaint();
+}
+
+void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)
+{
+    if (delayParameter == nullptr)
+        return;
+
+    const float deltaMs = scopeDragPixelsToDelayDeltaMs (e.position.x - dragStartX, e.mods.isShiftDown());
+    const float nextValue = juce::jlimit (-20.0f, 20.0f, dragStartDelayMs + deltaMs);
+    delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (nextValue));
+}
+
+void Oscilloscope::mouseDown (const juce::MouseEvent& e)
+{
+    if (viewMode != ScopeViewMode::Triggered || delayParameter == nullptr)
+        return;
+
+    dragStartX = e.position.x;
+    dragStartDelayMs = delayParameter->convertFrom0to1 (delayParameter->getValue());
+    delayGestureActive = true;
+    delayParameter->beginChangeGesture();
+}
+
+void Oscilloscope::mouseDrag (const juce::MouseEvent& e)
+{
+    if (delayGestureActive)
+        setDelayFromDrag (e);
+}
+
+void Oscilloscope::mouseUp (const juce::MouseEvent&)
+{
+    if (! delayGestureActive || delayParameter == nullptr)
+        return;
+
+    delayParameter->endChangeGesture();
+    delayGestureActive = false;
+}
+
+void Oscilloscope::mouseDoubleClick (const juce::MouseEvent&)
+{
+    if (viewMode != ScopeViewMode::Triggered || delayParameter == nullptr)
+        return;
+
+    delayParameter->beginChangeGesture();
+    delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (0.0f));
+    delayParameter->endChangeGesture();
 }
 
 void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)

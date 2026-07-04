@@ -1,5 +1,6 @@
 # CMake and build files
 /build/
+/build2/
 /build-release/
 /build-tests/
 /build-codex/
