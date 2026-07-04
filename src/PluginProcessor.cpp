@@ -397,24 +397,40 @@ namespace
                 continue;
             }
 
-            std::vector<float> windowedBass(hit.length);
-            std::vector<float> windowedKick(hit.length);
-            
-            // Hann window
+            // P4: render the candidate on the RAW hit slice first, then window
+            // both signals identically, then score. Windowing before rendering
+            // (the old order) shifts the delayed content relative to the Hann
+            // window and lets the delay-line fill-in eat early-window energy,
+            // skewing the reported after-match. The before-render is a no-op
+            // settings render (sign only), so both branches window post-render.
+            std::vector<float> renderedBassBefore;
+            std::vector<float> renderedBassAfter;
+            PhaseFixEngine::renderCandidate (bass.data() + hit.start, hit.length, sampleRate,
+                                             {}, renderedBassBefore);
+            PhaseFixEngine::renderCandidate (bass.data() + hit.start, hit.length, sampleRate,
+                                             settings, renderedBassAfter);
+
+            std::vector<float> windowedBassBefore (hit.length);
+            std::vector<float> windowedBassAfter (hit.length);
+            std::vector<float> windowedKick (hit.length);
+
             for (int i = 0; i < hit.length; ++i)
             {
-                float w = 0.5f * (1.0f - std::cos(2.0f * 3.14159265358979323846f * i / (hit.length - 1)));
-                windowedBass[i] = bass[hit.start + i] * w;
-                windowedKick[i] = kick[hit.start + i] * w;
+                const float w = 0.5f * (1.0f - std::cos (2.0f * 3.14159265358979323846f * i / (hit.length - 1)));
+                windowedBassBefore[(size_t) i] = renderedBassBefore[(size_t) i] * w;
+                windowedBassAfter[(size_t) i]  = renderedBassAfter[(size_t) i] * w;
+                windowedKick[(size_t) i]       = kick[hit.start + i] * w;
             }
 
-            const auto before = PhaseFixEngine::scoreSettings (windowedBass.data(), windowedKick.data(), hit.length,
-                                                               sampleRate, {}, PhaseFixEngine::absoluteManualMaxDelayMs);
-            const auto after = PhaseFixEngine::scoreSettings (windowedBass.data(), windowedKick.data(), hit.length,
-                                                              sampleRate, settings, PhaseFixEngine::absoluteManualMaxDelayMs);
+            // Score the already-rendered, identically-windowed pairs on the one
+            // canonical ruler (P3), no further rendering inside the scorer.
+            const float before = MultiBandCorrelation::scoreRendered (windowedBassBefore.data(),
+                                                                      windowedKick.data(), hit.length, sampleRate);
+            const float after = MultiBandCorrelation::scoreRendered (windowedBassAfter.data(),
+                                                                     windowedKick.data(), hit.length, sampleRate);
 
-            sumBeforeMatch += before.matchPercent;
-            sumAfterMatch += after.matchPercent;
+            sumBeforeMatch += before;
+            sumAfterMatch += after;
             numScores++;
         }
 

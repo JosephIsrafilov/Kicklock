@@ -112,6 +112,26 @@ public:
         return result;
     }
 
+    // Public render helper (P4). Renders the bass candidate (sign, fractional
+    // delay, then allpass cascade) into `out` WITHOUT scoring, so callers can
+    // window the rendered result and the raw kick identically before scoring -
+    // the correct order. Windowing the bass BEFORE the delay is rendered (the
+    // old bug) shifts content relative to the window and lets the delay-line
+    // fill-in eat early-window energy, skewing the reported after-match.
+    static void renderCandidate (const float* bass,
+                                 int numSamples,
+                                 double sampleRate,
+                                 const PhaseFixRenderSettings& settings,
+                                 std::vector<float>& out,
+                                 float renderMaxDelayMs = absoluteManualMaxDelayMs)
+    {
+        out.assign ((size_t) juce::jmax (0, numSamples), 0.0f);
+        if (bass == nullptr || numSamples <= 0 || sampleRate <= 0.0)
+            return;
+
+        renderBassCandidate (bass, numSamples, sampleRate, settings, renderMaxDelayMs, out);
+    }
+
     // Transient-hit windowing entry point (ReVision-style). Kick and bass only
     // reveal their true low-end phase relationship right around the hit;
     // correlating over a loose span lets inter-hit silence and sustained
@@ -131,7 +151,8 @@ public:
                                    int numSamples,
                                    double sampleRate,
                                    float maxDelayMs = defaultAutoFixMaxDelayMs,
-                                   InterpolationType delayInterpolation = InterpolationType::Linear)
+                                   InterpolationType delayInterpolation = InterpolationType::Linear,
+                                   bool searchRotator = true)
     {
         if (bass != nullptr && kick != nullptr && numSamples > 32 && sampleRate > 0.0)
         {
@@ -149,11 +170,11 @@ public:
                 // still spans the whole buffer would just repeat the same work.
                 if (windowLength > 32 && windowLength < numSamples)
                     return analyzeCore (bass + start, kick + start, windowLength,
-                                        sampleRate, maxDelayMs, delayInterpolation);
+                                        sampleRate, maxDelayMs, delayInterpolation, searchRotator);
             }
         }
 
-        return analyzeCore (bass, kick, numSamples, sampleRate, maxDelayMs, delayInterpolation);
+        return analyzeCore (bass, kick, numSamples, sampleRate, maxDelayMs, delayInterpolation, searchRotator);
     }
 
         static PhaseFixResult analyzeCore (const float* bass,
@@ -161,7 +182,8 @@ public:
                                        int numSamples,
                                        double sampleRate,
                                        float maxDelayMs = defaultAutoFixMaxDelayMs,
-                                       InterpolationType delayInterpolation = InterpolationType::Linear)
+                                       InterpolationType delayInterpolation = InterpolationType::Linear,
+                                       bool searchRotator = true)
     {
         PhaseFixResult result;
         result.contributingHits = 1;
@@ -175,7 +197,7 @@ public:
 
         const auto align = AlignmentAnalyzer::analyze (bass, kick, numSamples,
                                                        sampleRate, maxDelayMs,
-                                                       30.0f, 120.0f, 16384);
+                                                       30.0f, 120.0f, 16384, searchRotator);
 
         if (! align.valid)
         {

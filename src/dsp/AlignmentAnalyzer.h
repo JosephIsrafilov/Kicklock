@@ -23,6 +23,42 @@ struct AlignmentResult
 class AlignmentAnalyzer
 {
 public:
+    // Fast lag-0 match on a single low band: band-pass both signals, then one
+    // normalized dot product (no FFT, no lag search, no rotator grid). This is
+    // the cheap read the callers that only need "how aligned is it right now"
+    // want, instead of paying for the full analyze() path just to read lag 0.
+    static float matchAtZeroLag (const float* bass,
+                                 const float* kick,
+                                 int numSamples,
+                                 double sampleRate,
+                                 float lowHz  = 30.0f,
+                                 float highHz = 120.0f)
+    {
+        if (bass == nullptr || kick == nullptr || numSamples <= 0 || sampleRate <= 0.0)
+            return 50.0f;
+
+        std::vector<float> a (bass, bass + numSamples);
+        std::vector<float> b (kick, kick + numSamples);
+        bandPass (a, sampleRate, lowHz, highHz);
+        bandPass (b, sampleRate, lowHz, highHz);
+
+        double ab = 0.0, aa = 0.0, bb = 0.0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double x = a[(size_t) i];
+            const double y = b[(size_t) i];
+            ab += x * y;
+            aa += x * x;
+            bb += y * y;
+        }
+
+        const double norm = std::sqrt (aa * bb);
+        if (norm < 1.0e-9)
+            return 50.0f;
+
+        return toPercent (ab / norm);
+    }
+
     static AlignmentResult analyze (const float* bass,
                                     const float* kick,
                                     int numSamples,
@@ -30,7 +66,8 @@ public:
                                     float maxDelayMs,
                                     float lowHz  = 30.0f,
                                     float highHz = 120.0f,
-                                    int   maxWindow = 32768)
+                                    int   maxWindow = 32768,
+                                    bool  searchRotator = true)
     {
         AlignmentResult result;
 
@@ -185,7 +222,7 @@ public:
         const int nEnd       = std::min (window, window - intLag);
         const int alignedLen = nEnd - nStart;
 
-        if (alignedLen > 64)
+        if (searchRotator && alignedLen > 64)
         {
             std::vector<float> kickAligned ((size_t) alignedLen);
             for (int i = 0; i < alignedLen; ++i)

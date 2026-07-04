@@ -218,6 +218,106 @@ private:
 static PhaseFixEndToEndTests phaseFixEndToEndTestsInstance;
 
 //==============================================================================
+// P4 - Analyze speed: an 8-hit analyze must complete well under a click's worth
+// of budget. This is a coarse guard against the old behaviour (every score()
+// ran the full 135-candidate rotator grid), not a micro-benchmark, so the bar
+// is generous (250 ms on a CI machine).
+class AnalyzeSpeedTests : public juce::UnitTest
+{
+public:
+    AnalyzeSpeedTests() : juce::UnitTest ("AnalyzeSpeed", "P10") {}
+
+    void runTest() override
+    {
+        beginTest ("8-hit analyze completes under 250 ms at 48 kHz");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            const std::vector<int> bassDelays (8, 0);
+            const std::vector<int> kickDelays (8, 120);
+            const std::vector<bool> invertBass (8, false);
+            feedHitSeries (processor, bassDelays, kickDelays, invertBass, 2048);
+
+            const auto start = juce::Time::getMillisecondCounterHiRes();
+            const auto fix = processor.analyzeFix();
+            const auto elapsedMs = juce::Time::getMillisecondCounterHiRes() - start;
+
+            expectGreaterThan (fix.contributingHits, 1);
+            logMessage ("8-hit analyze took " + juce::String (elapsedMs, 1) + " ms");
+            // The prompt's target is 250 ms on a release CI build. An unoptimised
+            // debug build (MSVC iterator debugging etc.) runs several times
+            // slower, so scale the bar rather than fail spuriously there.
+           #if JUCE_DEBUG
+            const double budgetMs = 1500.0;
+           #else
+            const double budgetMs = 250.0;
+           #endif
+            expectLessThan (elapsedMs, budgetMs);
+        }
+    }
+
+private:
+    static void feedHitSeries (KickLockAudioProcessor& processor,
+                               const std::vector<int>& bassDelays,
+                               const std::vector<int>& kickDelays,
+                               const std::vector<bool>& invertBass,
+                               int blockSize)
+    {
+        const int hitCount = std::min ({ (int) bassDelays.size(),
+                                         (int) kickDelays.size(),
+                                         (int) invertBass.size() });
+        const int hitSpacing = 12000;
+        const int eventLength = 5000;
+        const int startOffset = 1500;
+        const int totalSamples = startOffset + hitCount * hitSpacing + eventLength;
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int sample = start + i;
+                float bass = 0.0f, kick = 0.0f;
+                for (int hit = 0; hit < hitCount; ++hit)
+                {
+                    const int base = startOffset + hit * hitSpacing;
+                    const int bassIndex = sample - (base + bassDelays[(size_t) hit]);
+                    const int kickIndex = sample - (base + kickDelays[(size_t) hit]);
+                    if (bassIndex >= 0 && bassIndex < eventLength)
+                    {
+                        const float env = (float) std::exp (-6.0 * (double) bassIndex / kSampleRate);
+                        const float value = env * (float) std::sin (kTwoPi * 70.0 * (double) bassIndex / kSampleRate);
+                        bass += invertBass[(size_t) hit] ? -value : value;
+                    }
+                    if (kickIndex >= 0 && kickIndex < eventLength)
+                    {
+                        const float env = (float) std::exp (-6.0 * (double) kickIndex / kSampleRate);
+                        kick += env * (float) std::sin (kTwoPi * 70.0 * (double) kickIndex / kSampleRate);
+                    }
+                }
+                buffer.setSample (0, i, bass);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, bass);
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, kick);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, kick);
+            }
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+        }
+    }
+};
+
+static AnalyzeSpeedTests analyzeSpeedTestsInstance;
+
+//==============================================================================
 // P10.2 - Sidechain status: a kick transient plus following silence stays
 // "active" through the hold window; a normal beat never flickers to too-low
 // between hits; Apply Fix availability is not tied to instant RMS.

@@ -308,6 +308,50 @@ public:
             expect (r.rotatorStages >= 2 && r.rotatorStages <= 4);
             expectGreaterThan (r.afterMatch, r.beforeMatch);
         }
+
+        // P4: the fast lag-0 path must agree with the full FFT path's
+        // beforeMatch (both are the zero-offset 30-120 Hz correlation).
+        beginTest ("matchAtZeroLag agrees with the FFT beforeMatch within 1 point");
+        {
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+            const int lag = 60;
+            for (int i = 0; i < n; ++i)
+            {
+                kick[(size_t) i] = event (i);
+                if (i - lag >= 0)
+                    bass[(size_t) i] = event (i - lag);
+            }
+
+            const auto full = AlignmentAnalyzer::analyze (bass.data(), kick.data(), n, kSampleRate, 50.0f);
+            const float fast = AlignmentAnalyzer::matchAtZeroLag (bass.data(), kick.data(), n, kSampleRate);
+
+            expect (full.valid);
+            expectWithinAbsoluteError (fast, full.beforeMatch, 1.0f);
+        }
+
+        // P4: skipping the rotator grid must not change the lag/polarity result
+        // (only whether a rotator is recommended), and must be no slower.
+        beginTest ("searchRotator=false matches lag and polarity of the full search");
+        {
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+            const int lag = 40;
+            for (int i = 0; i < n; ++i)
+            {
+                kick[(size_t) i] = event (i);
+                if (i - lag >= 0)
+                    bass[(size_t) i] = event (i - lag);
+            }
+
+            const auto withRot = AlignmentAnalyzer::analyze (bass.data(), kick.data(), n, kSampleRate,
+                                                             50.0f, 30.0f, 120.0f, 16384, true);
+            const auto noRot   = AlignmentAnalyzer::analyze (bass.data(), kick.data(), n, kSampleRate,
+                                                             50.0f, 30.0f, 120.0f, 16384, false);
+
+            expect (withRot.valid && noRot.valid);
+            expectWithinAbsoluteError (noRot.delayMs, withRot.delayMs, 1.0e-4f);
+            expect (noRot.invertPolarity == withRot.invertPolarity);
+            expect (! noRot.adjustRotator, "rotator must stay off when the grid is skipped");
+        }
     }
 };
 
