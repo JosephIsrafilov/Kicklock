@@ -498,6 +498,49 @@ public:
             expect (PhaseFixEngine::canApply (r));
         }
 
+        beginTest ("Analyze publishes the same after score as the rendered candidate");
+        {
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1000, 1120, 65.0);
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            PhaseFixRenderSettings settings;
+            settings.bassPolarityInvert = r.bassPolarityInvert;
+            settings.bassDelayMs = r.bassDelayMs;
+            settings.phaseFilterEnabled = r.phaseFilterEnabled;
+            settings.phaseFilterFreqHz = r.phaseFilterFreqHz;
+            settings.phaseFilterQ = r.phaseFilterQ;
+            settings.phaseFilterStages = r.phaseFilterStages;
+
+            const auto rendered = PhaseFixEngine::scoreSettings (bass.data(), kick.data(), n, kSampleRate,
+                                                                 settings,
+                                                                 PhaseFixEngine::absoluteManualMaxDelayMs);
+
+            expect (r.valid);
+            expectWithinAbsoluteError (r.predictedAfterMatchPercent, rendered.matchPercent, 0.01f);
+        }
+
+        beginTest ("Analyze confidence is measured, not forced to 100 percent");
+        {
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+            constexpr float amp = 0.02f;
+
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const float v = amp * (float) std::sin (kTwoPi * 70.0 * t);
+                bass[(size_t) i] = -v;
+                kick[(size_t) i] = v;
+            }
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expectGreaterThan (r.confidence, 0.0f);
+            expectLessThan (r.confidence, 0.99f);
+        }
+
         beginTest ("Bass too early recommends positive bass delay");
         {
             // ~2.5 ms offset (120 samples at 48 kHz): before ~76%, so the fix is

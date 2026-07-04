@@ -379,9 +379,22 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
                 body << "\n";
             }
 
-            body << "Confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
-                 << "Low-end match: " << juce::String ((int) std::round (latestResult.beforeMatchPercent))
-                 << "% -> " << juce::String ((int) std::round (latestResult.predictedAfterMatchPercent)) << "%";
+            if (resultCanApply)
+            {
+                body << "Confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
+                     << "Low-end match: " << juce::String ((int) std::round (latestResult.beforeMatchPercent))
+                     << "% -> " << juce::String ((int) std::round (latestResult.predictedAfterMatchPercent)) << "%";
+            }
+            else
+            {
+                body << "Signal confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
+                     << "Current low-end match: " << juce::String ((int) std::round (latestResult.beforeMatchPercent)) << "%";
+
+                if (latestResult.predictedAfterMatchPercent < latestResult.beforeMatchPercent)
+                    body << "\nBest tested change would reduce match to "
+                         << juce::String ((int) std::round (latestResult.predictedAfterMatchPercent))
+                         << "%, so Apply is disabled.";
+            }
 
             if (resultCanApply && latestResult.largeTimingOffset)
                 body << "\n\nWarning: Detected offset is " << juce::String (latestResult.detectedTimingOffsetMs, 1) << " ms, which exceeds the max delay of " << juce::String(PhaseFixEngine::defaultAutoFixMaxDelayMs, 1) << " ms. A best-effort delay was calculated, but manual DAW movement may sound more natural.";

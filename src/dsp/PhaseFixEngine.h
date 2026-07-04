@@ -188,7 +188,6 @@ public:
         PhaseFixResult result;
         result.contributingHits = 1;
         result.singleHitAnalysis = true;
-        juce::ignoreUnused (delayInterpolation);
 
         if (bass == nullptr || kick == nullptr || numSamples <= 32 || sampleRate <= 0.0)
         {
@@ -215,11 +214,24 @@ public:
         result.phaseFilterQ = align.rotatorQ;
         result.phaseFilterStages = align.rotatorStages;
         
-        result.beforeMatchPercent = align.beforeMatch;
-        result.afterMatchPercent = align.afterMatch;
-        result.predictedAfterMatchPercent = align.afterMatch;
-        result.improvementPercent = align.afterMatch - align.beforeMatch;
-        result.confidence = 1.0f; 
+        PhaseFixRenderSettings settings;
+        settings.bassPolarityInvert = result.bassPolarityInvert;
+        settings.bassDelayMs = result.bassDelayMs;
+        settings.phaseFilterEnabled = result.phaseFilterEnabled;
+        settings.phaseFilterFreqHz = result.phaseFilterFreqHz;
+        settings.phaseFilterQ = result.phaseFilterQ;
+        settings.phaseFilterStages = result.phaseFilterStages;
+        settings.delayInterpolation = delayInterpolation;
+
+        const auto before = score (bass, kick, numSamples, sampleRate);
+        const auto after = scoreSettings (bass, kick, numSamples, sampleRate,
+                                          settings, absoluteManualMaxDelayMs);
+
+        result.beforeMatchPercent = before.match;
+        result.afterMatchPercent = after.matchPercent;
+        result.predictedAfterMatchPercent = after.matchPercent;
+        result.improvementPercent = result.afterMatchPercent - result.beforeMatchPercent;
+        result.confidence = std::min (before.confidence, after.confidence);
 
         if (align.delayMs < -0.02f && result.improvementPercent < 5.0f)
         {
