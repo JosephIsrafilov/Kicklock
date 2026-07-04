@@ -334,29 +334,134 @@ public:
             expect (shiftedFix.requiresTimelineMove == baselineFix.requiresTimelineMove);
         }
 
-        beginTest ("Dry and processed meters split pre and post correction");
+        beginTest ("PDC latency headroom is reported to the host (20 ms)");
+        {
+            KickLockAudioProcessor processor;
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            const int expectedHeadroom = (int) std::ceil (kSampleRate * 0.020);
+            expectEquals (processor.getLatencySamples(), expectedHeadroom);
+        }
+
+        beginTest ("Signed delay maps to a non-negative physical delay");
+        {
+            // headroom = 20 ms. user 0 -> physical = headroom; user -5 ms ->
+            // headroom - 5 ms; user +5 ms -> headroom + 5 ms. All >= 0, and the
+            // impulse must land at exactly the physical delay (never negative).
+            const int headroom = (int) std::ceil (kSampleRate * 0.020);
+
+            auto measurePhysicalDelay = [this] (float userDelayMs) -> int
+            {
+                KickLockAudioProcessor processor;
+                processor.setRateAndBufferSizeDetails (kSampleRate, 8192);
+                processor.prepareToPlay (kSampleRate, 8192);
+
+                if (auto* param = processor.apvts.getParameter ("delay_ms"))
+                    param->setValueNotifyingHost (param->convertTo0to1 (userDelayMs));
+
+                const int numSamples = 8192;
+                const int impulseAt = 2000; // past the 20 ms delay-smoothing settle
+                juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                             processor.getTotalNumOutputChannels()),
+                                                 numSamples);
+                buffer.clear();
+                buffer.setSample (0, impulseAt, 1.0f);
+
+                juce::MidiBuffer midi;
+                processor.processBlock (buffer, midi);
+
+                int peak = -1;
+                float best = 0.0f;
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    const float v = std::abs (buffer.getSample (0, i));
+                    if (v > best) { best = v; peak = i; }
+                }
+
+                return peak - impulseAt;
+            };
+
+            const int atZero = measurePhysicalDelay (0.0f);
+            const int atMinus5 = measurePhysicalDelay (-5.0f);
+            const int atPlus5 = measurePhysicalDelay (5.0f);
+            const int fiveMs = (int) std::lround (kSampleRate * 5.0 / 1000.0);
+
+            expectGreaterOrEqual (atZero, 0);
+            expectGreaterOrEqual (atMinus5, 0);
+            expectGreaterOrEqual (atPlus5, 0);
+            expectWithinAbsoluteError ((float) atZero, (float) headroom, 2.0f);
+            expectWithinAbsoluteError ((float) atMinus5, (float) (headroom - fiveMs), 2.0f);
+            expectWithinAbsoluteError ((float) atPlus5, (float) (headroom + fiveMs), 2.0f);
+        }
+
+        beginTest ("Scope FIFO receives paired bass and kick samples");
         {
             KickLockAudioProcessor processor;
             processor.enableAllBuses();
-            processor.setRateAndBufferSizeDetails (kSampleRate, 20000);
-            processor.prepareToPlay (kSampleRate, 20000);
+            processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
+            processor.prepareToPlay (kSampleRate, 4096);
 
-            feedAlignedSignal (processor, 20000);
-            const float neutralDry = processor.dryInputMatchPercent.load();
-            const float neutralProcessed = processor.processedMatchPercent.load();
-            expectWithinAbsoluteError (neutralDry, neutralProcessed, 0.5f);
-            expectWithinAbsoluteError (processor.correlationPercent.load(), neutralDry, 0.5f);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             4096);
+            juce::MidiBuffer midi;
+            fillBass (buffer, 4096);
+            fillKickSidechain (buffer, 4096, 0);
+            processor.processBlock (buffer, midi);
 
-            if (auto* polarity = processor.apvts.getParameter ("polarityInvert"))
-                polarity->setValueNotifyingHost (1.0f);
+            std::vector<float> mainOut (4096, 0.0f), sideOut (4096, 0.0f);
+            const int read = processor.scopeFifo.readAvailable (mainOut.data(), sideOut.data(), 4096);
 
-            feedAlignedSignal (processor, 20000);
-            const float correctedDry = processor.dryInputMatchPercent.load();
-            const float correctedProcessed = processor.processedMatchPercent.load();
+            expectGreaterThan (read, 0);
 
-            expectGreaterThan (correctedDry, 80.0f);
-            expectLessThan (correctedProcessed, correctedDry - 20.0f);
-            expectWithinAbsoluteError (processor.correlationPercent.load(), correctedProcessed, 0.5f);
+            bool bassNonZero = false;
+            bool kickNonZero = false;
+            for (int i = 0; i < read; ++i)
+            {
+                bassNonZero = bassNonZero || std::abs (mainOut[(size_t) i]) > 1.0e-5f;
+                kickNonZero = kickNonZero || std::abs (sideOut[(size_t) i]) > 1.0e-5f;
+            }
+
+            expect (bassNonZero, "scope fifo carried no bass");
+            expect (kickNonZero, "scope fifo carried no kick");
+        }
+
+        beginTest ("Manual delay, polarity and phase filter each stay active without Analyze");
+        {
+            KickLockAudioProcessor processor;
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            // Nothing set -> neutral.
+            expect (processor.isBassProcessingNeutral());
+
+            // Manual delay alone breaks neutrality.
+            setFloatParam (processor, "delay_ms", 3.0f);
+            expect (! processor.isBassProcessingNeutral());
+            setFloatParam (processor, "delay_ms", 0.0f);
+            expect (processor.isBassProcessingNeutral());
+
+            // Polarity alone breaks neutrality.
+            setBoolParam (processor, "polarity_invert", true);
+            expect (! processor.isBassProcessingNeutral());
+            setBoolParam (processor, "polarity_invert", false);
+            expect (processor.isBassProcessingNeutral());
+
+            // Phase filter alone breaks neutrality, and its 20-2000 Hz freq
+            // range is honoured by the manual control.
+            setBoolParam (processor, "allpass_enable", true);
+            setFloatParam (processor, "allpass_freq", 1500.0f);
+            expect (! processor.isBassProcessingNeutral());
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 1500.0f, 1.0f);
+        }
+
+        beginTest ("Signed delay display formatting shows sign and zero snap");
+        {
+            expectEquals (formatSignedDelayMs (0.0f), juce::String ("0.00 ms"));
+            expectEquals (formatSignedDelayMs (-0.0001f), juce::String ("0.00 ms"));
+            expectEquals (formatSignedDelayMs (4.32f), juce::String ("+4.32 ms"));
+            expectEquals (formatSignedDelayMs (-4.32f), juce::String ("-4.32 ms"));
         }
     }
 

@@ -491,7 +491,7 @@ public:
         const auto numSamples = mainBuffer.getNumSamples();
 
         smoothedDelay.setTargetValue (delaySamplesForUserDelayMs (delayMs));
-        smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 300.0f, allpassFreqHz));
+        smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 2000.0f, allpassFreqHz));
         allpassWet.setTargetValue (allpassEnabled ? 1.0f : 0.0f);
 
         for (int i = 0; i < numSamples; ++i)
@@ -573,7 +573,7 @@ private:
 
     void updateAllpassCoefficients (float frequencyHz)
     {
-        const auto limited = juce::jlimit (20.0f, 300.0f, frequencyHz);
+        const auto limited = juce::jlimit (20.0f, 2000.0f, frequencyHz);
         if (std::abs (limited - lastAppliedAllpassFreq) < 0.01f)
             return;
 
@@ -840,7 +840,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "allpass_freq", 1 },
         "Allpass Frequency",
-        juce::NormalisableRange<float> (20.0f, 300.0f, 0.0f, 0.35f),
+        juce::NormalisableRange<float> (20.0f, 2000.0f, 0.0f, 0.35f),
         50.0f));
 
     layout.add (std::make_unique<juce::AudioParameterBool> (

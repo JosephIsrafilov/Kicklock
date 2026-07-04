@@ -121,6 +121,28 @@ public:
             expectEquals ((int) classifyProcessingWorkflowStatus (false, true),
                           (int) ProcessingWorkflowStatus::ProcessingBass);
         }
+
+        beginTest ("Top-bar analysis status maps to each required label bucket");
+        {
+            // No sidechain -> NO SIDECHAIN.
+            expectEquals ((int) classifyAnalysisMaterialStatus (false, false, false, false, false),
+                          (int) AnalysisMaterialStatus::WaitingForSidechain);
+            // Sidechain but no kick yet -> WAITING FOR KICK.
+            expectEquals ((int) classifyAnalysisMaterialStatus (true, false, true, false, false),
+                          (int) AnalysisMaterialStatus::WaitingForKick);
+            // Kick but no bass -> WAITING FOR BASS.
+            expectEquals ((int) classifyAnalysisMaterialStatus (true, true, false, false, false),
+                          (int) AnalysisMaterialStatus::WaitingForBass);
+            // Both present but too quiet -> SIGNAL TOO LOW.
+            expectEquals ((int) classifyAnalysisMaterialStatus (true, true, true, false, false),
+                          (int) AnalysisMaterialStatus::SignalTooLow);
+            // Usable but still gathering -> CAPTURING (shown as SIDECHAIN ACTIVE).
+            expectEquals ((int) classifyAnalysisMaterialStatus (true, true, true, true, false),
+                          (int) AnalysisMaterialStatus::CapturingMaterial);
+            // Ready.
+            expectEquals ((int) classifyAnalysisMaterialStatus (true, true, true, true, true),
+                          (int) AnalysisMaterialStatus::ReadyToAnalyze);
+        }
     }
 };
 
