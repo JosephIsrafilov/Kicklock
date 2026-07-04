@@ -254,8 +254,6 @@ namespace
         perHitResults.reserve (hits.size());
         std::vector<float> allHitBass;
         std::vector<float> allHitKick;
-        std::vector<float> scoringBass;
-        std::vector<float> scoringKick;
         appendHitWindows (bass, kick, hits, allHitBass, allHitKick);
 
         for (const auto& hit : hits)
@@ -276,12 +274,6 @@ namespace
             if (hitResult.enoughSignal)
             {
                 perHitResults.push_back (hitResult);
-                scoringBass.insert (scoringBass.end(),
-                                    bass.begin() + hit.start,
-                                    bass.begin() + hit.start + hit.length);
-                scoringKick.insert (scoringKick.end(),
-                                    kick.begin() + hit.start,
-                                    kick.begin() + hit.start + hit.length);
             }
         }
 
@@ -424,18 +416,61 @@ namespace
         settings.phaseFilterStages = aggregated.phaseFilterStages;
         settings.delayInterpolation = delayInterpolation;
 
-        const auto* scoreBass = scoringBass.empty() ? bass.data() : scoringBass.data();
-        const auto* scoreKick = scoringKick.empty() ? kick.data() : scoringKick.data();
-        const int scoreSamples = scoringBass.empty() ? (int) bass.size() : (int) scoringBass.size();
+        float sumBeforeMatch = 0.0f;
+        float sumAfterMatch = 0.0f;
+        int numScores = 0;
 
-        const auto before = PhaseFixEngine::scoreSettings (scoreBass, scoreKick, scoreSamples,
-                                                           sampleRate, {}, PhaseFixEngine::absoluteManualMaxDelayMs);
-        const auto after = PhaseFixEngine::scoreSettings (scoreBass, scoreKick, scoreSamples,
-                                                          sampleRate, settings, PhaseFixEngine::absoluteManualMaxDelayMs);
+        for (const auto& hit : hits)
+        {
+            if (hit.start < 0 || hit.length <= 0
+                || hit.start + hit.length > (int) bass.size()
+                || hit.start + hit.length > (int) kick.size())
+            {
+                continue;
+            }
 
-        aggregated.beforeMatchPercent = before.matchPercent;
-        aggregated.afterMatchPercent = after.matchPercent;
-        aggregated.predictedAfterMatchPercent = after.matchPercent;
+            std::vector<float> windowedBass(hit.length);
+            std::vector<float> windowedKick(hit.length);
+            
+            // Hann window
+            for (int i = 0; i < hit.length; ++i)
+            {
+                float w = 0.5f * (1.0f - std::cos(2.0f * 3.14159265358979323846f * i / (hit.length - 1)));
+                windowedBass[i] = bass[hit.start + i] * w;
+                windowedKick[i] = kick[hit.start + i] * w;
+            }
+
+            const auto before = PhaseFixEngine::scoreSettings (windowedBass.data(), windowedKick.data(), hit.length,
+                                                               sampleRate, {}, PhaseFixEngine::absoluteManualMaxDelayMs);
+            const auto after = PhaseFixEngine::scoreSettings (windowedBass.data(), windowedKick.data(), hit.length,
+                                                              sampleRate, settings, PhaseFixEngine::absoluteManualMaxDelayMs);
+
+            sumBeforeMatch += before.matchPercent;
+            sumAfterMatch += after.matchPercent;
+            numScores++;
+        }
+
+        if (numScores > 0)
+        {
+            aggregated.beforeMatchPercent = sumBeforeMatch / (float)numScores;
+            aggregated.afterMatchPercent = sumAfterMatch / (float)numScores;
+        }
+        else if (!bass.empty() && !kick.empty())
+        {
+            const auto before = PhaseFixEngine::scoreSettings (bass.data(), kick.data(), (int)bass.size(),
+                                                               sampleRate, {}, PhaseFixEngine::absoluteManualMaxDelayMs);
+            const auto after = PhaseFixEngine::scoreSettings (bass.data(), kick.data(), (int)bass.size(),
+                                                              sampleRate, settings, PhaseFixEngine::absoluteManualMaxDelayMs);
+            aggregated.beforeMatchPercent = before.matchPercent;
+            aggregated.afterMatchPercent = after.matchPercent;
+        }
+        else
+        {
+            aggregated.beforeMatchPercent = 50.0f;
+            aggregated.afterMatchPercent = 50.0f;
+        }
+
+        aggregated.predictedAfterMatchPercent = aggregated.afterMatchPercent;
         aggregated.improvementPercent = aggregated.afterMatchPercent - aggregated.beforeMatchPercent;
 
         const float averageConfidence = averageOf (confidences);

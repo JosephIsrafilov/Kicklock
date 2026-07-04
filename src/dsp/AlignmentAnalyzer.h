@@ -82,18 +82,16 @@ public:
         fft.performRealOnlyForwardTransform (fftA.data(), true);
         fft.performRealOnlyForwardTransform (fftB.data(), true);
 
-        // We want c[d] = sum_n a[n] * b[n + d], so the frequency-domain form
-        // is conj(FFT(a)) * FFT(b). Using FFT(a) * conj(FFT(b)) mirrors the lag
-        // axis and flips the sign convention the processor relies on.
+        // X * conj(Y) cross-spectrum per user request
         for (int i = 0; i <= fftSize / 2; ++i)
         {
             const float ar = fftA[2 * i];
             const float ai = fftA[2 * i + 1];
             const float br = fftB[2 * i];
             const float bi = fftB[2 * i + 1];
-            // (ar - j*ai) * (br + j*bi)
+            // (ar + j*ai) * (br - j*bi)
             fftA[2 * i]     = ar * br + ai * bi;
-            fftA[2 * i + 1] = ar * bi - ai * br;
+            fftA[2 * i + 1] = ai * br - ar * bi;
         }
 
         fft.performRealOnlyInverseTransform (fftA.data());
@@ -136,7 +134,8 @@ public:
         }
 
         result.valid          = true;
-        result.delayMs        = (float) (refinedLag / sampleRate * 1000.0);
+        // X * conj(Y) flips the lag axis, so we negate refinedLag to keep a positive delay meaning 'kick is late'.
+        result.delayMs        = (float) (-refinedLag / sampleRate * 1000.0);
         result.delayMs        = std::clamp (result.delayMs, -maxDelayMs, maxDelayMs);
         result.invertPolarity = bestVal < 0.0;
         result.beforeMatch    = toPercent (r0);
@@ -270,8 +269,8 @@ private:
 
         for (int i = 0; i < window; ++i)
         {
-            fftA[2 * i] = a[i];
-            fftB[2 * i] = b[i];
+            fftA[i] = a[i];
+            fftB[i] = b[i];
         }
 
         fft.performRealOnlyForwardTransform (fftA.data(), true);

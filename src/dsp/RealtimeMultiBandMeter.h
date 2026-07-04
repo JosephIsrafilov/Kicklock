@@ -66,37 +66,28 @@ public:
     // Audio thread. O(numBands), no allocation.
     void pushSample (float bass, float kick) noexcept
     {
+        if (windowSize <= 0) return;
+        const double alpha = 1.0 - std::exp(-1.0 / (double)windowSize);
+        const double beta = 1.0 - alpha;
+
         for (auto& band : bands)
         {
-            if (! band.active || band.bufA.empty())
+            if (! band.active)
                 continue;
 
-            const float a = band.lp.process (band.hp.process (bass,
+            const double a = band.lp.process (band.hp.process ((double)bass,
                                                     band.hpStateBassZ1, band.hpStateBassZ2),
                                                   band.lpStateBassZ1, band.lpStateBassZ2);
-            const float b = band.lp.process (band.hp.process (kick,
+            const double b = band.lp.process (band.hp.process ((double)kick,
                                                     band.hpStateKickZ1, band.hpStateKickZ2),
                                                   band.lpStateKickZ1, band.lpStateKickZ2);
 
-            if (band.numValid >= windowSize)
-            {
-                const float oldA = band.bufA[(size_t) band.writeIndex];
-                const float oldB = band.bufB[(size_t) band.writeIndex];
-                band.sumAB -= (double) oldA * (double) oldB;
-                band.sumA2 -= (double) oldA * (double) oldA;
-                band.sumB2 -= (double) oldB * (double) oldB;
-            }
-            else
-            {
-                ++band.numValid;
-            }
+            band.sumAB = alpha * (a * b) + beta * band.sumAB;
+            band.sumA2 = alpha * (a * a) + beta * band.sumA2;
+            band.sumB2 = alpha * (b * b) + beta * band.sumB2;
 
-            band.bufA[(size_t) band.writeIndex] = a;
-            band.bufB[(size_t) band.writeIndex] = b;
-            band.sumAB += (double) a * (double) b;
-            band.sumA2 += (double) a * (double) a;
-            band.sumB2 += (double) b * (double) b;
-            band.writeIndex = (band.writeIndex + 1) % windowSize;
+            if (band.numValid < windowSize)
+                ++band.numValid;
         }
     }
 
@@ -174,7 +165,7 @@ private:
     struct BiquadCoeffs
     {
         static constexpr double pi = 3.14159265358979323846;
-        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+        double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
 
         void makeLowPass (double fs, double f, double q)
         {
@@ -182,11 +173,11 @@ private:
             const double cw = std::cos (w0), sw = std::sin (w0);
             const double alpha = sw / (2.0 * q);
             const double a0 = 1.0 + alpha;
-            b0 = (float) (((1.0 - cw) * 0.5) / a0);
-            b1 = (float) ((1.0 - cw) / a0);
-            b2 = (float) (((1.0 - cw) * 0.5) / a0);
-            a1 = (float) ((-2.0 * cw) / a0);
-            a2 = (float) ((1.0 - alpha) / a0);
+            b0 = ((1.0 - cw) * 0.5) / a0;
+            b1 = (1.0 - cw) / a0;
+            b2 = ((1.0 - cw) * 0.5) / a0;
+            a1 = (-2.0 * cw) / a0;
+            a2 = (1.0 - alpha) / a0;
         }
 
         void makeHighPass (double fs, double f, double q)
@@ -195,18 +186,18 @@ private:
             const double cw = std::cos (w0), sw = std::sin (w0);
             const double alpha = sw / (2.0 * q);
             const double a0 = 1.0 + alpha;
-            b0 = (float) (((1.0 + cw) * 0.5) / a0);
-            b1 = (float) (-(1.0 + cw) / a0);
-            b2 = (float) (((1.0 + cw) * 0.5) / a0);
-            a1 = (float) ((-2.0 * cw) / a0);
-            a2 = (float) ((1.0 - alpha) / a0);
+            b0 = ((1.0 + cw) * 0.5) / a0;
+            b1 = -(1.0 + cw) / a0;
+            b2 = ((1.0 + cw) * 0.5) / a0;
+            a1 = (-2.0 * cw) / a0;
+            a2 = (1.0 - alpha) / a0;
         }
 
         // Transposed direct form II, one call per (filter, signal) using that
         // pair's own z-state.
-        float process (float in, float& z1, float& z2) const noexcept
+        double process (double in, double& z1, double& z2) const noexcept
         {
-            const float out = b0 * in + z1;
+            const double out = b0 * in + z1;
             z1 = b1 * in - a1 * out + z2;
             z2 = b2 * in - a2 * out;
             return out;
@@ -219,10 +210,10 @@ private:
         float weight = 0.0f;
         bool active = true;
 
-        float hpStateBassZ1 = 0.0f, hpStateBassZ2 = 0.0f;
-        float lpStateBassZ1 = 0.0f, lpStateBassZ2 = 0.0f;
-        float hpStateKickZ1 = 0.0f, hpStateKickZ2 = 0.0f;
-        float lpStateKickZ1 = 0.0f, lpStateKickZ2 = 0.0f;
+        double hpStateBassZ1 = 0.0, hpStateBassZ2 = 0.0;
+        double lpStateBassZ1 = 0.0, lpStateBassZ2 = 0.0;
+        double hpStateKickZ1 = 0.0, hpStateKickZ2 = 0.0;
+        double lpStateKickZ1 = 0.0, lpStateKickZ2 = 0.0;
 
         std::vector<float> bufA, bufB;
         double sumAB = 0.0, sumA2 = 0.0, sumB2 = 0.0;
@@ -237,14 +228,21 @@ private:
         if (! band.active || band.numValid <= 0)
             return false;
 
-        const double norm = std::sqrt (band.sumA2 * band.sumB2);
-        if (norm <= 1.0e-12)
+        const double denomSq = band.sumA2 * band.sumB2;
+        if (denomSq <= 1.0e-12)
             return false;
 
+        const double norm = std::sqrt(std::max(0.0, denomSq));
+        if (norm <= 1.0e-12)
+            return false;
+            
         corrOut = std::clamp (band.sumAB / norm, -1.0, 1.0);
 
         if (confOut != nullptr)
-            *confOut = std::clamp (norm / (double) band.numValid * 200.0, 0.0, 1.0);
+        {
+            // For confidence we previously normalized by numValid, but EMA sum is already ~1.
+            *confOut = std::clamp (norm * 200.0, 0.0, 1.0);
+        }
 
         return true;
     }

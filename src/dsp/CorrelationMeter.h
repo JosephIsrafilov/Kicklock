@@ -45,36 +45,22 @@ public:
     // window is full, then recompute the smoothed correlation.
     void pushSample (float a, float b)
     {
-        if (bufferA.empty())
+        if (windowSize <= 0)
             return;
 
-        if (numValid >= windowSize)
-        {
-            // buffer full: evict the sample about to be overwritten
-            const float oldA = bufferA[(size_t) writeIndex];
-            const float oldB = bufferB[(size_t) writeIndex];
+        const double alpha = 1.0 - std::exp(-1.0 / (double)windowSize);
+        const double beta = 1.0 - alpha;
+        const double da = (double) a;
+        const double db = (double) b;
 
-            sumA  -= (double) oldA;
-            sumB  -= (double) oldB;
-            sumAB -= (double) oldA * (double) oldB;
-            sumA2 -= (double) oldA * (double) oldA;
-            sumB2 -= (double) oldB * (double) oldB;
-        }
-        else
-        {
+        sumA  = alpha * da + beta * sumA;
+        sumB  = alpha * db + beta * sumB;
+        sumAB = alpha * (da * db) + beta * sumAB;
+        sumA2 = alpha * (da * da) + beta * sumA2;
+        sumB2 = alpha * (db * db) + beta * sumB2;
+
+        if (numValid < windowSize)
             ++numValid;
-        }
-
-        bufferA[(size_t) writeIndex] = a;
-        bufferB[(size_t) writeIndex] = b;
-
-        sumA  += (double) a;
-        sumB  += (double) b;
-        sumAB += (double) a * (double) b;
-        sumA2 += (double) a * (double) a;
-        sumB2 += (double) b * (double) b;
-
-        writeIndex = (writeIndex + 1) % windowSize;
 
         const float mapped = computeMappedCorrelation();
         smoothedValue += smoothingAlpha * (mapped - smoothedValue);
@@ -100,14 +86,15 @@ private:
         if (numValid == 0)
             return smoothedValue;
 
-        const double n = (double) numValid;
-        const double numerator = n * sumAB - sumA * sumB;
-        const double denomSq = (n * sumA2 - sumA * sumA) * (n * sumB2 - sumB * sumB);
+        // Since we are using EMA, the sums are already normalized by alpha, 
+        // effectively meaning n=1. We just use the standard EMA variance/covariance formula.
+        const double numerator = sumAB - sumA * sumB;
+        const double denomSq = (sumA2 - sumA * sumA) * (sumB2 - sumB * sumB);
 
         if (denomSq <= 1.0e-12)
             return smoothedValue;
 
-        double r = numerator / std::sqrt (denomSq);
+        double r = numerator / std::sqrt (std::max(0.0, denomSq));
         r = r < -1.0 ? -1.0 : (r > 1.0 ? 1.0 : r);
 
         return (float) ((r + 1.0) * 50.0);
