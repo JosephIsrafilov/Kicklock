@@ -1,6 +1,8 @@
 # CMake and build files
 /build/
 /build-codex/
+/build-tests/
+/build-fable/
 /build-bitwig-win/
 /out/
 /bin/

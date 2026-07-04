@@ -363,7 +363,17 @@ namespace
         const float phaseShare = validHits > 0 ? (float) phaseRecommendations / (float) validHits : 0.0f;
         const bool phaseStable = phaseShare >= 0.60f || phaseShare <= 0.40f;
         const bool phaseEnabled = phaseShare >= 0.60f;
-        const bool improvementStable = improvementCount >= (int) std::ceil ((float) validHits * 0.60f);
+        // "Stable" means the hits AGREE with each other, not that a majority of
+        // them happen to need a correction. The previous check only tested
+        // improvementCount against a 60% floor, so a perfectly-aligned loop
+        // where every single hit agrees "no correction needed" (improvementCount
+        // == 0) failed that floor and was misclassified as Unstable - which
+        // unconditionally blocks Apply Fix in classifyQuality(). Consensus on
+        // EITHER "needs a fix" or "already fine" across hits is stable; only
+        // genuine disagreement (a mix of both) should count as unstable.
+        const float improvementShare = validHits > 0 ? (float) improvementCount / (float) validHits : 0.0f;
+        const bool improvementStable = validHits <= 1
+            || improvementShare >= 0.60f || improvementShare <= 0.40f;
 
         aggregated.bassPolarityInvert = majorityPolarity;
         aggregated.bassDelayMs = medianDelay;

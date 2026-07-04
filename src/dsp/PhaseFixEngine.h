@@ -83,6 +83,13 @@ public:
     static constexpr float extendedAutoFixMaxDelayMs = 15.0f;
     static constexpr float absoluteManualMaxDelayMs = 50.0f;
 
+    // Transient-hit window (ReVision-style): crop analysis to just around the
+    // kick hit so inter-hit material can't skew the low-end correlation. Matches
+    // the HitCaptureBuffer's own capture window closely enough that a snapshot
+    // fed straight in is left essentially untouched.
+    static constexpr float hitPreRollMs = 20.0f;
+    static constexpr float hitPostRollMs = 150.0f;
+
     static PhaseFixScore scoreSettings (const float* bass,
                                         const float* kick,
                                         int numSamples,
@@ -105,12 +112,56 @@ public:
         return result;
     }
 
+    // Transient-hit windowing entry point (ReVision-style). Kick and bass only
+    // reveal their true low-end phase relationship right around the hit;
+    // correlating over a loose span lets inter-hit silence and sustained
+    // material wash out the reading, and lets the search lock onto whatever
+    // arbitrary offset happens to line up. So before running the grid search we
+    // locate the most prominent kick transient and crop BOTH signals to the same
+    // [-hitPreRollMs, +hitPostRollMs] index range around it. Cropping both with
+    // the identical range preserves their relative lag exactly, so the delay the
+    // search recovers is unchanged while the out-of-window noise is removed.
+    //
+    // The crop is a no-op when the caller already passed a tight per-hit slice
+    // (the located peak sits near the start, the window clamps to the whole
+    // slice), so this is safe to layer under the processor's per-hit aggregation
+    // and to feed a HitCaptureBuffer snapshot straight into.
     static PhaseFixResult analyze (const float* bass,
                                    const float* kick,
                                    int numSamples,
                                    double sampleRate,
                                    float maxDelayMs = defaultAutoFixMaxDelayMs,
                                    InterpolationType delayInterpolation = InterpolationType::Linear)
+    {
+        if (bass != nullptr && kick != nullptr && numSamples > 32 && sampleRate > 0.0)
+        {
+            const int peak = locateDominantTransient (kick, numSamples, sampleRate);
+            if (peak >= 0)
+            {
+                const int preSamples  = juce::jmax (1, (int) std::lround (sampleRate * (double) hitPreRollMs  / 1000.0));
+                const int postSamples = juce::jmax (1, (int) std::lround (sampleRate * (double) hitPostRollMs / 1000.0));
+
+                const int start = juce::jlimit (0, numSamples - 1, peak - preSamples);
+                const int end   = juce::jmin (numSamples, peak + postSamples);
+                const int windowLength = end - start;
+
+                // Only re-window when it actually tightens the span; a crop that
+                // still spans the whole buffer would just repeat the same work.
+                if (windowLength > 32 && windowLength < numSamples)
+                    return analyzeCore (bass + start, kick + start, windowLength,
+                                        sampleRate, maxDelayMs, delayInterpolation);
+            }
+        }
+
+        return analyzeCore (bass, kick, numSamples, sampleRate, maxDelayMs, delayInterpolation);
+    }
+
+    static PhaseFixResult analyzeCore (const float* bass,
+                                       const float* kick,
+                                       int numSamples,
+                                       double sampleRate,
+                                       float maxDelayMs = defaultAutoFixMaxDelayMs,
+                                       InterpolationType delayInterpolation = InterpolationType::Linear)
     {
         PhaseFixResult result;
         result.contributingHits = 1;
@@ -359,6 +410,82 @@ private:
         candidate.confidence = value.confidence;
         candidate.multi = value.multi;
         return candidate;
+    }
+
+    // Finds the sample index of the most prominent kick transient in the buffer
+    // using the same envelope-follower shape as the realtime TransientDetector
+    // (attack/release energy follower, small threshold + energy gate), then
+    // refines to the local energy peak just after each detected onset. Returns
+    // -1 when nothing crosses the gate (silence / no clear hit), which tells the
+    // caller to fall back to analysing the whole buffer. Read-only, no alloc.
+    static int locateDominantTransient (const float* kick, int numSamples, double sampleRate) noexcept
+    {
+        if (kick == nullptr || numSamples <= 1 || sampleRate <= 0.0)
+            return -1;
+
+        // Mirror TransientDetector's defaults so offline detection matches what
+        // the audio thread would have latched onto for the same signal.
+        constexpr float threshold = 0.004f;
+        constexpr float minimumEnergyGate = 0.0004f;
+        const float attackCoeff  = timeMsToCoeff (2.0f, sampleRate);
+        const float releaseCoeff = timeMsToCoeff (60.0f, sampleRate);
+        const int holdoffSamples = juce::jmax (1, (int) std::round (sampleRate * 90.0 / 1000.0));
+        const int peakSearch     = juce::jmax (1, (int) std::round (sampleRate * 8.0 / 1000.0));
+
+        float envelope = 0.0f;
+        bool wasAbove = false;
+        int holdoffRemaining = 0;
+
+        int bestPeak = -1;
+        float bestPeakEnergy = -1.0f;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float energy = kick[i] * kick[i];
+            const float coeff = energy > envelope ? attackCoeff : releaseCoeff;
+            envelope = coeff * envelope + (1.0f - coeff) * energy;
+
+            if (holdoffRemaining > 0)
+                --holdoffRemaining;
+
+            const bool above = envelope >= threshold && envelope >= minimumEnergyGate;
+            const bool detected = above && ! wasAbove && holdoffRemaining <= 0;
+            wasAbove = above;
+
+            if (! detected)
+                continue;
+
+            holdoffRemaining = holdoffSamples;
+
+            // Refine the onset to the loudest raw sample in the short window just
+            // after it — that is the true transient peak we want centred.
+            const int searchEnd = juce::jmin (numSamples, i + peakSearch);
+            int localPeak = i;
+            float localEnergy = kick[i] * kick[i];
+            for (int j = i; j < searchEnd; ++j)
+            {
+                const float e = kick[j] * kick[j];
+                if (e > localEnergy)
+                {
+                    localEnergy = e;
+                    localPeak = j;
+                }
+            }
+
+            if (localEnergy > bestPeakEnergy)
+            {
+                bestPeakEnergy = localEnergy;
+                bestPeak = localPeak;
+            }
+        }
+
+        return bestPeak;
+    }
+
+    static float timeMsToCoeff (float ms, double sampleRate) noexcept
+    {
+        const double samples = std::max (1.0, sampleRate * (double) ms / 1000.0);
+        return (float) std::exp (-1.0 / samples);
     }
 
     static int findWorstUsefulBandIndex (const MultiBandCorrelationResult& multi) noexcept
