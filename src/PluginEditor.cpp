@@ -40,6 +40,16 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     gridCombo.setTooltip ("Sets the scope time grid.");
     viewCombo.setTooltip ("Chooses triggered or scrolling scope display.");
 
+    freezeButton.setButtonText ("Freeze");
+    freezeButton.setClickingTogglesState (true);
+    freezeButton.setColour (juce::TextButton::buttonColourId, panel);
+    freezeButton.setColour (juce::TextButton::textColourOffId, text);
+    freezeButton.setColour (juce::TextButton::buttonOnColourId, teal);
+    freezeButton.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
+    freezeButton.setTooltip ("Freezes the oscilloscope display so you can inspect the waveform.");
+    freezeButton.onClick = [this] { oscilloscope.setFrozen (freezeButton.getToggleState()); oscilloscope.repaint(); };
+    addAndMakeVisible (freezeButton);
+
     analyzeButton.setButtonText ("Analyze");
     analyzeButton.setColour (juce::TextButton::buttonColourId, teal);
     analyzeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
@@ -557,7 +567,9 @@ void KickLockAudioProcessorEditor::resized()
     gridCombo.setBounds (controls.removeFromLeft (68).reduced (0, 3));
     controls.removeFromLeft (5);
     viewCombo.setBounds (controls.removeFromLeft (96).reduced (0, 3));
-    controls.removeFromLeft (10);
+    controls.removeFromLeft (5);
+    freezeButton.setBounds (controls.removeFromLeft (56).reduced (0, 2));
+    controls.removeFromLeft (8);
     compareAButton.setBounds (controls.removeFromLeft (30).reduced (0, 2));
     controls.removeFromLeft (4);
     compareBButton.setBounds (controls.removeFromLeft (30).reduced (0, 2));

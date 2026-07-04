@@ -93,26 +93,36 @@ void Oscilloscope::timerCallback()
     std::array<float, scratchSize> mainScratch {};
     std::array<float, scratchSize> sidechainScratch {};
 
-    const int count = fifo.readAvailable (mainScratch.data(), sidechainScratch.data(), scratchSize);
+    bool anyRead = false;
 
-    if (frozen)
-        return;
+    while (true)
+    {
+        const int count = fifo.readAvailable (mainScratch.data(), sidechainScratch.data(), scratchSize);
+        if (count == 0)
+            break;
+
+        anyRead = true;
+
+        if (frozen || viewMode == ScopeViewMode::Triggered)
+            continue;
+
+        for (int i = 0; i < count; ++i)
+        {
+            mainHistory[(size_t) writeIndex]      = mainScratch[(size_t) i];
+            sidechainHistory[(size_t) writeIndex] = sidechainScratch[(size_t) i];
+            writeIndex = (writeIndex + 1) % historyLength;
+        }
+    }
 
     if (viewMode == ScopeViewMode::Triggered)
     {
-        refreshTriggeredSnapshot();
-        return;
+        if (! frozen)
+            refreshTriggeredSnapshot();
     }
-
-    for (int i = 0; i < count; ++i)
+    else if (anyRead && ! frozen)
     {
-        mainHistory[(size_t) writeIndex]      = mainScratch[(size_t) i];
-        sidechainHistory[(size_t) writeIndex] = sidechainScratch[(size_t) i];
-        writeIndex = (writeIndex + 1) % historyLength;
-    }
-
-    if (count > 0)
         repaint();
+    }
 }
 
 void Oscilloscope::paint (juce::Graphics& g)

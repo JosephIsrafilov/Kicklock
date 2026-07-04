@@ -45,6 +45,7 @@ private:
     // --- Top bar -----------------------------------------------------------
     juce::ComboBox gridCombo;
     juce::ComboBox viewCombo;
+    juce::TextButton freezeButton;
     juce::TextButton analyzeButton;
     juce::TextButton applyFixButton;
     juce::TextButton revertButton;
