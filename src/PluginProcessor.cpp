@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 namespace
@@ -431,20 +432,375 @@ namespace
     }
 }
 
+class KickLockAudioProcessor::PhaseAlignmentEngine
+{
+public:
+    void prepare (double newSampleRate, int samplesPerBlock, int newBaseDelaySamples)
+    {
+        sampleRate = newSampleRate;
+        baseDelaySamples = juce::jmax (0, newBaseDelaySamples);
+
+        const auto maxDelay = juce::jmax (1, baseDelaySamples * 2 + 4);
+        delayLine.setMaximumDelayInSamples (maxDelay);
+        delayLine.prepare ({ sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), 2 });
+        delayLine.reset();
+
+        smoothedDelay.reset (sampleRate, 0.020);
+        smoothedDelay.setCurrentAndTargetValue ((float) baseDelaySamples);
+
+        smoothedAllpassFreq.reset (sampleRate, 0.030);
+        smoothedAllpassFreq.setCurrentAndTargetValue (50.0f);
+
+        allpassWet.reset (sampleRate, 0.010);
+        allpassWet.setCurrentAndTargetValue (0.0f);
+
+        initialiseFilters();
+        reset();
+    }
+
+    void reset()
+    {
+        delayLine.reset();
+
+        for (auto& filter : allpassFilters)
+            filter.reset();
+
+        smoothedDelay.setCurrentAndTargetValue ((float) baseDelaySamples);
+        smoothedAllpassFreq.setCurrentAndTargetValue (50.0f);
+        allpassWet.setCurrentAndTargetValue (0.0f);
+        lastAppliedAllpassFreq = -1.0f;
+    }
+
+    void process (juce::AudioBuffer<float>& mainBuffer,
+                  float delayMs,
+                  bool polarityInvert,
+                  float allpassFreqHz,
+                  bool allpassEnabled)
+    {
+        const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
+        const auto numSamples = mainBuffer.getNumSamples();
+
+        smoothedDelay.setTargetValue (delaySamplesForUserDelayMs (delayMs));
+        smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 300.0f, allpassFreqHz));
+        allpassWet.setTargetValue (allpassEnabled ? 1.0f : 0.0f);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const auto delaySamples = juce::jlimit (0.0f,
+                                                   (float) delayLine.getMaximumDelayInSamples(),
+                                                   smoothedDelay.getNextValue());
+            const auto wet = allpassWet.getNextValue();
+            const bool runAllpass = wet > 1.0e-5f || allpassWet.isSmoothing();
+
+            if (runAllpass)
+                updateAllpassCoefficients (smoothedAllpassFreq.getNextValue());
+
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                delayLine.pushSample (ch, mainBuffer.getSample (ch, i));
+                auto sample = delayLine.popSample (ch, delaySamples);
+
+                if (polarityInvert)
+                    sample = -sample;
+
+                if (runAllpass)
+                {
+                    const auto dry = sample;
+                    const auto rotated = allpassFilters[(size_t) ch].processSample (sample);
+                    sample = dry + wet * (rotated - dry);
+                }
+
+                mainBuffer.setSample (ch, i, sample);
+            }
+
+            for (int ch = numChannels; ch < 2; ++ch)
+            {
+                delayLine.pushSample (ch, 0.0f);
+                (void) delayLine.popSample (ch, delaySamples);
+            }
+        }
+    }
+
+    void processBypassed (juce::AudioBuffer<float>& mainBuffer)
+    {
+        const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
+        const auto numSamples = mainBuffer.getNumSamples();
+        const auto fixedDelay = (float) baseDelaySamples;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                delayLine.pushSample (ch, mainBuffer.getSample (ch, i));
+                mainBuffer.setSample (ch, i, delayLine.popSample (ch, fixedDelay));
+            }
+
+            for (int ch = numChannels; ch < 2; ++ch)
+            {
+                delayLine.pushSample (ch, 0.0f);
+                (void) delayLine.popSample (ch, fixedDelay);
+            }
+        }
+    }
+
+private:
+    void initialiseFilters()
+    {
+        for (auto& filter : allpassFilters)
+        {
+            filter.coefficients = new juce::dsp::IIR::Coefficients<float> (1.0f, 0.0f, 1.0f, 0.0f);
+            filter.prepare ({ sampleRate, 1, 1 });
+        }
+
+        updateAllpassCoefficients (50.0f);
+    }
+
+    float delaySamplesForUserDelayMs (float delayMs) const noexcept
+    {
+        const auto clampedMs = juce::jlimit (-20.0f, 20.0f, delayMs);
+        return (float) baseDelaySamples + (float) (clampedMs * sampleRate / 1000.0);
+    }
+
+    void updateAllpassCoefficients (float frequencyHz)
+    {
+        const auto limited = juce::jlimit (20.0f, 300.0f, frequencyHz);
+        if (std::abs (limited - lastAppliedAllpassFreq) < 0.01f)
+            return;
+
+        const auto coeffs = juce::dsp::IIR::ArrayCoefficients<float>::makeAllPass (sampleRate, limited, 0.70710678f);
+
+        for (auto& filter : allpassFilters)
+            *filter.coefficients = coeffs;
+
+        lastAppliedAllpassFreq = limited;
+    }
+
+    double sampleRate = 44100.0;
+    int baseDelaySamples = 0;
+    float lastAppliedAllpassFreq = -1.0f;
+
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLine;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDelay;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassFreq;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> allpassWet;
+    std::array<juce::dsp::IIR::Filter<float>, 2> allpassFilters;
+};
+
+class KickLockAudioProcessor::AutoAlignEngine : public juce::Thread
+{
+public:
+    explicit AutoAlignEngine (KickLockAudioProcessor& p)
+        : juce::Thread ("KickLock Auto-Align"), owner (p)
+    {
+        startThread();
+    }
+
+    ~AutoAlignEngine() override
+    {
+        signalThreadShouldExit();
+        notify();
+        stopThread (2000);
+    }
+
+    void prepare (double newSampleRate)
+    {
+        sampleRate = newSampleRate;
+        captureSamples = juce::jmax (1, (int) std::ceil (sampleRate * 0.050));
+        maxLagSamples = juce::jmax (1, (int) std::ceil (sampleRate * 0.020));
+
+        mainCapture.assign ((size_t) captureSamples, 0.0f);
+        sideCapture.assign ((size_t) captureSamples, 0.0f);
+        captureIndex.store (0, std::memory_order_release);
+        state.store (State::Idle, std::memory_order_release);
+    }
+
+    void requestCapture() noexcept
+    {
+        if (state.load (std::memory_order_acquire) == State::Idle)
+        {
+            captureIndex.store (0, std::memory_order_release);
+            state.store (State::Armed, std::memory_order_release);
+        }
+    }
+
+    void pushSample (float mainSample, float sidechainSample) noexcept
+    {
+        auto current = state.load (std::memory_order_acquire);
+
+        if (current == State::Armed)
+        {
+            if (std::abs (sidechainSample) < triggerThreshold)
+                return;
+
+            captureIndex.store (0, std::memory_order_release);
+            current = State::Capturing;
+            state.store (current, std::memory_order_release);
+        }
+
+        if (current != State::Capturing)
+            return;
+
+        const auto index = captureIndex.load (std::memory_order_relaxed);
+        if (index >= captureSamples)
+            return;
+
+        mainCapture[(size_t) index] = mainSample;
+        sideCapture[(size_t) index] = sidechainSample;
+
+        const auto next = index + 1;
+        captureIndex.store (next, std::memory_order_release);
+
+        if (next >= captureSamples)
+        {
+            state.store (State::Analyzing, std::memory_order_release);
+            notify();
+        }
+    }
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            if (state.load (std::memory_order_acquire) != State::Analyzing)
+            {
+                wait (10);
+                continue;
+            }
+
+            const auto result = analyzeCapturedBuffers();
+            state.store (State::Idle, std::memory_order_release);
+
+            juce::MessageManager::callAsync ([this, result]
+            {
+                applyResultToParameters (result);
+            });
+        }
+    }
+
+private:
+    enum class State
+    {
+        Idle,
+        Armed,
+        Capturing,
+        Analyzing
+    };
+
+    struct Result
+    {
+        float delayMs = 0.0f;
+        bool invertPolarity = false;
+        bool valid = false;
+    };
+
+    Result analyzeCapturedBuffers() const
+    {
+        Result result;
+        double bestAbsCorrelation = 0.0;
+        double bestSignedCorrelation = 0.0;
+        int bestLag = 0;
+
+        for (int lag = -maxLagSamples; lag <= maxLagSamples; ++lag)
+        {
+            double xy = 0.0;
+            double xx = 0.0;
+            double yy = 0.0;
+            int count = 0;
+
+            for (int i = 0; i < captureSamples; ++i)
+            {
+                const int mainIndex = i - lag;
+                if (mainIndex < 0 || mainIndex >= captureSamples)
+                    continue;
+
+                const auto x = (double) mainCapture[(size_t) mainIndex];
+                const auto y = (double) sideCapture[(size_t) i];
+                xy += x * y;
+                xx += x * x;
+                yy += y * y;
+                ++count;
+            }
+
+            if (count < 16)
+                continue;
+
+            const auto denom = std::sqrt (xx * yy);
+            if (denom <= 1.0e-12)
+                continue;
+
+            const auto corr = xy / denom;
+            const auto absCorr = std::abs (corr);
+
+            if (absCorr > bestAbsCorrelation)
+            {
+                bestAbsCorrelation = absCorr;
+                bestSignedCorrelation = corr;
+                bestLag = lag;
+            }
+        }
+
+        if (bestAbsCorrelation > 0.05)
+        {
+            result.valid = true;
+            result.delayMs = (float) ((double) bestLag * 1000.0 / sampleRate);
+            result.delayMs = juce::jlimit (-20.0f, 20.0f, result.delayMs);
+            result.invertPolarity = bestSignedCorrelation < 0.0;
+        }
+
+        return result;
+    }
+
+    void applyResultToParameters (Result result)
+    {
+        if (! result.valid)
+            return;
+
+        setParameter ("delay_ms", result.delayMs);
+        setParameter ("delayMs", result.delayMs);
+        setParameter ("polarity_invert", result.invertPolarity ? 1.0f : 0.0f);
+        setParameter ("polarityInvert", result.invertPolarity ? 1.0f : 0.0f);
+    }
+
+    void setParameter (const char* id, float value)
+    {
+        if (auto* parameter = owner.apvts.getParameter (id))
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+    }
+
+    KickLockAudioProcessor& owner;
+    double sampleRate = 44100.0;
+    int captureSamples = 1;
+    int maxLagSamples = 1;
+    static constexpr float triggerThreshold = 0.25118864f; // -12 dBFS
+
+    std::vector<float> mainCapture;
+    std::vector<float> sideCapture;
+    std::atomic<State> state { State::Idle };
+    std::atomic<int> captureIndex { 0 };
+};
+
 KickLockAudioProcessor::KickLockAudioProcessor()
     : AudioProcessor (BusesProperties()
-                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                           .withInput ("Main Input", juce::AudioChannelSet::stereo(), true)
+                           .withInput ("Sidechain Input", juce::AudioChannelSet::stereo(), true)
                            .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                           .withInput ("Sidechain", juce::AudioChannelSet::stereo(), true)),
+                           ),
       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
-    delayMsParam = apvts.getRawParameterValue ("delayMs");
+    delayMsParam = apvts.getRawParameterValue ("delay_ms");
+    delayMsLegacyParam = apvts.getRawParameterValue ("delayMs");
     delayInterpParam = apvts.getRawParameterValue ("delayInterp");
-    polarityInvertParam = apvts.getRawParameterValue ("polarityInvert");
-    phaseFilterEnabledParam = apvts.getRawParameterValue ("phaseFilterEnabled");
-    rotatorFreqParam = apvts.getRawParameterValue ("rotatorFreq");
+    polarityInvertParam = apvts.getRawParameterValue ("polarity_invert");
+    polarityInvertLegacyParam = apvts.getRawParameterValue ("polarityInvert");
+    phaseFilterEnabledParam = apvts.getRawParameterValue ("allpass_enable");
+    phaseFilterEnabledLegacyParam = apvts.getRawParameterValue ("phaseFilterEnabled");
+    rotatorFreqParam = apvts.getRawParameterValue ("allpass_freq");
+    rotatorFreqLegacyParam = apvts.getRawParameterValue ("rotatorFreq");
     rotatorQParam = apvts.getRawParameterValue ("rotatorQ");
     rotatorStagesParam = apvts.getRawParameterValue ("rotatorStages");
+
+    phaseAlignmentEngine = std::make_unique<PhaseAlignmentEngine>();
+    autoAlignEngine = std::make_unique<AutoAlignEngine> (*this);
 }
 
 KickLockAudioProcessor::~KickLockAudioProcessor()
@@ -453,6 +809,7 @@ KickLockAudioProcessor::~KickLockAudioProcessor()
     // wait for a running one to finish before the members it touches (the
     // capture buffer, the result fields) start tearing down.
     analysisThreadPool.removeAllJobs (true, 2000);
+    autoAlignEngine.reset();
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::createParameterLayout()
@@ -460,9 +817,31 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "delay_ms", 1 },
+        "Delay",
+        juce::NormalisableRange<float> (-20.0f, 20.0f, 0.01f),
+        0.0f));
+
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "polarity_invert", 1 },
+        "Polarity Invert",
+        false));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "allpass_freq", 1 },
+        "Allpass Frequency",
+        juce::NormalisableRange<float> (20.0f, 300.0f, 0.0f, 0.35f),
+        50.0f));
+
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "allpass_enable", 1 },
+        "Allpass Enable",
+        false));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "delayMs", 1 },
-        "Audio Bass Delay",
-        juce::NormalisableRange<float> (0.0f, 50.0f, 0.01f),
+        "Legacy Audio Bass Delay",
+        juce::NormalisableRange<float> (-20.0f, 20.0f, 0.01f),
         0.0f));
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (
@@ -500,9 +879,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "rotatorFreq", 1 },
-        "Rotator Frequency",
-        juce::NormalisableRange<float> (20.0f, 2000.0f, 0.0f, 0.3f),
-        200.0f));
+        "Legacy Rotator Frequency",
+        juce::NormalisableRange<float> (20.0f, 300.0f, 0.0f, 0.35f),
+        50.0f));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "rotatorQ", 1 },
@@ -519,13 +898,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
     return layout;
 }
 
-void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
+void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        mainDelay[(size_t) ch].prepare (sampleRate, 50.0f);
-        rotator[(size_t) ch].prepare (sampleRate, 2);
-    }
+    const auto maxDelaySamples = (int) std::ceil (sampleRate * 0.020);
+    setLatencySamples (maxDelaySamples);
+
+    if (phaseAlignmentEngine != nullptr)
+        phaseAlignmentEngine->prepare (sampleRate, samplesPerBlock, maxDelaySamples);
+
+    if (autoAlignEngine != nullptr)
+        autoAlignEngine->prepare (sampleRate);
 
     // Live multi-band phase meters (P5). They band-pass internally, so no
     // separate pre-filters are needed. ~0.25 s rolling window per band.
@@ -533,9 +915,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     dryMultiBandMeter.prepare (sampleRate, liveWindow);
     processedMultiBandMeter.prepare (sampleRate, liveWindow);
     scopeFifo.prepare (8192);
-
-    phaseFilterWet.reset (sampleRate, 0.005);
-    phaseFilterWet.setCurrentAndTargetValue (0.0f);
 
     // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
     rawCapture.prepare ((int) (sampleRate * 2.0));
@@ -567,6 +946,10 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int /*samplesPerB
     latestBpm.store (0.0f);
     bassSignalRms.store (0.0f);
     kickSignalRms.store (0.0f);
+    correlationProductLpf = 0.0f;
+    correlationMainEnergyLpf = 0.0f;
+    correlationSideEnergyLpf = 0.0f;
+    realtimeCorrelation.store (0.0f);
 
     lastInterpChoice = 0;
     lastStageChoice = 0;
@@ -593,25 +976,38 @@ void KickLockAudioProcessor::releaseResources()
 {
 }
 
+void KickLockAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    auto mainBuffer = getBusBuffer (buffer, true, 0);
+    if (phaseAlignmentEngine != nullptr)
+        phaseAlignmentEngine->processBypassed (mainBuffer);
+
+    for (auto channel = getTotalNumInputChannels(); channel < getTotalNumOutputChannels(); ++channel)
+        buffer.clear (channel, 0, buffer.getNumSamples());
+}
+
 bool KickLockAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto mainIn = layouts.getMainInputChannelSet();
     const auto mainOut = layouts.getMainOutputChannelSet();
+    const auto sidechainIn = layouts.inputBuses.size() > 1 ? layouts.inputBuses[(size_t) 1]
+                                                           : juce::AudioChannelSet::disabled();
 
     if (mainIn.isDisabled() || mainOut.isDisabled())
         return false;
 
-    if (mainIn != mainOut)
+    const auto isMonoOrStereo = [] (const juce::AudioChannelSet& set)
+    {
+        return set == juce::AudioChannelSet::mono() || set == juce::AudioChannelSet::stereo();
+    };
+
+    if (! isMonoOrStereo (mainIn) || ! isMonoOrStereo (mainOut))
         return false;
 
-    // Main and sidechain buses may each be mono or stereo only.
-    for (const auto& bus : layouts.inputBuses)
-        if (! bus.isDisabled() && bus != juce::AudioChannelSet::mono() && bus != juce::AudioChannelSet::stereo())
-            return false;
-
-    for (const auto& bus : layouts.outputBuses)
-        if (! bus.isDisabled() && bus != juce::AudioChannelSet::mono() && bus != juce::AudioChannelSet::stereo())
-            return false;
+    if (! sidechainIn.isDisabled() && ! isMonoOrStereo (sidechainIn))
+        return false;
 
     return true;
 }
@@ -620,11 +1016,14 @@ bool KickLockAudioProcessor::isBassProcessingNeutral() const noexcept
 {
     constexpr float epsilon = 1.0e-6f;
 
-    const float delayMs = delayMsParam != nullptr ? delayMsParam->load() : 0.0f;
-    const bool polarity = polarityInvertParam != nullptr && polarityInvertParam->load() > 0.5f;
-    const bool phaseFilter = phaseFilterEnabledParam != nullptr && phaseFilterEnabledParam->load() > 0.5f;
+    const float delayMs = delayMsParam != nullptr ? delayMsParam->load()
+                                                  : (delayMsLegacyParam != nullptr ? delayMsLegacyParam->load() : 0.0f);
+    const bool polarity = (polarityInvertParam != nullptr && polarityInvertParam->load() > 0.5f)
+                       || (polarityInvertLegacyParam != nullptr && polarityInvertLegacyParam->load() > 0.5f);
+    const bool phaseFilter = (phaseFilterEnabledParam != nullptr && phaseFilterEnabledParam->load() > 0.5f)
+                          || (phaseFilterEnabledLegacyParam != nullptr && phaseFilterEnabledLegacyParam->load() > 0.5f);
 
-    return normaliseBassDelayMs (delayMs) <= epsilon && ! polarity && ! phaseFilter;
+    return std::abs (delayMs) <= epsilon && ! polarity && ! phaseFilter;
 }
 
 void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -693,6 +1092,9 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const bool transientDetected = transientDetector.processSample (kickMono);
             hitCapture.pushSample (bassMono, kickMono, transientDetected);
 
+            if (autoAlignEngine != nullptr)
+                autoAlignEngine->pushSample (bassMono, kickMono);
+
             // Live multi-band read of the RAW (pre-processing) relationship.
             // The meter band-passes internally, so feed it the mono pair.
             dryMultiBandMeter.pushSample (bassMono, kickMono);
@@ -750,108 +1152,23 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                                  && bassActivity.isActive());
 
     const bool neutral = isBassProcessingNeutral();
-    const float delayMs = normaliseBassDelayMs (delayMsParam->load());
-    const bool delayActive = delayMs > 1.0e-6f;
-    const bool phaseFilterEnabled = phaseFilterEnabledParam->load() > 0.5f;
-    const bool phaseFadeOutActive = ! phaseFilterEnabled
-        && (phaseFilterWet.isSmoothing() || phaseFilterWet.getCurrentValue() > 1.0e-5f);
-    const bool processingNeeded = ! neutral || phaseFadeOutActive;
+    const float snakeDelayMs = delayMsParam != nullptr ? delayMsParam->load() : 0.0f;
+    const float legacyDelayMs = delayMsLegacyParam != nullptr ? delayMsLegacyParam->load() : 0.0f;
+    const float delayMs = std::abs (snakeDelayMs) > 1.0e-6f ? snakeDelayMs : legacyDelayMs;
 
-    if (! delayActive && lastDelayActive)
-    {
-        for (auto& delay : mainDelay)
-            delay.reset();
-    }
-    lastDelayActive = delayActive;
+    const bool polarityInvert = (polarityInvertParam != nullptr && polarityInvertParam->load() > 0.5f)
+                             || (polarityInvertLegacyParam != nullptr && polarityInvertLegacyParam->load() > 0.5f);
+    const bool phaseFilterEnabled = (phaseFilterEnabledParam != nullptr && phaseFilterEnabledParam->load() > 0.5f)
+                                 || (phaseFilterEnabledLegacyParam != nullptr && phaseFilterEnabledLegacyParam->load() > 0.5f);
+    const float snakeFreq = rotatorFreqParam != nullptr ? rotatorFreqParam->load() : 50.0f;
+    const float legacyFreq = rotatorFreqLegacyParam != nullptr ? rotatorFreqLegacyParam->load() : 50.0f;
+    const float allpassFreq = std::abs (snakeFreq - 50.0f) > 1.0e-4f ? snakeFreq : legacyFreq;
+    const bool processingNeeded = ! neutral;
 
-    if (! processingNeeded)
-    {
-        phaseFilterWet.setCurrentAndTargetValue (0.0f);
-    }
-    else
-    {
-        // 1) Polarity invert on the main bus.
-        if (polarityInvertParam->load() > 0.5f)
-        {
-            for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
-                mainBuffer.applyGain (ch, 0, numSamples, -1.0f);
-        }
+    if (phaseAlignmentEngine != nullptr)
+        phaseAlignmentEngine->process (mainBuffer, delayMs, polarityInvert, allpassFreq, phaseFilterEnabled);
 
-        // 2) Fractional delay on the main/bass bus only. Do not run the delay
-        // line at exactly zero delay; the neutral/default path must be a real
-        // pass-through, not an assumed-transparent DSP path.
-        if (delayActive)
-        {
-            const double delaySamples = delayMs / 1000.0 * getSampleRate();
-
-            for (int ch = 0; ch < 2; ++ch)
-                mainDelay[(size_t) ch].setDelaySamples ((float) delaySamples);
-
-            const int interpChoice = (int) delayInterpParam->load();
-            if (interpChoice != lastInterpChoice)
-            {
-                const auto type = interpChoice == 0 ? InterpolationType::Linear : InterpolationType::Allpass;
-
-                for (int ch = 0; ch < 2; ++ch)
-                    mainDelay[(size_t) ch].setInterpolationType (type);
-
-                lastInterpChoice = interpChoice;
-            }
-
-            for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
-                for (int i = 0; i < numSamples; ++i)
-                    mainBuffer.setSample (ch, i, mainDelay[(size_t) ch].processSample (mainBuffer.getSample (ch, i)));
-        }
-
-        // 3) Allpass phase rotator on the main bus. Coefficients are updated
-        // only on parameter-change edges, not in steady state. This still runs
-        // makeAllPass/assignment on the audio thread for those edges; keep it
-        // isolated here until the processor owns a non-audio-thread coefficient
-        // handoff.
-        if (phaseFilterEnabled || phaseFadeOutActive)
-        {
-            const int stageChoice = (int) rotatorStagesParam->load();
-            if (phaseFilterEnabled && stageChoice != lastStageChoice)
-            {
-                for (int ch = 0; ch < 2; ++ch)
-                    rotator[(size_t) ch].prepare (getSampleRate(), stageChoice + 2);
-
-                lastStageChoice = stageChoice;
-            }
-
-            const float rotatorFreq = rotatorFreqParam->load();
-            const float rotatorQ = rotatorQParam->load();
-            if (phaseFilterEnabled && (rotatorFreq != lastRotatorFreq || rotatorQ != lastRotatorQ))
-            {
-                for (int ch = 0; ch < 2; ++ch)
-                    rotator[(size_t) ch].setParameters (rotatorFreq, rotatorQ);
-
-                lastRotatorFreq = rotatorFreq;
-                lastRotatorQ = rotatorQ;
-            }
-
-            phaseFilterWet.setTargetValue (phaseFilterEnabled ? 1.0f : 0.0f);
-            for (int i = 0; i < numSamples; ++i)
-            {
-                const float mix = phaseFilterWet.getNextValue();
-                for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch)
-                {
-                    const float dry = mainBuffer.getSample (ch, i);
-                    const float wet = rotator[(size_t) ch].processSample (dry);
-                    mainBuffer.setSample (ch, i, dry + mix * (wet - dry));
-                }
-            }
-
-            if (! phaseFilterEnabled
-                && ! phaseFilterWet.isSmoothing()
-                && phaseFilterWet.getCurrentValue() <= 1.0e-5f)
-            {
-                phaseFilterWet.setCurrentAndTargetValue (0.0f);
-            }
-        }
-    }
-
-    // 4) Feed the correlation meter and scope fifo with mono-summed
+    // Feed the correlation meter and scope fifo with mono-summed
     // main/sidechain values. Skipped entirely when there's no sidechain,
     // since a zero-sidechain signal would be meaningless for both.
     if (hasSidechain)
@@ -875,6 +1192,20 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             // signals internally per band; feed it the raw mono pair.
             processedMultiBandMeter.pushSample (mainMono, sidechainMono);
 
+            constexpr float alpha = 0.005f;
+            correlationProductLpf += alpha * ((mainMono * sidechainMono) - correlationProductLpf);
+            correlationMainEnergyLpf += alpha * ((mainMono * mainMono) - correlationMainEnergyLpf);
+            correlationSideEnergyLpf += alpha * ((sidechainMono * sidechainMono) - correlationSideEnergyLpf);
+
+            constexpr float noiseFloorEnergy = 1.0e-8f; // -80 dBFS squared
+            const auto denominator = std::sqrt (correlationMainEnergyLpf * correlationSideEnergyLpf);
+            const float signedCorrelation = (correlationMainEnergyLpf > noiseFloorEnergy
+                                             && correlationSideEnergyLpf > noiseFloorEnergy
+                                             && denominator > 1.0e-12f)
+                ? juce::jlimit (-1.0f, 1.0f, correlationProductLpf / denominator)
+                : 0.0f;
+            realtimeCorrelation.store (std::isfinite (signedCorrelation) ? signedCorrelation : 0.0f);
+
             // Decimate the scope feed only: the meter still sees every sample,
             // but the UI keeps a slower, longer history for the musical grid.
             if (++scopeDecimationCounter >= scopeDecimationFactor)
@@ -883,6 +1214,10 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                 scopeFifo.pushSample (mainMono, sidechainMono);
             }
         }
+    }
+    else
+    {
+        realtimeCorrelation.store (0.0f);
     }
 
     // Overall (low-end-weighted) match from whichever meter reflects what the
@@ -904,7 +1239,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     liveLowEndMatchPercent.store (activeLowEnd);
     liveBroadbandMatchPercent.store (activeBroad);
     realtimeLowBandMatchPercent.store (activeLowEnd); // legacy alias (sub/low)
-    correlationPercent.store (activeMatch);
+    correlationPercent.store ((realtimeCorrelation.load() + 1.0f) * 50.0f);
 }
 
 juce::AudioProcessorEditor* KickLockAudioProcessor::createEditor()
@@ -1166,25 +1501,24 @@ bool KickLockAudioProcessor::applyLatestFix()
     if (! fix.applyAllowed && ! fix.optionalApplyAllowed)
         return false;
 
-    if (auto* polParam = apvts.getParameter ("polarityInvert"))
-        polParam->setValueNotifyingHost (fix.bassPolarityInvert ? 1.0f : 0.0f);
+    auto setParameterValue = [this] (const char* id, float value)
+    {
+        if (auto* parameter = apvts.getParameter (id))
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+    };
 
-    if (auto* delayParam = apvts.getParameter ("delayMs"))
-        delayParam->setValueNotifyingHost (
-            delayParam->convertTo0to1 (normaliseBassDelayMs (fix.bassDelayMs)));
-
-    if (auto* enabledParam = apvts.getParameter ("phaseFilterEnabled"))
-        enabledParam->setValueNotifyingHost (fix.phaseFilterEnabled ? 1.0f : 0.0f);
+    setParameterValue ("polarity_invert", fix.bassPolarityInvert ? 1.0f : 0.0f);
+    setParameterValue ("polarityInvert", fix.bassPolarityInvert ? 1.0f : 0.0f);
+    setParameterValue ("delay_ms", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
+    setParameterValue ("delayMs", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
+    setParameterValue ("allpass_enable", fix.phaseFilterEnabled ? 1.0f : 0.0f);
+    setParameterValue ("phaseFilterEnabled", fix.phaseFilterEnabled ? 1.0f : 0.0f);
 
     if (fix.phaseFilterEnabled)
     {
-        if (auto* freqParam = apvts.getParameter ("rotatorFreq"))
-            freqParam->setValueNotifyingHost (
-                freqParam->convertTo0to1 (fix.phaseFilterFreqHz));
-
-        if (auto* qParam = apvts.getParameter ("rotatorQ"))
-            qParam->setValueNotifyingHost (
-                qParam->convertTo0to1 (fix.phaseFilterQ));
+        setParameterValue ("allpass_freq", juce::jlimit (20.0f, 300.0f, fix.phaseFilterFreqHz));
+        setParameterValue ("rotatorFreq", juce::jlimit (20.0f, 300.0f, fix.phaseFilterFreqHz));
+        setParameterValue ("rotatorQ", fix.phaseFilterQ);
 
         if (auto* stagesParam = apvts.getParameter ("rotatorStages"))
         {
@@ -1271,6 +1605,12 @@ void KickLockAudioProcessor::setLatestFixResultForTesting (const PhaseFixResult&
 {
     const std::lock_guard<std::mutex> lock (resultMutex);
     latestFixResult = result;
+}
+
+void KickLockAudioProcessor::requestAutoAlign()
+{
+    if (autoAlignEngine != nullptr)
+        autoAlignEngine->requestCapture();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

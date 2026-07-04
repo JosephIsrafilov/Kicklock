@@ -12,7 +12,7 @@ inline float normaliseBassDelayMs (float delayMs) noexcept
     if (std::abs (delayMs) <= zeroSnap)
         return 0.0f;
 
-    return std::max (0.0f, delayMs);
+    return std::clamp (delayMs, -20.0f, 20.0f);
 }
 
 inline juce::String formatBassDelayMs (float delayMs)

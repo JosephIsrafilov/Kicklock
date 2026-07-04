@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -35,6 +36,7 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
 
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     bool isBassProcessingNeutral() const noexcept;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -60,6 +62,7 @@ public:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     std::atomic<float> correlationPercent { 0.0f };
+    std::atomic<float> realtimeCorrelation { 0.0f };
     std::atomic<float> realtimeLowBandMatchPercent { 0.0f };
     std::atomic<float> dryInputMatchPercent { 0.0f };
     std::atomic<float> processedMatchPercent { 0.0f };
@@ -116,18 +119,26 @@ public:
     bool isAnalysisSignalUsable() const noexcept { return analysisSignalUsable.load(); }
     bool hasEnoughMaterialForAnalysis() const noexcept { return analysisMaterialReady.load(); }
     void setLatestFixResultForTesting (const PhaseFixResult&);
+    void requestAutoAlign();
 
 private:
+    class PhaseAlignmentEngine;
+    class AutoAlignEngine;
+
     std::atomic<float>* delayMsParam = nullptr;
+    std::atomic<float>* delayMsLegacyParam = nullptr;
     std::atomic<float>* delayInterpParam = nullptr;
     std::atomic<float>* polarityInvertParam = nullptr;
+    std::atomic<float>* polarityInvertLegacyParam = nullptr;
     std::atomic<float>* phaseFilterEnabledParam = nullptr;
+    std::atomic<float>* phaseFilterEnabledLegacyParam = nullptr;
     std::atomic<float>* rotatorFreqParam = nullptr;
+    std::atomic<float>* rotatorFreqLegacyParam = nullptr;
     std::atomic<float>* rotatorQParam = nullptr;
     std::atomic<float>* rotatorStagesParam = nullptr;
 
-    std::array<FractionalDelayLine, 2> mainDelay;
-    std::array<AllpassPhaseRotator, 2> rotator;
+    std::unique_ptr<PhaseAlignmentEngine> phaseAlignmentEngine;
+    std::unique_ptr<AutoAlignEngine> autoAlignEngine;
 
     // Live phase-match meters (P5). Multi-band across 20 Hz-2 kHz, low-end
     // weighted, so the kick click can't swing the reading. dry reads the raw
@@ -163,8 +174,6 @@ private:
                                          const std::vector<float>& kick,
                                          int numSamples);
 
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> phaseFilterWet;
-
     int lastInterpChoice = 0;
     int lastStageChoice = 0;
     float lastRotatorFreq = -1.0f;
@@ -182,6 +191,9 @@ private:
     std::atomic<float> latestBpm { 0.0f };
     std::atomic<float> bassSignalRms { 0.0f };
     std::atomic<float> kickSignalRms { 0.0f };
+    float correlationProductLpf = 0.0f;
+    float correlationMainEnergyLpf = 0.0f;
+    float correlationSideEnergyLpf = 0.0f;
 
     // Musically-aware activity detection. Instant per-block RMS flickers to
     // "no signal" in every gap between kick transients; these trackers HOLD an

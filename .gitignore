@@ -1,5 +1,7 @@
 # CMake and build files
 /build/
+/build-fable/
+/build-tests/
 /build-codex/
 /build-bitwig-win/
 /out/
@@ -30,3 +32,5 @@ Thumbs.db
 AGENTS.md
 CLAUDE.md
 HANDOFF.md
+PLAN.md
+outputs/fable5_kicklock_prompt.md
