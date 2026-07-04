@@ -264,61 +264,30 @@ private:
         float confidence = 0.0f;
     };
 
-    struct BandComparison
-    {
-        float focusBandImprovement = 0.0f;
-        float maxHighEnergyBandRegression = 0.0f;
-    };
-
-    struct Candidate
-    {
-        float rawMatchPercent = 50.0f;
-        float scoreForSelection = -std::numeric_limits<float>::infinity();
-        float confidence = 0.0f;
-        MultiBandCorrelationResult multi;
-        PhaseFixRenderSettings settings;
-    };
-
-    static constexpr float minimumSignalConfidence = 0.05f;
-    static constexpr float usefulImprovementThreshold = 5.0f;
     // P2 classification thresholds. Strong needs a big gain that also lands on a
-    // genuinely good match; Partial is a worthwhile gain regardless of the final
-    // absolute; AlreadyGood is a high starting match with little left to add.
+    // genuinely good match (or a smaller gain onto an excellent final match);
+    // Partial is a worthwhile gain regardless of the final absolute; AlreadyGood
+    // is a high starting match with little left to add.
     static constexpr float strongImprovementThreshold = 8.0f;
     static constexpr float partialImprovementThreshold = 5.0f;
     static constexpr float alreadyGoodBeforeThreshold = 80.0f;
-    static constexpr float alreadyGoodThreshold = 85.0f;
     static constexpr float strongAfterThreshold = 75.0f;
     static constexpr float excellentAfterThreshold = 90.0f;
-    static constexpr float usefulBandConfidence = 0.08f;
-    static constexpr float highEnergyBandConfidence = 0.16f;
-    static constexpr float conflictBandGapThreshold = 8.0f;
-    static constexpr float phaseGlobalKeepThreshold = 1.0f;
-    static constexpr float phaseBandKeepThreshold = 5.0f;
-    static constexpr float phaseOverallDropTolerance = 1.5f;
-    static constexpr float phaseRegressionTolerance = 4.0f;
-    static constexpr float largeTimingToleranceMs = 0.25f;
     static constexpr float verificationWarningThreshold = 10.0f;
 
+    // P3: score a rendered pair on the ONE canonical ruler (the shared
+    // PhaseBands table + low-end-weighted blend), and fill Score.multi so band
+    // detail is actually populated rather than a default-initialised struct.
+    // scoreSettings() feeds this the processed bass candidate, so the reported
+    // before/after percentages and the Apply-time verification share definitions
+    // with the live meter.
     static Score score (const float* bass, const float* kick, int numSamples, double sampleRate)
     {
         Score result;
-        const auto unconstrained = AlignmentAnalyzer::analyze (bass, kick, numSamples,
-                                                               sampleRate, 0.0f,
-                                                               30.0f, 120.0f, 16384);
-        result.match = unconstrained.beforeMatch;
-        result.confidence = 1.0f;
+        result.multi = MultiBandCorrelation::analyze (bass, kick, numSamples, sampleRate);
+        result.match = result.multi.weightedMatchPercent;
+        result.confidence = result.multi.confidence;
         return result;
-    }
-
-    static Candidate makeCandidateFromScore (const Score& value)
-    {
-        Candidate candidate;
-        candidate.rawMatchPercent = value.match;
-        candidate.scoreForSelection = value.match;
-        candidate.confidence = value.confidence;
-        candidate.multi = value.multi;
-        return candidate;
     }
 
     // Finds the sample index of the most prominent kick transient in the buffer
@@ -397,181 +366,6 @@ private:
         return (float) std::exp (-1.0 / samples);
     }
 
-    static int findWorstUsefulBandIndex (const MultiBandCorrelationResult& multi) noexcept
-    {
-        int index = -1;
-        float lowestMatch = std::numeric_limits<float>::infinity();
-
-        for (int i = 0; i < MultiBandCorrelationResult::numBands; ++i)
-        {
-            const auto& band = multi.bands[(size_t) i];
-            if (band.confidence < usefulBandConfidence)
-                continue;
-
-            if (band.matchPercent < lowestMatch)
-            {
-                lowestMatch = band.matchPercent;
-                index = i;
-            }
-        }
-
-        return index;
-    }
-
-    static BandComparison compareBands (const MultiBandCorrelationResult& baseline,
-                                        const MultiBandCorrelationResult& candidate,
-                                        int focusBandIndex) noexcept
-    {
-        BandComparison result;
-
-        if (focusBandIndex >= 0
-            && baseline.bands[(size_t) focusBandIndex].confidence >= usefulBandConfidence)
-        {
-            result.focusBandImprovement =
-                candidate.bands[(size_t) focusBandIndex].matchPercent
-                - baseline.bands[(size_t) focusBandIndex].matchPercent;
-        }
-
-        for (int i = 0; i < MultiBandCorrelationResult::numBands; ++i)
-        {
-            const auto& baseBand = baseline.bands[(size_t) i];
-            const auto& candidateBand = candidate.bands[(size_t) i];
-
-            if (baseBand.confidence >= highEnergyBandConfidence)
-            {
-                result.maxHighEnergyBandRegression = std::max (
-                    result.maxHighEnergyBandRegression,
-                    baseBand.matchPercent - candidateBand.matchPercent);
-            }
-        }
-
-        result.maxHighEnergyBandRegression = std::max (0.0f, result.maxHighEnergyBandRegression);
-        return result;
-    }
-
-    static void testPhaseCandidate (const float* bass,
-                                    const float* kick,
-                                    int numSamples,
-                                    double sampleRate,
-                                    bool invert,
-                                    float phaseDelayStart,
-                                    float phaseDelayEnd,
-                                    float freq,
-                                    float q,
-                                    int stageCount,
-                                    InterpolationType delayInterpolation,
-                                    std::vector<float>& work,
-                                    const Score& baseline,
-                                    int focusBandIndex,
-                                    Candidate& best)
-    {
-        if ((double) freq >= sampleRate * 0.5)
-            return;
-
-        testCandidate (bass, kick, numSamples, sampleRate, invert,
-                       0.0f, true, freq, q, stageCount, delayInterpolation,
-                       work, baseline, focusBandIndex, best);
-
-        for (float delayMs = phaseDelayStart; delayMs <= phaseDelayEnd + 0.0001f; delayMs += 0.05f)
-            testCandidate (bass, kick, numSamples, sampleRate, invert,
-                           delayMs, true, freq, q, stageCount, delayInterpolation,
-                           work, baseline, focusBandIndex, best);
-    }
-
-    static void testCandidate (const float* bass,
-                               const float* kick,
-                               int numSamples,
-                               double sampleRate,
-                               bool invert,
-                               float delayMs,
-                               bool phaseEnabled,
-                               float phaseFreqHz,
-                               float phaseQ,
-                               int phaseStages,
-                               InterpolationType delayInterpolation,
-                               std::vector<float>& work,
-                               const Score& baseline,
-                               int focusBandIndex,
-                               Candidate& best)
-    {
-        PhaseFixRenderSettings settings;
-        settings.bassPolarityInvert = invert;
-        settings.bassDelayMs = delayMs;
-        settings.phaseFilterEnabled = phaseEnabled;
-        settings.phaseFilterFreqHz = phaseFreqHz;
-        settings.phaseFilterQ = phaseQ;
-        settings.phaseFilterStages = phaseStages;
-        settings.delayInterpolation = delayInterpolation;
-
-        renderBassCandidate (bass, numSamples, sampleRate, settings, absoluteManualMaxDelayMs, work);
-
-        const auto candidateScore = score (work.data(), kick, numSamples, sampleRate);
-        const auto bandComparison = compareBands (baseline.multi, candidateScore.multi, focusBandIndex);
-        const float scoreValue = candidateScore.match
-            - delayPenalty (delayMs)
-            + 0.15f * bandComparison.focusBandImprovement
-            - 0.20f * bandComparison.maxHighEnergyBandRegression;
-
-        if (scoreValue > best.scoreForSelection + 1.0e-4f
-            || (std::abs (scoreValue - best.scoreForSelection) <= 1.0e-4f
-                && delayMs < best.settings.bassDelayMs - 1.0e-4f)
-            || (std::abs (scoreValue - best.scoreForSelection) <= 1.0e-4f
-                && std::abs (delayMs - best.settings.bassDelayMs) <= 1.0e-4f
-                && candidateScore.match > best.rawMatchPercent + 1.0e-4f))
-        {
-            best.rawMatchPercent = candidateScore.match;
-            best.scoreForSelection = scoreValue;
-            best.confidence = candidateScore.confidence;
-            best.multi = candidateScore.multi;
-            best.settings = settings;
-        }
-    }
-
-    static bool shouldKeepPhaseCandidate (const Score& before,
-                                          const Candidate& bestSafe,
-                                          const Candidate& bestPhase,
-                                          int focusBandIndex) noexcept
-    {
-        if (! bestPhase.settings.phaseFilterEnabled)
-            return false;
-
-        const auto phaseDelta = compareBands (bestSafe.multi, bestPhase.multi, focusBandIndex);
-        const float globalGain = bestPhase.rawMatchPercent - bestSafe.rawMatchPercent;
-        const bool improvedGlobally = globalGain >= phaseGlobalKeepThreshold;
-        const bool usefulConflictBand = hasUsefulConflictBand (before, focusBandIndex);
-
-        const bool usefulRefinement =
-            usefulConflictBand
-            && phaseDelta.focusBandImprovement >= phaseBandKeepThreshold
-            && globalGain >= -phaseOverallDropTolerance
-            && phaseDelta.maxHighEnergyBandRegression <= phaseRegressionTolerance;
-
-        return improvedGlobally || usefulRefinement;
-    }
-
-    static bool hasUsefulConflictBand (const Score& before, int focusBandIndex) noexcept
-    {
-        if (focusBandIndex < 0)
-            return false;
-
-        const auto& band = before.multi.bands[(size_t) focusBandIndex];
-        return band.confidence >= usefulBandConfidence
-            && (before.match - band.matchPercent) >= conflictBandGapThreshold;
-    }
-
-    static float delayPenalty (float delayMs) noexcept
-    {
-        float penalty = 0.0f;
-
-        if (delayMs > 2.0f)
-            penalty += (delayMs - 2.0f) * 1.0f;
-
-        if (delayMs > 5.0f)
-            penalty += (delayMs - 5.0f) * 3.0f;
-
-        return penalty;
-    }
-
     static void renderBassCandidate (const float* bass,
                                      int numSamples,
                                      double sampleRate,
@@ -608,26 +402,6 @@ private:
             for (int i = 0; i < numSamples; ++i)
                 out[(size_t) i] = rotator.processSample (out[(size_t) i]);
         }
-    }
-
-    static float estimateConfidence (float signalConfidence,
-                                     float afterMatchPercent,
-                                     float improvementPercent,
-                                     bool singleHitAnalysis,
-                                     float consistency) noexcept
-    {
-        const float absoluteQuality =
-            std::clamp ((afterMatchPercent - 45.0f) / 55.0f, 0.0f, 1.0f);
-        const float improvementQuality =
-            std::clamp (improvementPercent / 20.0f, 0.0f, 1.0f);
-        const float hitWeight = singleHitAnalysis ? 0.85f : 1.0f;
-
-        return std::clamp ((0.55f * signalConfidence
-                            + 0.30f * absoluteQuality
-                            + 0.15f * improvementQuality)
-                           * std::clamp (consistency, 0.0f, 1.0f)
-                           * hitWeight,
-                           0.0f, 1.0f);
     }
 
     static PhaseFixQuality classifyQuality (const PhaseFixResult& result) noexcept

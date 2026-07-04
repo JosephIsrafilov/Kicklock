@@ -13,11 +13,13 @@
 // Runs on the audio thread like CorrelationMeter: prepare() allocates, then
 // pushSample()/reset() never allocate, lock, or block. For each of the shared
 // PhaseBands, both bass and kick are passed through the SAME causal band-pass
-// (HP then LP biquad) so in-band relative phase is preserved, then a rolling
-// Pearson correlation over the last window is maintained with running sums
-// (O(numBands) per sample). Getters blend the per-band correlations with the
-// shared decision weights, exactly like the offline MultiBandCorrelation, so
-// the live meter and the analyzer agree on band definitions and weighting.
+// (HP then LP biquad) so in-band relative phase is preserved, then a one-pole
+// EMA of the covariance/variance products (sumAB/sumA2/sumB2) is maintained
+// with a window-length time constant (O(numBands) per sample, no history
+// buffers). Getters blend the confident bands weighting each by its RELATIVE
+// energy share of the total (P3), optionally times the shared decision weight,
+// so the live meter and the analyzer agree on band definitions and weighting
+// and a quiet-but-aligned pair still reads correctly instead of pinning to 50%.
 //
 // The live numbers still differ from the offline analyzer because this filter
 // is causal (has group delay) while the offline one is zero-phase filtfilt;
@@ -37,9 +39,6 @@ public:
             band.lp.makeLowPass (sampleRate, PhaseBands::table[(size_t) b].highHz, butterworthQ);
             band.weight = PhaseBands::table[(size_t) b].weight;
             band.active = (double) PhaseBands::table[(size_t) b].highHz < sampleRate * 0.5;
-
-            band.bufA.assign ((size_t) windowSize, 0.0f);
-            band.bufB.assign ((size_t) windowSize, 0.0f);
         }
 
         reset();
@@ -55,11 +54,7 @@ public:
             band.lpStateKickZ1 = band.lpStateKickZ2 = 0.0f;
 
             band.sumAB = band.sumA2 = band.sumB2 = 0.0;
-            band.writeIndex = 0;
             band.numValid = 0;
-
-            std::fill (band.bufA.begin(), band.bufA.end(), 0.0f);
-            std::fill (band.bufB.begin(), band.bufB.end(), 0.0f);
         }
     }
 
@@ -108,59 +103,27 @@ public:
     // Low-end-weighted overall match (SUB + LOW dominate). Main live meter.
     float getWeightedMatchPercent() const noexcept
     {
-        double sum = 0.0, weight = 0.0;
-        for (int b = 0; b < numBands; ++b)
-        {
-            double corr = 0.0, conf = 0.0;
-            if (! bandCorrelation (bands[(size_t) b], corr, &conf))
-                continue;
-
-            const double w = (double) bands[(size_t) b].weight * conf;
-            sum += corr * w;
-            weight += w;
-        }
-
-        return weight >= minimumDisplayConfidence ? toPercent (sum / weight) : 50.0f;
+        return blend (0, numBands, /*useDecisionWeight*/ true);
     }
 
     // SUB + LOW only.
     float getLowEndMatchPercent() const noexcept
     {
-        double sum = 0.0, weight = 0.0;
-        for (int b = 0; b < PhaseBands::lowEndBandCount && b < numBands; ++b)
-        {
-            double corr = 0.0, conf = 0.0;
-            if (! bandCorrelation (bands[(size_t) b], corr, &conf))
-                continue;
-
-            sum += corr * conf;
-            weight += conf;
-        }
-
-        return weight >= minimumDisplayConfidence ? toPercent (sum / weight) : 50.0f;
+        return blend (0, juce::jmin (PhaseBands::lowEndBandCount, numBands), /*useDecisionWeight*/ false);
     }
 
     // Energy-only blend across the full span (no low-end bias).
     float getBroadbandMatchPercent() const noexcept
     {
-        double sum = 0.0, weight = 0.0;
-        for (int b = 0; b < numBands; ++b)
-        {
-            double corr = 0.0, conf = 0.0;
-            if (! bandCorrelation (bands[(size_t) b], corr, &conf))
-                continue;
-
-            sum += corr * conf;
-            weight += conf;
-        }
-
-        return weight >= minimumDisplayConfidence ? toPercent (sum / weight) : 50.0f;
+        return blend (0, numBands, /*useDecisionWeight*/ false);
     }
 
 private:
     static constexpr int numBands = PhaseBands::numBands;
     static constexpr double butterworthQ = 0.70710678;
-    static constexpr double minimumDisplayConfidence = 0.005;
+    // -60 dBFS on the joint (geometric-mean) band energy. Below this the pair is
+    // effectively silent and every read-out is a neutral 50%.
+    static constexpr double energyGateFloor = 1.0e-6;
 
     struct BiquadCoeffs
     {
@@ -215,15 +178,17 @@ private:
         double hpStateKickZ1 = 0.0, hpStateKickZ2 = 0.0;
         double lpStateKickZ1 = 0.0, lpStateKickZ2 = 0.0;
 
-        std::vector<float> bufA, bufB;
         double sumAB = 0.0, sumA2 = 0.0, sumB2 = 0.0;
-        int writeIndex = 0;
         int numValid = 0;
     };
 
-    // Pearson r over the band's rolling window (mean-agnostic: the band-passed
-    // signals are already ~zero-mean). Returns false when the band is silent.
-    static bool bandCorrelation (const BandState& band, double& corrOut, double* confOut = nullptr) noexcept
+    // Pearson r over the band's rolling EMA window (mean-agnostic: the
+    // band-passed signals are already ~zero-mean). Returns false when the band
+    // is silent. energyOut (optional) receives the band's joint energy - the
+    // geometric mean of the two channels' band energies - for relative-share
+    // confidence weighting.
+    static bool bandCorrelation (const BandState& band, double& corrOut,
+                                 double* energyOut = nullptr) noexcept
     {
         if (! band.active || band.numValid <= 0)
             return false;
@@ -232,19 +197,60 @@ private:
         if (denomSq <= 1.0e-12)
             return false;
 
-        const double norm = std::sqrt(std::max(0.0, denomSq));
+        const double norm = std::sqrt (std::max (0.0, denomSq));
         if (norm <= 1.0e-12)
             return false;
-            
+
         corrOut = std::clamp (band.sumAB / norm, -1.0, 1.0);
 
-        if (confOut != nullptr)
-        {
-            // For confidence we previously normalized by numValid, but EMA sum is already ~1.
-            *confOut = std::clamp (norm * 200.0, 0.0, 1.0);
-        }
+        if (energyOut != nullptr)
+            *energyOut = norm; // sqrt(E_a * E_b): joint band energy
 
         return true;
+    }
+
+    // P3 confidence: blend the confident bands weighting each by its RELATIVE
+    // energy share of the total across bands (optionally times the decision
+    // weight), not by an absolute level. This is what makes a quiet-but-aligned
+    // pair still read correctly - a -30 dBFS aligned bass no longer pins the
+    // display at 50%. An absolute -60 dBFS gate on the summed energy keeps
+    // genuine silence neutral.
+    float blend (int firstBand, int lastBand, bool useDecisionWeight) const noexcept
+    {
+        double bandCorr[numBands] = {};
+        double bandEnergy[numBands] = {};
+        bool   bandOk[numBands] = {};
+        double totalEnergy = 0.0;
+
+        for (int b = firstBand; b < lastBand; ++b)
+        {
+            double corr = 0.0, energy = 0.0;
+            bandOk[b] = bandCorrelation (bands[(size_t) b], corr, &energy);
+            if (! bandOk[b])
+                continue;
+
+            bandCorr[b] = corr;
+            bandEnergy[b] = energy;
+            totalEnergy += energy;
+        }
+
+        if (totalEnergy <= energyGateFloor)
+            return 50.0f;
+
+        double sum = 0.0, weight = 0.0;
+        for (int b = firstBand; b < lastBand; ++b)
+        {
+            if (! bandOk[b])
+                continue;
+
+            const double share = bandEnergy[b] / totalEnergy; // relative, 0..1
+            const double w = useDecisionWeight ? (double) bands[(size_t) b].weight * share
+                                               : share;
+            sum += bandCorr[b] * w;
+            weight += w;
+        }
+
+        return weight > 1.0e-9 ? toPercent (sum / weight) : 50.0f;
     }
 
     static float toPercent (double r) noexcept

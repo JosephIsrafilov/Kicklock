@@ -71,6 +71,11 @@ public:
     std::atomic<float> liveLowEndMatchPercent { 50.0f };     // SUB + LOW only
     std::atomic<float> liveBroadbandMatchPercent { 50.0f };  // even 20 Hz-500 Hz blend
 
+    // P3: one-shot seed flag for the UI-value EMAs so the first real reading is
+    // taken verbatim and later readings blend, without snapping when a value
+    // passes through 50%.
+    std::atomic<bool> uiSmoothingInitialized { false };
+
     std::atomic<float> latestAnalyzedBeforePercent { 50.0f };
     std::atomic<float> latestAnalyzedAfterPercent { 50.0f };
     std::atomic<float> latestVerifiedAfterPercent { -1.0f };

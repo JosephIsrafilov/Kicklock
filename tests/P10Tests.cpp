@@ -452,6 +452,49 @@ public:
             expectWithinAbsoluteError (quiet.getWeightedMatchPercent(), 50.0f, 0.1f);
             expectWithinAbsoluteError (quiet.getLowEndMatchPercent(), 50.0f, 0.1f);
         }
+
+        // P3: the canonical offline scoreRendered() and the live meter share the
+        // band plan and weighting, so streaming the same rendered audio through
+        // both lands within a few points after the live EMA settles.
+        beginTest ("Offline scoreRendered and live meter agree within 5 points");
+        {
+            constexpr int n = 48000;
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                // A modest low-end phase offset so the score is well off 100%.
+                bass[(size_t) i] = (float) (0.5 * std::sin (kTwoPi * 55.0 * t));
+                kick[(size_t) i] = (float) (0.5 * std::sin (kTwoPi * 55.0 * t + 0.9));
+            }
+
+            const float offline = MultiBandCorrelation::scoreRendered (bass.data(), kick.data(), n, kSampleRate);
+
+            RealtimeMultiBandMeter meter;
+            meter.prepare (kSampleRate, (int) (kSampleRate * 0.25));
+            for (int i = 0; i < n; ++i)
+                meter.pushSample (bass[(size_t) i], kick[(size_t) i]);
+            const float live = meter.getWeightedMatchPercent();
+
+            expectWithinAbsoluteError (live, offline, 5.0f);
+        }
+
+        // P3: relative-energy confidence - a quiet-but-aligned pair at -30 dBFS
+        // must still read as aligned, not pin the display at 50%.
+        beginTest ("A -30 dBFS aligned pair reads aligned, not 50%");
+        {
+            const float amp = (float) std::pow (10.0, -30.0 / 20.0); // -30 dBFS
+            RealtimeMultiBandMeter meter;
+            meter.prepare (kSampleRate, (int) (kSampleRate * 0.25));
+            for (int i = 0; i < 24000; ++i)
+            {
+                const float v = amp * (float) std::sin (kTwoPi * 55.0 * (double) i / kSampleRate);
+                meter.pushSample (v, v);
+            }
+
+            expectGreaterThan (meter.getWeightedMatchPercent(), 85.0f);
+            expectGreaterThan (meter.getLowEndMatchPercent(), 85.0f);
+        }
     }
 };
 

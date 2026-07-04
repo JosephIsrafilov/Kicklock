@@ -1029,6 +1029,7 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     correlationMainEnergyLpf = 0.0f;
     correlationSideEnergyLpf = 0.0f;
     realtimeCorrelation.store (0.0f);
+    uiSmoothingInitialized.store (false, std::memory_order_relaxed);
 
     lastInterpChoice = 0;
     lastStageChoice = 0;
@@ -1324,12 +1325,19 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float dt = (float)buffer.getNumSamples() / (float)getSampleRate();
     const float uiAlpha = 1.0f - std::exp(-dt / 0.5f);
 
-    auto smoothAtomic = [uiAlpha](std::atomic<float>& target, float newValue) {
-        float current = target.load();
-        if (current < 0.0f || std::abs(current - 50.0f) < 0.001f) // uninitialized or exactly 50
-            target.store(newValue);
+    // P3: seed each EMA from the first real reading, then blend. The old
+    // "snap whenever |current-50|<0.001" test also snapped whenever a value
+    // legitimately passed through 50%, freezing the display on the way past.
+    // A one-shot initialized flag seeds cleanly without that artefact.
+    const bool seed = ! uiSmoothingInitialized.load (std::memory_order_relaxed);
+    auto smoothAtomic = [uiAlpha, seed](std::atomic<float>& target, float newValue) {
+        if (seed)
+            target.store (newValue);
         else
-            target.store(current + uiAlpha * (newValue - current));
+        {
+            const float current = target.load();
+            target.store (current + uiAlpha * (newValue - current));
+        }
     };
 
     smoothAtomic(dryInputMatchPercent, dryMatch);
@@ -1340,6 +1348,8 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothAtomic(liveLowEndMatchPercent, activeLowEnd);
     smoothAtomic(liveBroadbandMatchPercent, activeBroad);
     smoothAtomic(realtimeLowBandMatchPercent, activeLowEnd); // legacy alias (sub/low)
+
+    uiSmoothingInitialized.store (true, std::memory_order_relaxed);
 
     correlationPercent.store ((realtimeCorrelation.load() + 1.0f) * 50.0f);
 }

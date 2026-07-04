@@ -160,6 +160,22 @@ public:
         return result;
     }
 
+    // Canonical rendered-pair score (P3). This is the SINGLE ruler shared by the
+    // analyzer's before/after reporting and the Apply-time verification, so the
+    // predicted, verified and live numbers all use the same band plan and the
+    // same low-end-weighted blend as RealtimeMultiBandMeter::getWeightedMatchPercent().
+    // (The live meter still differs slightly because it is causal rather than
+    // zero-phase, but the definitions and weighting no longer diverge.) Returns
+    // the low-end-weighted match percent; the full per-band result is available
+    // for callers that need band detail.
+    static float scoreRendered (const float* bass,
+                                const float* kick,
+                                int numSamples,
+                                double sampleRate)
+    {
+        return analyze (bass, kick, numSamples, sampleRate).weightedMatchPercent;
+    }
+
 private:
     static float toPercent (double r)
     {

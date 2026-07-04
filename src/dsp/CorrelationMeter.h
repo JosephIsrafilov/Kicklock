@@ -5,12 +5,11 @@
 
 // Rolling-window stereo correlation meter.
 //
-// Maintains running sums over the last N sample pairs (a circular buffer of
-// raw pairs) so that each pushSample() call is O(1): the incoming pair is
-// added to the sums, and once the buffer is full the oldest pair is
-// subtracted before being overwritten. The Pearson correlation coefficient
-// is recomputed from those sums on every push and smoothed with a one-pole
-// EMA before being exposed as a 0..100 value.
+// Maintains one-pole EMA estimates of the mean, covariance and variance
+// products (sumA/sumB/sumAB/sumA2/sumB2) with a window-length time constant, so
+// each pushSample() call is O(1) and allocation-free. The Pearson correlation
+// coefficient is recomputed from those EMA sums on every push and smoothed with
+// a second one-pole EMA before being exposed as a 0..100 value.
 class CorrelationMeter
 {
 public:
@@ -18,9 +17,6 @@ public:
     {
         sampleRate = newSampleRate;
         windowSize = windowSizeSamples > 0 ? windowSizeSamples : 1;
-
-        bufferA.assign ((size_t) windowSize, 0.0f);
-        bufferB.assign ((size_t) windowSize, 0.0f);
 
         updateSmoothingCoefficient();
         reset();
@@ -33,12 +29,8 @@ public:
         sumAB = 0.0;
         sumA2 = 0.0;
         sumB2 = 0.0;
-        writeIndex = 0;
         numValid = 0;
         smoothedValue = 0.0f;
-
-        std::fill (bufferA.begin(), bufferA.end(), 0.0f);
-        std::fill (bufferB.begin(), bufferB.end(), 0.0f);
     }
 
     // O(1) rolling update: add the new pair, evict the oldest pair once the
@@ -121,9 +113,6 @@ private:
     double sampleRate = 0.0;
     int windowSize = 1;
 
-    std::vector<float> bufferA;
-    std::vector<float> bufferB;
-    int writeIndex = 0;
     int numValid = 0;
 
     double sumA = 0.0, sumB = 0.0, sumAB = 0.0, sumA2 = 0.0, sumB2 = 0.0;
