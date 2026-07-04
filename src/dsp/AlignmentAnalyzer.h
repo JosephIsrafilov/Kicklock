@@ -165,7 +165,8 @@ public:
 
             double bestRotAbs = baseAbs;
 
-            const float freqCandidates[]  = { 40.0f, 60.0f, 80.0f, 100.0f, 140.0f, 200.0f };
+            const float freqCandidates[]  = { 40.0f, 60.0f, 80.0f, 100.0f, 140.0f,
+                                               200.0f, 250.0f, 350.0f, 500.0f };
             const float qCandidates[]     = { 0.5f, 0.7f, 1.0f, 2.0f, 4.0f };
             const int   stageCandidates[] = { 2, 3, 4 };
 

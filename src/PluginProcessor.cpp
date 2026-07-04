@@ -117,34 +117,64 @@ namespace
         if (peak < 1.0e-4f)
             return hits;
 
-        const float threshold = std::max (peak * 0.25f, 1.0e-4f);
-        const int holdoffSamples = juce::jmax (1, (int) std::lround (sampleRate * 0.070));
+        const auto timeMsToCoeff = [sampleRate] (float ms) noexcept
+        {
+            const double samples = std::max (1.0, sampleRate * (double) ms / 1000.0);
+            return (float) std::exp (-1.0 / samples);
+        };
+
+        const float peakEnergy = peak * peak;
+        const float threshold = std::max (peakEnergy * 0.08f, 1.0e-8f);
+        const float minimumEnergyGate = std::max (peakEnergy * 0.02f, 1.0e-10f);
+        const float attackCoeff = timeMsToCoeff (2.0f);
+        const float releaseCoeff = timeMsToCoeff (60.0f);
+        const int holdoffSamples = juce::jmax (1, (int) std::lround (sampleRate * 0.140));
+        const int peakSearch = juce::jmax (1, (int) std::lround (sampleRate * 0.008));
         const int preSamples = juce::jmax (1, (int) std::lround (sampleRate * 0.006));
         const int postSamples = juce::jmax (64, (int) std::lround (sampleRate * 0.110));
 
-        int lastAcceptedPeak = -holdoffSamples;
-        for (int i = 1; i < (int) kick.size() - 1; ++i)
+        float envelope = 0.0f;
+        bool wasAbove = false;
+        int holdoffRemaining = 0;
+
+        for (int i = 0; i < (int) kick.size(); ++i)
         {
-            const float v = std::abs (kick[(size_t) i]);
-            if (v < threshold)
+            const float energy = kick[(size_t) i] * kick[(size_t) i];
+            const float coeff = energy > envelope ? attackCoeff : releaseCoeff;
+            envelope = coeff * envelope + (1.0f - coeff) * energy;
+
+            if (holdoffRemaining > 0)
+                --holdoffRemaining;
+
+            const bool above = envelope >= threshold && envelope >= minimumEnergyGate;
+            const bool detected = above && ! wasAbove && holdoffRemaining <= 0;
+            wasAbove = above;
+
+            if (! detected)
                 continue;
 
-            if (v < std::abs (kick[(size_t) (i - 1)]) || v < std::abs (kick[(size_t) (i + 1)]))
-                continue;
+            holdoffRemaining = holdoffSamples;
 
-            if (i - lastAcceptedPeak < holdoffSamples)
-                continue;
+            int localPeak = i;
+            float localEnergy = energy;
+            const int searchEnd = juce::jmin ((int) kick.size(), i + peakSearch);
+            for (int j = i + 1; j < searchEnd; ++j)
+            {
+                const float e = kick[(size_t) j] * kick[(size_t) j];
+                if (e > localEnergy)
+                {
+                    localEnergy = e;
+                    localPeak = j;
+                }
+            }
 
             AnalysisHitWindow hit;
-            hit.peak = i;
-            hit.start = juce::jlimit (0, (int) kick.size() - 1, i - preSamples);
+            hit.peak = localPeak;
+            hit.start = juce::jlimit (0, (int) kick.size() - 1, localPeak - preSamples);
             hit.length = std::min ((int) kick.size() - hit.start, preSamples + postSamples);
 
-            if (hit.length > 96)
-            {
+            if (hit.length > 96 && localEnergy >= minimumEnergyGate)
                 hits.push_back (hit);
-                lastAcceptedPeak = i;
-            }
         }
 
         if ((int) hits.size() > maxHits)
@@ -491,7 +521,7 @@ public:
         const auto numSamples = mainBuffer.getNumSamples();
 
         smoothedDelay.setTargetValue (delaySamplesForUserDelayMs (delayMs));
-        smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 2000.0f, allpassFreqHz));
+        smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 500.0f, allpassFreqHz));
         allpassWet.setTargetValue (allpassEnabled ? 1.0f : 0.0f);
 
         for (int i = 0; i < numSamples; ++i)
@@ -573,7 +603,7 @@ private:
 
     void updateAllpassCoefficients (float frequencyHz)
     {
-        const auto limited = juce::jlimit (20.0f, 2000.0f, frequencyHz);
+        const auto limited = juce::jlimit (20.0f, 500.0f, frequencyHz);
         if (std::abs (limited - lastAppliedAllpassFreq) < 0.01f)
             return;
 
@@ -840,7 +870,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "allpass_freq", 1 },
         "Allpass Frequency",
-        juce::NormalisableRange<float> (20.0f, 2000.0f, 0.0f, 0.35f),
+        juce::NormalisableRange<float> (20.0f, 500.0f, 0.0f, 0.35f),
         50.0f));
 
     layout.add (std::make_unique<juce::AudioParameterBool> (
@@ -890,7 +920,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "rotatorFreq", 1 },
         "Legacy Rotator Frequency",
-        juce::NormalisableRange<float> (20.0f, 300.0f, 0.0f, 0.35f),
+        juce::NormalisableRange<float> (20.0f, 500.0f, 0.0f, 0.35f),
         50.0f));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
@@ -1243,7 +1273,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     dryInputMatchPercent.store (dryMatch);
     processedMatchPercent.store (processedMatch);
 
-    // P5/P8 live read-outs: overall multi-band, sub/low only, broad 20-2k.
+    // P5/P8 live read-outs: overall multi-band, sub/low only, broad 20-500.
     liveMultiBandMatchPercent.store (activeMatch);
     liveLowEndMatchPercent.store (activeLowEnd);
     liveBroadbandMatchPercent.store (activeBroad);
@@ -1388,6 +1418,13 @@ bool KickLockAudioProcessor::beginBackgroundAnalyze()
     if (analyzeStateIsBusy (analyzeState.load (std::memory_order_acquire)))
         return false;
 
+    if (! sidechainReferenceAvailable.load (std::memory_order_acquire)
+        || ! analysisSignalUsable.load (std::memory_order_acquire)
+        || ! analysisMaterialReady.load (std::memory_order_acquire))
+    {
+        return false;
+    }
+
     analyzeState.store (AnalyzeState::Preparing, std::memory_order_release);
 
     // Snapshot on the message thread (allocates, but off the audio thread),
@@ -1401,12 +1438,29 @@ bool KickLockAudioProcessor::beginBackgroundAnalyze()
     {
         analyzeState.store (AnalyzeState::Analyzing, std::memory_order_release);
 
-        const auto result = computeAndPublishFix (*bass, *kick, n);
+        try
+        {
+            const auto result = computeAndPublishFix (*bass, *kick, n);
 
-        const bool usable = result.enoughSignal;
-        analyzeState.store (usable ? AnalyzeState::ResultReady
-                                   : AnalyzeState::NotEnoughMaterial,
-                            std::memory_order_release);
+            const bool usable = result.enoughSignal;
+            analyzeState.store (usable ? AnalyzeState::ResultReady
+                                       : AnalyzeState::NotEnoughMaterial,
+                                std::memory_order_release);
+        }
+        catch (...)
+        {
+            PhaseFixResult failed;
+            failed.message = "Analyze failed. Keep the loop playing and try again.";
+
+            {
+                const std::lock_guard<std::mutex> lock (resultMutex);
+                latestFixResult = failed;
+                lastAnalyzedBassWindow.clear();
+                lastAnalyzedKickWindow.clear();
+            }
+
+            analyzeState.store (AnalyzeState::Failed, std::memory_order_release);
+        }
     });
 
     return true;
@@ -1453,8 +1507,8 @@ bool KickLockAudioProcessor::applyLatestFix()
 
     if (fix.phaseFilterEnabled)
     {
-        setParameterValue ("allpass_freq", juce::jlimit (20.0f, 300.0f, fix.phaseFilterFreqHz));
-        setParameterValue ("rotatorFreq", juce::jlimit (20.0f, 300.0f, fix.phaseFilterFreqHz));
+        setParameterValue ("allpass_freq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
+        setParameterValue ("rotatorFreq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
         setParameterValue ("rotatorQ", fix.phaseFilterQ);
 
         if (auto* stagesParam = apvts.getParameter ("rotatorStages"))

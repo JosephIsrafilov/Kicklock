@@ -69,7 +69,7 @@ public:
     // realtime meter over the currently-monitored (dry or processed) low end.
     std::atomic<float> liveMultiBandMatchPercent { 50.0f };  // low-end-weighted overall
     std::atomic<float> liveLowEndMatchPercent { 50.0f };     // SUB + LOW only
-    std::atomic<float> liveBroadbandMatchPercent { 50.0f };  // even 20 Hz-2 kHz blend
+    std::atomic<float> liveBroadbandMatchPercent { 50.0f };  // even 20 Hz-500 Hz blend
 
     std::atomic<float> latestAnalyzedBeforePercent { 50.0f };
     std::atomic<float> latestAnalyzedAfterPercent { 50.0f };
@@ -130,7 +130,7 @@ private:
     std::unique_ptr<PhaseAlignmentEngine> phaseAlignmentEngine;
     std::unique_ptr<AutoAlignEngine> autoAlignEngine;
 
-    // Live phase-match meters (P5). Multi-band across 20 Hz-2 kHz, low-end
+    // Live phase-match meters (P5). Multi-band across 20 Hz-500 Hz, low-end
     // weighted, so the kick click can't swing the reading. dry reads the raw
     // pre-processing relationship; processed reads the post-correction one. Both
     // filter internally, so no separate pre-filter members are needed.

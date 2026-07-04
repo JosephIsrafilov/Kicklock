@@ -40,10 +40,19 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     analyzeButton.setButtonText ("Analyze");
     analyzeButton.setColour (juce::TextButton::buttonColourId, teal);
     analyzeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
+    analyzeButton.setEnabled (false);
     analyzeButton.onClick = [this]
     {
+        if (! canStartAnalyze)
+            return;
+
         if (audioProcessor.beginBackgroundAnalyze())
+        {
+            suggestedText.clear();
+            haveResult = false;
+            latestResult = {};
             analyzeButton.setButtonText ("Analyzing...");
+        }
     };
     addAndMakeVisible (analyzeButton);
 
@@ -105,7 +114,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureRotary (phaseFreqSlider);
     phaseFreqSlider.setTextValueSuffix (" Hz");
     phaseFreqSlider.setNumDecimalPlacesToDisplay (0);
-    phaseFreqSlider.setTooltip ("Centre frequency of the phase filter (20 Hz - 2 kHz).");
+    phaseFreqSlider.setTooltip ("Centre frequency of the phase filter (20 Hz - 500 Hz).");
     addAndMakeVisible (phaseFreqSlider);
 
     configureRotary (phaseQSlider);
@@ -235,6 +244,7 @@ void KickLockAudioProcessorEditor::refreshStatusStrings()
                                                         audioProcessor.isBassActive(),
                                                         audioProcessor.isAnalysisSignalUsable(),
                                                         audioProcessor.hasEnoughMaterialForAnalysis());
+    canStartAnalyze = analysisStatusCanStartAnalyze (status);
 
     switch (status)
     {
@@ -273,37 +283,69 @@ void KickLockAudioProcessorEditor::refreshStatusStrings()
 void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
 {
     const auto state = audioProcessor.getAnalyzeState();
+    const bool busy = analyzeStateIsBusy (state);
 
     analyzeButton.setButtonText (analyzeStateButtonText (state));
-    analyzeButton.setEnabled (! analyzeStateIsBusy (state));
+    analyzeButton.setEnabled (! busy && canStartAnalyze);
+
+    if (busy)
+    {
+        suggestedText.clear();
+        haveResult = false;
+
+        if (state != lastAnalyzeState)
+            analyzerBody.setText ("Analyzing captured kick and bass...", juce::dontSendNotification);
+    }
 
     if (state != lastAnalyzeState && analyzeStateIsResolved (state))
     {
         latestResult = audioProcessor.getLatestFixResult();
-        haveResult = state == AnalyzeState::ResultReady;
+        const bool resultCanApply = latestResult.applyAllowed || latestResult.optionalApplyAllowed;
+        haveResult = state == AnalyzeState::ResultReady && resultCanApply;
 
         if (state == AnalyzeState::ResultReady)
         {
-            suggestedText = "Suggested: " + formatSignedDelayMs (latestResult.bassDelayMs);
+            suggestedText = resultCanApply ? "Suggested: " + formatSignedDelayMs (latestResult.bassDelayMs)
+                                           : juce::String();
 
             juce::String body;
-            body << latestResult.message << "\n\n"
-                 << "Recommended Delay: " << formatSignedDelayMs (latestResult.bassDelayMs) << "\n"
-                 << "Polarity: " << (latestResult.bassPolarityInvert ? "Invert" : "Normal") << "\n";
+            body << latestResult.message;
 
-            if (latestResult.phaseFilterEnabled)
-                body << "Phase Filter: " << juce::String ((int) std::round (latestResult.phaseFilterFreqHz))
-                     << " Hz, Q " << juce::String (latestResult.phaseFilterQ, 2) << "\n";
+            if (resultCanApply)
+            {
+                body << "\n\nRecommended Delay: " << formatSignedDelayMs (latestResult.bassDelayMs) << "\n"
+                     << "Polarity: " << (latestResult.bassPolarityInvert ? "Invert" : "Normal") << "\n";
+
+                if (latestResult.phaseFilterEnabled)
+                    body << "Phase Filter: " << juce::String ((int) std::round (latestResult.phaseFilterFreqHz))
+                         << " Hz, Q " << juce::String (latestResult.phaseFilterQ, 2) << "\n";
+                else
+                    body << "Phase Filter: off\n";
+            }
             else
-                body << "Phase Filter: off\n";
+            {
+                if (latestResult.largeTimingOffset)
+                    body << "\n\nDetected offset: " << juce::String (latestResult.detectedTimingOffsetMs, 1)
+                         << " ms. Apply Fix is disabled; move the sample/clip in your DAW timeline.";
+                else if (latestResult.requiresTimelineMove)
+                    body << "\n\nApply Fix is disabled because this correction needs a DAW timeline move.";
+                else if (latestResult.unstableRecommendation)
+                    body << "\n\nApply Fix is disabled because the captured hits disagree.";
+                else if (latestResult.quality == PhaseFixQuality::AlreadyGood)
+                    body << "\n\nNo applicable correction is needed.";
+                else
+                    body << "\n\nNo applicable bass-path change was found.";
+
+                body << "\n";
+            }
 
             body << "Confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
                  << "Low-end match: " << juce::String ((int) std::round (latestResult.beforeMatchPercent))
                  << "% -> " << juce::String ((int) std::round (latestResult.predictedAfterMatchPercent)) << "%";
 
-            if (latestResult.largeTimingOffset || latestResult.requiresTimelineMove)
+            if (resultCanApply && (latestResult.largeTimingOffset || latestResult.requiresTimelineMove))
                 body << "\n\nWarning: Large timing offset detected. Manual DAW movement may sound more natural.";
-            else if (latestResult.unstableRecommendation)
+            else if (resultCanApply && latestResult.unstableRecommendation)
                 body << "\n\nWarning: Different hits need different corrections; result is unstable.";
 
             analyzerBody.setText (body, juce::dontSendNotification);
@@ -324,8 +366,7 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
 
     suggestedOverlay.setText (suggestedText, juce::dontSendNotification);
 
-    const bool canApply = applyFixAvailable (hasSidechain, haveResult)
-        && (latestResult.applyAllowed || latestResult.optionalApplyAllowed);
+    const bool canApply = applyFixAvailable (hasSidechain, haveResult);
     applyFixButton.setEnabled (canApply);
 }
 

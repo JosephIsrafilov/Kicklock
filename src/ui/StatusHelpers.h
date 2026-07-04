@@ -100,6 +100,11 @@ inline bool analysisStatusHasLiveSidechain (AnalysisMaterialStatus status) noexc
         || status == AnalysisMaterialStatus::ReadyToAnalyze;
 }
 
+inline bool analysisStatusCanStartAnalyze (AnalysisMaterialStatus status) noexcept
+{
+    return status == AnalysisMaterialStatus::ReadyToAnalyze;
+}
+
 // Apply Fix must depend on the latest valid analysis result, not on whether the
 // current instant happens to be between kicks. This gate only requires the
 // sidechain to still be connected — never the instantaneous level.

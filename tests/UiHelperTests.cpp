@@ -143,6 +143,16 @@ public:
             expectEquals ((int) classifyAnalysisMaterialStatus (true, true, true, true, true),
                           (int) AnalysisMaterialStatus::ReadyToAnalyze);
         }
+
+        beginTest ("Analyze can start only once material is ready");
+        {
+            expect (! analysisStatusCanStartAnalyze (AnalysisMaterialStatus::WaitingForSidechain));
+            expect (! analysisStatusCanStartAnalyze (AnalysisMaterialStatus::WaitingForKick));
+            expect (! analysisStatusCanStartAnalyze (AnalysisMaterialStatus::WaitingForBass));
+            expect (! analysisStatusCanStartAnalyze (AnalysisMaterialStatus::SignalTooLow));
+            expect (! analysisStatusCanStartAnalyze (AnalysisMaterialStatus::CapturingMaterial));
+            expect (analysisStatusCanStartAnalyze (AnalysisMaterialStatus::ReadyToAnalyze));
+        }
     }
 };
 

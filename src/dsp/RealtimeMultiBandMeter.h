@@ -129,7 +129,7 @@ public:
             weight += w;
         }
 
-        return weight > 1.0e-9 ? toPercent (sum / weight) : 50.0f;
+        return weight >= minimumDisplayConfidence ? toPercent (sum / weight) : 50.0f;
     }
 
     // SUB + LOW only.
@@ -146,7 +146,7 @@ public:
             weight += conf;
         }
 
-        return weight > 1.0e-9 ? toPercent (sum / weight) : 50.0f;
+        return weight >= minimumDisplayConfidence ? toPercent (sum / weight) : 50.0f;
     }
 
     // Energy-only blend across the full span (no low-end bias).
@@ -163,12 +163,13 @@ public:
             weight += conf;
         }
 
-        return weight > 1.0e-9 ? toPercent (sum / weight) : 50.0f;
+        return weight >= minimumDisplayConfidence ? toPercent (sum / weight) : 50.0f;
     }
 
 private:
     static constexpr int numBands = PhaseBands::numBands;
     static constexpr double butterworthQ = 0.70710678;
+    static constexpr double minimumDisplayConfidence = 0.005;
 
     struct BiquadCoeffs
     {

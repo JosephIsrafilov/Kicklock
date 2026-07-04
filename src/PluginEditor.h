@@ -105,6 +105,7 @@ private:
     juce::String suggestedText;
     juce::String manualDelayText { "Manual Delay: 0.00 ms" };
     bool hasSidechain = false;
+    bool canStartAnalyze = false;
 
     // Latest analyzer result snapshot for the explanation panel.
     PhaseFixResult latestResult;

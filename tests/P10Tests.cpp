@@ -326,7 +326,7 @@ public:
 static SidechainStatusTests sidechainStatusTestsInstance;
 
 //==============================================================================
-// P10.3 - Multi-band scoring: bands span ~20 Hz-2 kHz, the low-end-weighted
+// P10.3 - Multi-band scoring: bands span 20 Hz-500 Hz, the low-end-weighted
 // score is not dominated by a high-frequency click, inverted bass scores low in
 // the low bands, and an aligned pair scores high.
 class MultiBandScoringTests : public juce::UnitTest
@@ -336,14 +336,14 @@ public:
 
     void runTest() override
     {
-        beginTest ("Band plan spans roughly 20 Hz to 2 kHz");
+        beginTest ("Band plan spans 20 Hz to 500 Hz");
         {
-            expectEquals (MultiBandCorrelationResult::numBands, 5);
+            expectEquals (MultiBandCorrelationResult::numBands, 4);
             expectWithinAbsoluteError (PhaseBands::table.front().lowHz, 20.0f, 0.001f);
-            expectWithinAbsoluteError (PhaseBands::table.back().highHz, 2000.0f, 0.001f);
+            expectWithinAbsoluteError (PhaseBands::table.back().highHz, 500.0f, 0.001f);
             // Low end must carry the most decision weight.
             expectGreaterThan (PhaseBands::table[(size_t) PhaseBands::subBand].weight,
-                               PhaseBands::table[(size_t) PhaseBands::attackBand].weight);
+                               PhaseBands::table[(size_t) PhaseBands::bodyBand].weight);
         }
 
         beginTest ("Aligned low-frequency pair scores high");
@@ -383,7 +383,7 @@ public:
         beginTest ("A shared HF click does not dominate the low-end-weighted score");
         {
             // Low end is INVERTED (should read low); a loud shared 5 kHz click sits
-            // in-phase but out of band (ATTACK tops out at 2 kHz, weight 0.05).
+            // in-phase but outside the 20-500 Hz phase-match range.
             // The weighted score must follow the low end, not the click.
             constexpr int n = 16384;
             std::vector<float> bass ((size_t) n), kick ((size_t) n);
@@ -400,6 +400,25 @@ public:
             expect (r.weightedMatchPercent < 40.0f,
                     "weighted score = " + juce::String (r.weightedMatchPercent));
             expectLessThan (r.lowEndMatchPercent, 20.0f);
+        }
+
+        beginTest ("Out-of-range 1 kHz tone does not inflate 20-500 phase percent");
+        {
+            constexpr int n = 16384;
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const double low = std::sin (kTwoPi * 55.0 * t);
+                const double high = 4.0 * std::sin (kTwoPi * 1000.0 * t);
+                kick[(size_t) i] = (float) (low + high);
+                bass[(size_t) i] = (float) (-low + high);
+            }
+
+            const auto r = MultiBandCorrelation::analyze (bass.data(), kick.data(), n, kSampleRate);
+            expectLessThan (r.lowEndMatchPercent, 20.0f);
+            expectLessThan (r.weightedMatchPercent, 40.0f);
+            expectLessThan (r.broadbandMatchPercent, 45.0f);
         }
 
         beginTest ("Realtime multi-band meter tracks aligned vs inverted low end");
@@ -422,6 +441,16 @@ public:
                 inverted.pushSample (-v, v);
             }
             expectLessThan (inverted.getLowEndMatchPercent(), 15.0f);
+
+            RealtimeMultiBandMeter quiet;
+            quiet.prepare (kSampleRate, (int) (kSampleRate * 0.25));
+            for (int i = 0; i < 12000; ++i)
+            {
+                const float v = (float) (1.0e-4 * std::sin (kTwoPi * 55.0 * (double) i / kSampleRate));
+                quiet.pushSample (-v, v);
+            }
+            expectWithinAbsoluteError (quiet.getWeightedMatchPercent(), 50.0f, 0.1f);
+            expectWithinAbsoluteError (quiet.getLowEndMatchPercent(), 50.0f, 0.1f);
         }
     }
 };
@@ -520,6 +549,22 @@ public:
             expectWithinAbsoluteError (fix.bassDelayMs, 40.0f / 48.0f, 0.2f);
         }
 
+        beginTest ("Ringing kick is counted once per musical hit");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            feedRingingHits (processor, 2048);
+
+            const auto fix = processor.analyzeFix();
+            expectEquals (fix.contributingHits, 3);
+            expect (! fix.unstableRecommendation, fix.message);
+            expect (fix.applyAllowed, fix.message);
+            expectWithinAbsoluteError (fix.bassDelayMs, 40.0f / 48.0f, 0.3f);
+        }
+
         beginTest ("Perfectly aligned multi-hit loop stays AlreadyGood, not Unstable");
         {
             KickLockAudioProcessor processor;
@@ -564,6 +609,58 @@ private:
     static void feedConflictingHits (KickLockAudioProcessor& processor, int blockSize)
     {
         feedHits (processor, blockSize, 0, 40, /*alternate*/ true);
+    }
+
+    static void feedRingingHits (KickLockAudioProcessor& processor, int blockSize)
+    {
+        const int hitCount = 3;
+        const int hitSpacing = 16000;
+        const int eventLength = 9000;
+        const int startOffset = 1500;
+        const int totalSamples = startOffset + hitCount * hitSpacing + eventLength;
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int sample = start + i;
+                float bass = 0.0f;
+                float kick = 0.0f;
+
+                for (int hit = 0; hit < hitCount; ++hit)
+                {
+                    const int base = startOffset + hit * hitSpacing;
+                    const int bassIndex = sample - base;
+                    const int kickIndex = sample - (base + 40);
+
+                    if (bassIndex >= 0 && bassIndex < eventLength)
+                    {
+                        const double t = (double) bassIndex / kSampleRate;
+                        bass += (float) (std::sin (kTwoPi * 50.0 * t) * std::exp (-t * 5.0));
+                    }
+
+                    if (kickIndex >= 0 && kickIndex < eventLength)
+                    {
+                        const double t = (double) kickIndex / kSampleRate;
+                        kick += (float) (std::sin (kTwoPi * 50.0 * t) * std::exp (-t * 5.0));
+                    }
+                }
+
+                buffer.setSample (0, i, bass);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, bass);
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, kick);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, kick);
+            }
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+        }
     }
 
     static void feedHits (KickLockAudioProcessor& processor, int blockSize,

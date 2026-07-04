@@ -226,7 +226,8 @@ public:
                 || before.match < alreadyGoodThreshold);
 
         constexpr float broadFreqs[] = { 30.0f, 40.0f, 50.0f, 60.0f, 65.0f, 80.0f,
-                                         100.0f, 120.0f, 150.0f, 160.0f, 200.0f };
+                                         100.0f, 120.0f, 150.0f, 160.0f, 200.0f,
+                                         250.0f, 350.0f, 500.0f };
         constexpr float qs[] = { 0.5f, 0.7f, 1.0f, 1.5f, 2.0f, 4.0f };
         constexpr int stages[] = { 2, 3, 4 };
 
@@ -253,7 +254,7 @@ public:
             const float focusFreqs[] = {
                 std::max (30.0f, focusBand.lowHz),
                 focusCenter,
-                std::min (200.0f, focusBand.highHz)
+                std::min (500.0f, focusBand.highHz)
             };
 
             for (bool invert : { false, true })

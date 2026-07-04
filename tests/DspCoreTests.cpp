@@ -357,7 +357,7 @@ public:
 
             const auto result = MultiBandCorrelation::analyze (bass.data(), kick.data(), n, kSampleRate);
 
-            // New 5-band plan: band[1] = LOW (60-120) holds the in-phase 60 Hz;
+            // 4-band plan: band[1] = LOW (60-120) holds the in-phase 60 Hz;
             // band[2] = LOW MID (120-250) holds the inverted 150 Hz.
             expectGreaterThan (result.bands[1].correlation, 0.75f);
             expectLessThan (result.bands[2].correlation, -0.40f);

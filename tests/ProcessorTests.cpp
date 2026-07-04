@@ -87,6 +87,17 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 1.0f, 1.0e-7f);
         }
 
+        beginTest ("Background Analyze rejects before material is ready");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            expect (! processor.beginBackgroundAnalyze());
+            expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::Idle);
+        }
+
         beginTest ("Phase filter off stays transparent when rotator settings change");
         {
             KickLockAudioProcessor processor;
@@ -108,7 +119,7 @@ public:
             processor.processBlock (firstBuffer, midi);
             expectMainMatches (firstBuffer, firstExpected, 2, 4096, 1.0e-7f);
 
-            setFloatParam (processor, "rotatorFreq", 1400.0f);
+            setFloatParam (processor, "rotatorFreq", 450.0f);
             setFloatParam (processor, "rotatorQ", 0.5f);
             setFloatParam (processor, "rotatorStages", 2.0f);
 
@@ -214,7 +225,7 @@ public:
             fix.valid = true;
             fix.enoughSignal = true;
             fix.phaseFilterEnabled = true;
-            fix.phaseFilterFreqHz = 90.0f;
+            fix.phaseFilterFreqHz = 450.0f;
             fix.phaseFilterQ = 2.0f;
             fix.phaseFilterStages = 3;
             fix.beforeMatchPercent = 45.0f;
@@ -226,9 +237,41 @@ public:
 
             expect (processor.applyLatestFix());
             expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 1.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 90.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 450.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 2.0f, 0.01f);
                 expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 1.0f, 1.0e-7f);
+        }
+
+        beginTest ("Apply Fix refuses a 46.1 ms large timing offset advisory");
+        {
+            KickLockAudioProcessor processor;
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            const float delayBefore = rawParam (processor, "delayMs");
+            const float polarityBefore = rawParam (processor, "polarityInvert");
+            const float phaseBefore = rawParam (processor, "phaseFilterEnabled");
+
+            PhaseFixResult fix;
+            fix.valid = true;
+            fix.enoughSignal = true;
+            fix.largeTimingOffset = true;
+            fix.detectedTimingOffsetMs = 46.1f;
+            fix.bassDelayMs = PhaseFixEngine::defaultAutoFixMaxDelayMs;
+            fix.beforeMatchPercent = 35.0f;
+            fix.afterMatchPercent = 82.0f;
+            fix.improvementPercent = 47.0f;
+            fix.confidence = 0.76f;
+            PhaseFixEngine::updateDerivedResultFields (fix);
+            processor.setLatestFixResultForTesting (fix);
+
+            expectEquals ((int) fix.quality, (int) PhaseFixQuality::LargeTimingOffset);
+            expect (! fix.applyAllowed);
+            expect (! fix.optionalApplyAllowed);
+            expect (! processor.applyLatestFix());
+            expectWithinAbsoluteError (rawParam (processor, "delayMs"), delayBefore, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "polarityInvert"), polarityBefore, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), phaseBefore, 1.0e-7f);
         }
 
         beginTest ("Predicted after score stays close to verified after score");
@@ -448,12 +491,12 @@ public:
             setBoolParam (processor, "polarity_invert", false);
             expect (processor.isBassProcessingNeutral());
 
-            // Phase filter alone breaks neutrality, and its 20-2000 Hz freq
+            // Phase filter alone breaks neutrality, and its 20-500 Hz freq
             // range is honoured by the manual control.
             setBoolParam (processor, "allpass_enable", true);
-            setFloatParam (processor, "allpass_freq", 1500.0f);
+            setFloatParam (processor, "allpass_freq", 450.0f);
             expect (! processor.isBassProcessingNeutral());
-            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 1500.0f, 1.0f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 450.0f, 1.0f);
         }
 
         beginTest ("Signed delay display formatting shows sign and zero snap");

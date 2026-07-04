@@ -50,7 +50,7 @@ public:
 
         g.setColour (juce::Colour (0xff6f7d89));
         g.setFont (juce::Font (juce::FontOptions (10.0f)));
-        g.drawText ("Multi-band 20 Hz-2 kHz while audio is playing",
+        g.drawText ("Multi-band 20 Hz-500 Hz while audio is playing",
                     area.removeFromTop (14.0f).toNearestInt(),
                     juce::Justification::centred);
 
@@ -73,7 +73,7 @@ public:
         g.setColour (juce::Colour (0xffc7d2db));
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
         g.drawText ("Low-End " + juce::String ((int) std::round (lowPct))
-                        + "%   |   20-2k " + juce::String ((int) std::round (broadbandPct)) + "%",
+                        + "%   |   20-500 " + juce::String ((int) std::round (broadbandPct)) + "%",
                     area.removeFromTop (16.0f).toNearestInt(),
                     juce::Justification::centred);
 
@@ -102,9 +102,9 @@ private:
     std::atomic<float>& multiBandPercentRef;
     std::atomic<float>& lowEndPercentRef;
     std::atomic<float>& broadbandPercentRef;
-    float displayPercent = 0.0f;
-    float displayLowEndPercent = 0.0f;
-    float displayBroadbandPercent = 0.0f;
+    float displayPercent = 50.0f;
+    float displayLowEndPercent = 50.0f;
+    float displayBroadbandPercent = 50.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CorrelationDisplay)
 };

@@ -26,7 +26,7 @@ struct MultiBandCorrelationResult
 
     std::array<BandCorrelationResult, numBands> bands {};
 
-    // Low-end-weighted overall score (SUB + LOW dominate; ATTACK diagnostic).
+    // Low-end-weighted overall score (SUB + LOW dominate).
     // This is the number that drives decisions and the main Phase Match meter.
     float weightedCorrelation = 0.0f;
     float weightedMatchPercent = 50.0f;
@@ -34,8 +34,8 @@ struct MultiBandCorrelationResult
     // SUB + LOW only, for the "sub/low band match" read-out.
     float lowEndMatchPercent = 50.0f;
 
-    // Even (energy-only) blend across the full 20 Hz-2 kHz span, for the "broad
-    // 20-2k" read-out. Not weighted toward the low end, so it shows the wideband
+    // Even (energy-only) blend across the full 20 Hz-500 Hz span, for the broad
+    // low/body read-out. Not weighted toward the low end, so it shows the wideband
     // relationship without steering decisions.
     float broadbandMatchPercent = 50.0f;
 
@@ -48,8 +48,8 @@ struct MultiBandCorrelationResult
 // Offline multi-band phase/correlation (message thread; allocates freely).
 // Band-passes both signals to each band with the SAME zero-phase filtfilt so
 // relative phase is preserved, correlates per band, then blends the bands with
-// the shared decision weights so the kick click (all up in ATTACK) can never
-// dominate the sub/low alignment.
+// the shared decision weights so upper-body content can never dominate the
+// sub/low alignment.
 class MultiBandCorrelation
 {
 public:
@@ -83,7 +83,7 @@ public:
         {
             auto& out = result.bands[(size_t) band];
 
-            // Skip bands whose high edge is above Nyquist (e.g. ATTACK at low SR).
+            // Skip bands whose high edge is above Nyquist.
             if ((double) out.highHz >= sampleRate * 0.5)
                 continue;
 
