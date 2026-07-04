@@ -281,7 +281,7 @@ public:
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
 
-            feedHitSeries (processor, { 0, 0, 0, 0 }, { 40, 40, 40, 40 }, { false, false, false, false }, 2048);
+            feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 }, { false, false, false, false }, 2048);
 
             const auto predicted = processor.analyzeFix();
             expect (PhaseFixEngine::canApply (predicted), predicted.message);
@@ -299,14 +299,16 @@ public:
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
 
-            feedHitSeries (processor, { 0, 0, 0, 0 }, { 40, 40, 40, 40 }, { false, false, false, false }, 2048);
+            // ~2.5 ms kick-late offset: a genuine Strong fix under P2 honest
+            // classification (a 0.83 ms/97% pair would correctly read AlreadyGood).
+            feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 }, { false, false, false, false }, 2048);
 
             const auto fix = processor.analyzeFix();
             expectGreaterThan (fix.contributingHits, 1);
             expect (! fix.unstableRecommendation);
             expect (PhaseFixEngine::canApply (fix), fix.message);
-            expectGreaterThan (fix.bassDelayMs, 0.5f);
-            expectLessThan (fix.bassDelayMs, 1.2f);
+            expectGreaterThan (fix.bassDelayMs, 2.8f);
+            expectLessThan (fix.bassDelayMs, 3.8f);
         }
 
         beginTest ("Multi-hit unstable analysis rejects conflicting hits");

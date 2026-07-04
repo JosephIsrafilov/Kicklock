@@ -456,14 +456,17 @@ public:
 
         beginTest ("Bass too early recommends positive bass delay");
         {
+            // ~2.5 ms offset (120 samples at 48 kHz): before ~76%, so the fix is
+            // a genuine Strong improvement, not a cosmetic nudge on an already-
+            // aligned pair (P2 honest classification).
             std::vector<float> bass ((size_t) n), kick ((size_t) n);
-            fillBurst (bass, kick, 1000, 1040, 65.0);
+            fillBurst (bass, kick, 1000, 1120, 65.0);
 
             const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
 
             expect (r.valid);
-            expectGreaterThan (r.bassDelayMs, 0.5f);
-            expectLessThan (r.bassDelayMs, 1.2f);
+            expectGreaterThan (r.bassDelayMs, 2.0f);
+            expectLessThan (r.bassDelayMs, 3.2f);
             expectGreaterThan (r.afterMatchPercent, 95.0f);
             expectEquals ((int) r.quality, (int) PhaseFixQuality::StrongImprovement);
             expect (! r.requiresTimelineMove);
@@ -633,6 +636,57 @@ public:
             expect (r.valid);
             expect (r.requiresTimelineMove);
             expectGreaterThan (r.suggestedKickMoveMs, 0.5f);
+        }
+
+        // P2: an already well-aligned pair must not be sold a fix, and the
+        // rotator must not enable itself on a negligible correlation gain.
+        beginTest ("Already >=95% aligned reads AlreadyGood with no rotator");
+        {
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1000, 1000, 70.0); // perfectly aligned
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expectGreaterThan (r.beforeMatchPercent, 95.0f);
+            expectEquals ((int) r.quality, (int) PhaseFixQuality::AlreadyGood);
+            expect (! r.phaseFilterEnabled, "rotator enabled on an already-aligned pair");
+            expect (! PhaseFixEngine::canApply (r));
+        }
+
+        // P2: a genuine ~2 ms timing error is a Strong fix, and the recovered
+        // delay lands close to the true offset. (The exponential burst decay
+        // biases the correlation peak by ~0.3 ms, so the tolerance reflects the
+        // engine's real accuracy on a transient rather than an idealised tone.)
+        beginTest ("A 2 ms offset classifies Strong with a close delay estimate");
+        {
+            const int lag = (int) std::lround (kSampleRate * 2.0 / 1000.0); // 2 ms
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1000, 1000 + lag, 65.0); // kick late -> +delay bass
+
+            const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+
+            expect (r.valid);
+            expectEquals ((int) r.quality, (int) PhaseFixQuality::StrongImprovement);
+            expectWithinAbsoluteError (r.bassDelayMs, 2.0f, 0.4f);
+            expect (PhaseFixEngine::canApply (r), r.message);
+        }
+
+        // P2: deterministic peak tie-breaking - the same window analyzed 20x
+        // must yield identical polarity and delay every time (no flip-flopping).
+        beginTest ("Repeated analysis is bit-stable over 20 runs");
+        {
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            fillBurst (bass, kick, 1000, 1000 + 96, 65.0); // ~2 ms, kick late
+
+            const auto first = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+            for (int i = 0; i < 20; ++i)
+            {
+                const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
+                expectWithinAbsoluteError (r.bassDelayMs, first.bassDelayMs, 1.0e-6f);
+                expect (r.bassPolarityInvert == first.bassPolarityInvert);
+                expect (r.phaseFilterEnabled == first.phaseFilterEnabled);
+            }
         }
     }
 };

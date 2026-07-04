@@ -106,12 +106,48 @@ public:
         double bestAbs = -1.0;
         double bestVal = 0.0;
 
+        // First pass: the strict global maximum. Using a strict '>' keeps the
+        // local peak intact (its neighbouring bins stay available for the
+        // parabolic sub-sample refinement below) and is bit-for-bit
+        // deterministic on identical input.
         for (int d = -maxLag; d <= maxLag; ++d)
         {
             const int idx = (d >= 0) ? d : (fftSize + d);
             const double c = (double) fftA[idx] / norm;
             const double m = std::abs (c);
             if (m > bestAbs)
+            {
+                bestAbs = m;
+                bestVal = c;
+                bestLag = d;
+            }
+        }
+
+        // Second pass: deterministic tie-break between GENUINELY DISTINCT peaks
+        // (separated from the incumbent by more than the parabolic window). When
+        // a competing peak is within 2% relative magnitude, prefer (a) a
+        // non-inverted polarity, then (b) the smaller |lag|. This stops
+        // invert/delay recommendations flip-flopping between near-equal peaks on
+        // the same loop, without perturbing the local peak used for refinement.
+        constexpr int distinctPeakSeparation = 2;
+        for (int d = -maxLag; d <= maxLag; ++d)
+        {
+            if (std::abs (d - bestLag) <= distinctPeakSeparation)
+                continue;
+
+            const int idx = (d >= 0) ? d : (fftSize + d);
+            const double c = (double) fftA[idx] / norm;
+            const double m = std::abs (c);
+            if (m < bestAbs * 0.98)
+                continue;
+
+            const bool candNonInverted = c >= 0.0;
+            const bool bestNonInverted = bestVal >= 0.0;
+            const bool preferCandidate =
+                (candNonInverted && ! bestNonInverted)
+                || (candNonInverted == bestNonInverted && std::abs (d) < std::abs (bestLag));
+
+            if (preferCandidate)
             {
                 bestAbs = m;
                 bestVal = c;
@@ -164,6 +200,15 @@ public:
 
             double bestRotAbs = baseAbs;
 
+            // A rotator is only worth enabling if it beats the plain
+            // delay+polarity baseline by a musically-meaningful margin. A tiny
+            // 1e-4 correlation gain (the old bar) turned the phase filter on for
+            // no audible reason. Require +0.03 absolute correlation (~3 match
+            // points) over baseline before committing to it, while still using a
+            // small epsilon to break ties among rotator candidates.
+            constexpr double rotatorEnableGain = 0.03;
+            constexpr double rotatorTieEpsilon = 1.0e-4;
+
             const float freqCandidates[]  = { 40.0f, 60.0f, 80.0f, 100.0f, 140.0f,
                                                200.0f, 250.0f, 350.0f, 500.0f };
             const float qCandidates[]     = { 0.5f, 0.7f, 1.0f, 2.0f, 4.0f };
@@ -183,10 +228,9 @@ public:
 
                         const double m = std::abs (findPeakFFT (trial.data(), kickAligned.data(),
                                                                  alignedLen, 1).signed_);
-                        if (m > bestRotAbs + 1.0e-4)
+                        if (m > bestRotAbs + rotatorTieEpsilon)
                         {
                             bestRotAbs           = m;
-                            result.adjustRotator = true;
                             result.rotatorFreqHz = freq;
                             result.rotatorQ      = qv;
                             result.rotatorStages = stages;
@@ -195,8 +239,13 @@ public:
                 }
             }
 
-            if (result.adjustRotator)
+            // Commit to the rotator only if the best candidate cleared the gain
+            // bar over the non-rotator baseline.
+            if (bestRotAbs >= baseAbs + rotatorEnableGain)
+            {
+                result.adjustRotator = true;
                 result.afterMatch = toPercent (bestRotAbs);
+            }
         }
 
         return result;

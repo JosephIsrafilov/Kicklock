@@ -226,25 +226,27 @@ public:
     static void updateDerivedResultFields (PhaseFixResult& result)
     {
         result.quality = classifyQuality (result);
-        
-        // BEST EFFORT MODE: We allow Apply Fix even if large timing offset or timeline move is required,
-        // because we clamped the values to safe boundaries in analyzeAggregatedHits.
+
+        // P2: only a measured Strong/Partial improvement may be auto-applied.
+        // Large-offset and timeline-move advisories are NOT applicable in place
+        // (the plugin can't safely delay bass that far, and can't move the kick
+        // clip) - they carry a warning message instead.
         result.applyAllowed = result.valid
             && result.enoughSignal
             && ! result.unstableRecommendation
             && (result.quality == PhaseFixQuality::StrongImprovement
-                || result.quality == PhaseFixQuality::PartialImprovement
-                || result.quality == PhaseFixQuality::LargeTimingOffset
-                || result.quality == PhaseFixQuality::TimelineMoveRequired);
+                || result.quality == PhaseFixQuality::PartialImprovement);
 
+        // Optional (recommend-but-don't-push) apply: a partial fix the user can
+        // audition, or an already-good match with an optional phase-filter
+        // refinement to offer. Deliberately excludes the large-offset/timeline
+        // advisories so Apply stays disabled for them.
         result.optionalApplyAllowed =
             result.valid
             && result.enoughSignal
             && ! result.unstableRecommendation
-            && ((result.quality == PhaseFixQuality::PartialImprovement)
-                || (result.quality == PhaseFixQuality::AlreadyGood && result.phaseFilterEnabled)
-                || (result.quality == PhaseFixQuality::LargeTimingOffset)
-                || (result.quality == PhaseFixQuality::TimelineMoveRequired));
+            && (result.quality == PhaseFixQuality::PartialImprovement
+                || (result.quality == PhaseFixQuality::AlreadyGood && result.phaseFilterEnabled));
 
         result.message = makeMessage (result);
     }
@@ -279,9 +281,15 @@ private:
 
     static constexpr float minimumSignalConfidence = 0.05f;
     static constexpr float usefulImprovementThreshold = 5.0f;
-    static constexpr float partialImprovementThreshold = 8.0f;
+    // P2 classification thresholds. Strong needs a big gain that also lands on a
+    // genuinely good match; Partial is a worthwhile gain regardless of the final
+    // absolute; AlreadyGood is a high starting match with little left to add.
+    static constexpr float strongImprovementThreshold = 8.0f;
+    static constexpr float partialImprovementThreshold = 5.0f;
+    static constexpr float alreadyGoodBeforeThreshold = 80.0f;
     static constexpr float alreadyGoodThreshold = 85.0f;
     static constexpr float strongAfterThreshold = 75.0f;
+    static constexpr float excellentAfterThreshold = 90.0f;
     static constexpr float usefulBandConfidence = 0.08f;
     static constexpr float highEnergyBandConfidence = 0.16f;
     static constexpr float conflictBandGapThreshold = 8.0f;
@@ -636,23 +644,34 @@ private:
         if (result.requiresTimelineMove)
             return PhaseFixQuality::TimelineMoveRequired;
 
-        const bool meaningfulTimingCorrection = std::abs(result.bassDelayMs) >= 0.10f;
-        const bool meaningfulPolarityCorrection = result.bassPolarityInvert;
-        const bool meaningfulPhaseCorrection = result.phaseFilterEnabled;
+        // Improvement-driven classification (P2). The old logic returned
+        // StrongImprovement for ANY polarity flip / any delay >= 0.1 ms / any
+        // enabled rotator regardless of measured gain, so users applied fixes
+        // that did nothing. Grade purely on the measured before/after numbers:
+        //   Strong  - a big gain that also lands on a genuinely good match
+        //   Partial - a worthwhile gain, even if the result is still imperfect
+        //   AlreadyGood - already well aligned, nothing meaningful to add
+        //   NoUsefulChange - anything else
+        const float improvement = result.improvementPercent;
 
-        if (result.improvementPercent >= 5.0f || meaningfulTimingCorrection || meaningfulPolarityCorrection || meaningfulPhaseCorrection)
-        {
+        // Strong when there's a big measurable gain to a genuinely good place,
+        // OR a smaller-but-real gain that lands on an excellent final match (a
+        // fine timing correction is honest even if the numeric jump is modest -
+        // what the prompt forbids is calling ANY flip/delay "Strong" with no
+        // measured gain at all).
+        const bool strongByGain = improvement >= strongImprovementThreshold
+                                  && result.afterMatchPercent >= strongAfterThreshold;
+        const bool strongByResult = improvement >= partialImprovementThreshold
+                                    && result.afterMatchPercent >= excellentAfterThreshold;
+
+        if (strongByGain || strongByResult)
             return PhaseFixQuality::StrongImprovement;
-        }
-        else if (result.improvementPercent > 0.0f)
-        {
+
+        if (improvement >= partialImprovementThreshold)
             return PhaseFixQuality::PartialImprovement;
-        }
-        
-        if (result.beforeMatchPercent >= 80.0f)
-        {
+
+        if (result.beforeMatchPercent >= alreadyGoodBeforeThreshold)
             return PhaseFixQuality::AlreadyGood;
-        }
 
         return PhaseFixQuality::NoUsefulChange;
     }
