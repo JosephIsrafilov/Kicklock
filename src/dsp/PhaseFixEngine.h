@@ -156,7 +156,7 @@ public:
         return analyzeCore (bass, kick, numSamples, sampleRate, maxDelayMs, delayInterpolation);
     }
 
-    static PhaseFixResult analyzeCore (const float* bass,
+        static PhaseFixResult analyzeCore (const float* bass,
                                        const float* kick,
                                        int numSamples,
                                        double sampleRate,
@@ -173,152 +173,47 @@ public:
             return result;
         }
 
-        const auto before = score (bass, kick, numSamples, sampleRate);
-        result.beforeMatchPercent = before.match;
-        result.afterMatchPercent = before.match;
-        result.predictedAfterMatchPercent = before.match;
-        result.confidence = before.confidence;
-        result.enoughSignal = before.confidence >= minimumSignalConfidence;
+        const auto align = AlignmentAnalyzer::analyze (bass, kick, numSamples,
+                                                       sampleRate, maxDelayMs,
+                                                       30.0f, 120.0f, 16384);
 
-        if (! result.enoughSignal)
+        if (! align.valid)
         {
             updateDerivedResultFields (result);
             return result;
         }
 
-        const auto unconstrained = AlignmentAnalyzer::analyze (bass, kick, numSamples,
-                                                               sampleRate, absoluteManualMaxDelayMs,
-                                                               30.0f, 120.0f, 16384);
-
-        const int focusBandIndex = findWorstUsefulBandIndex (before.multi);
-
-        std::vector<float> work ((size_t) numSamples, 0.0f);
-        Candidate bestSafe = makeCandidateFromScore (before);
-        bestSafe.settings.delayInterpolation = delayInterpolation;
-
-        for (bool invert : { false, true })
-        {
-            for (float delayMs = 0.0f; delayMs <= maxDelayMs + 0.0001f; delayMs += 0.10f)
-                testCandidate (bass, kick, numSamples, sampleRate, invert, delayMs,
-                               false, 200.0f, 0.7f, 2, delayInterpolation,
-                               work, before, focusBandIndex, bestSafe);
-        }
-
-        const float fineStart = std::max (0.0f, bestSafe.settings.bassDelayMs - 0.25f);
-        const float fineEnd = std::min (maxDelayMs, bestSafe.settings.bassDelayMs + 0.25f);
-        for (bool invert : { false, true })
-        {
-            for (float delayMs = fineStart; delayMs <= fineEnd + 0.0001f; delayMs += 0.01f)
-                testCandidate (bass, kick, numSamples, sampleRate, invert, delayMs,
-                               false, 200.0f, 0.7f, 2, delayInterpolation,
-                               work, before, focusBandIndex, bestSafe);
-        }
-
-        Candidate best = bestSafe;
-        Candidate bestPhase;
-        bestPhase.settings.delayInterpolation = delayInterpolation;
-
-        const float unconstrainedDelayAbs = unconstrained.valid ? std::abs (unconstrained.delayMs) : 0.0f;
-        const bool forceLargeTimingOffset =
-            unconstrained.valid
-            && unconstrainedDelayAbs > maxDelayMs + largeTimingToleranceMs
-            && (bestSafe.settings.bassDelayMs >= maxDelayMs - largeTimingToleranceMs
-                || before.match < alreadyGoodThreshold);
-
-        constexpr float broadFreqs[] = { 30.0f, 40.0f, 50.0f, 60.0f, 65.0f, 80.0f,
-                                         100.0f, 120.0f, 150.0f, 160.0f, 200.0f,
-                                         250.0f, 350.0f, 500.0f };
-        constexpr float qs[] = { 0.5f, 0.7f, 1.0f, 1.5f, 2.0f, 4.0f };
-        constexpr int stages[] = { 2, 3, 4 };
-
-        const float phaseDelayStart = std::max (0.0f, bestSafe.settings.bassDelayMs - 0.25f);
-        const float phaseDelayEnd = std::min (maxDelayMs, bestSafe.settings.bassDelayMs + 0.25f);
-        const bool usefulConflictBand = hasUsefulConflictBand (before, focusBandIndex);
-        const bool severeMismatchSolvedBySmallDelay =
-            before.match < 40.0f
-            && bestSafe.settings.bassDelayMs > 0.02f
-            && ! bestSafe.settings.bassPolarityInvert;
-        const bool safeDelayOrPolaritySolved =
-            bestSafe.rawMatchPercent >= strongAfterThreshold
-            && (bestSafe.rawMatchPercent - before.match >= usefulImprovementThreshold
-                || bestSafe.settings.bassDelayMs >= 0.40f
-                || bestSafe.settings.bassPolarityInvert)
-            && ! severeMismatchSolvedBySmallDelay;
-        const bool runPhaseSearch = ! forceLargeTimingOffset
-            && (before.match < 40.0f || ! safeDelayOrPolaritySolved || usefulConflictBand);
-
-        if (runPhaseSearch && focusBandIndex >= 0)
-        {
-            const auto& focusBand = before.multi.bands[(size_t) focusBandIndex];
-            const float focusCenter = 0.5f * (focusBand.lowHz + focusBand.highHz);
-            const float focusFreqs[] = {
-                std::max (30.0f, focusBand.lowHz),
-                focusCenter,
-                std::min (500.0f, focusBand.highHz)
-            };
-
-            for (bool invert : { false, true })
-                for (float freq : focusFreqs)
-                    for (float q : qs)
-                        for (int stageCount : stages)
-                            testPhaseCandidate (bass, kick, numSamples, sampleRate, invert,
-                                                phaseDelayStart, phaseDelayEnd, freq, q, stageCount,
-                                                delayInterpolation, work, before, focusBandIndex, bestPhase);
-        }
-
-        if (runPhaseSearch)
-        {
-            for (bool invert : { false, true })
-                for (float freq : broadFreqs)
-                    for (float q : qs)
-                        for (int stageCount : stages)
-                            testPhaseCandidate (bass, kick, numSamples, sampleRate, invert,
-                                                phaseDelayStart, phaseDelayEnd, freq, q, stageCount,
-                                                delayInterpolation, work, before, focusBandIndex, bestPhase);
-        }
-
-        const bool phaseFixesSevereMismatch =
-            severeMismatchSolvedBySmallDelay
-            && bestPhase.settings.phaseFilterEnabled
-            && bestPhase.rawMatchPercent >= strongAfterThreshold;
-
-        if (phaseFixesSevereMismatch
-            || shouldKeepPhaseCandidate (before, bestSafe, bestPhase, focusBandIndex))
-        {
-            best = bestPhase;
-        }
-
         result.valid = true;
-        result.bassPolarityInvert = best.settings.bassPolarityInvert;
-        result.bassDelayMs = std::max (0.0f, best.settings.bassDelayMs);
-        result.phaseFilterEnabled = best.settings.phaseFilterEnabled;
-        result.phaseFilterFreqHz = best.settings.phaseFilterFreqHz;
-        result.phaseFilterQ = best.settings.phaseFilterQ;
-        result.phaseFilterStages = best.settings.phaseFilterStages;
-        result.afterMatchPercent = best.rawMatchPercent;
-        result.predictedAfterMatchPercent = best.rawMatchPercent;
-        result.improvementPercent = result.afterMatchPercent - result.beforeMatchPercent;
-        result.confidence = estimateConfidence (best.confidence,
-                                                result.afterMatchPercent,
-                                                result.improvementPercent,
-                                                result.singleHitAnalysis,
-                                                1.0f);
+        result.enoughSignal = true; 
+        result.bassPolarityInvert = align.invertPolarity;
+        result.bassDelayMs = std::max (0.0f, align.delayMs);
+        result.phaseFilterEnabled = align.adjustRotator;
+        result.phaseFilterFreqHz = align.rotatorFreqHz;
+        result.phaseFilterQ = align.rotatorQ;
+        result.phaseFilterStages = align.rotatorStages;
+        
+        result.beforeMatchPercent = align.beforeMatch;
+        result.afterMatchPercent = align.afterMatch;
+        result.predictedAfterMatchPercent = align.afterMatch;
+        result.improvementPercent = align.afterMatch - align.beforeMatch;
+        result.confidence = 1.0f; 
 
-        if (forceLargeTimingOffset)
-        {
-            result.largeTimingOffset = true;
-            result.detectedTimingOffsetMs = unconstrainedDelayAbs;
-        }
-        else if (unconstrained.valid && unconstrained.delayMs < -0.02f
-                 && result.improvementPercent < usefulImprovementThreshold)
+        if (align.delayMs < -0.02f && result.improvementPercent < 5.0f)
         {
             result.requiresTimelineMove = true;
-            result.suggestedKickMoveMs = std::abs (unconstrained.delayMs);
+            result.suggestedKickMoveMs = std::abs (align.delayMs);
+        }
+        else if (std::abs(align.delayMs) > maxDelayMs + 0.25f)
+        {
+            result.largeTimingOffset = true;
+            result.detectedTimingOffsetMs = std::abs(align.delayMs);
         }
 
         updateDerivedResultFields (result);
         return result;
     }
+
+
 
     static void applyVerification (PhaseFixResult& result, float verifiedAfterMatchPercent) noexcept
     {
@@ -397,9 +292,11 @@ private:
     static Score score (const float* bass, const float* kick, int numSamples, double sampleRate)
     {
         Score result;
-        result.multi = MultiBandCorrelation::analyze (bass, kick, numSamples, sampleRate);
-        result.match = result.multi.weightedMatchPercent;
-        result.confidence = result.multi.confidence;
+        const auto unconstrained = AlignmentAnalyzer::analyze (bass, kick, numSamples,
+                                                               sampleRate, 0.0f,
+                                                               30.0f, 120.0f, 16384);
+        result.match = unconstrained.beforeMatch;
+        result.confidence = 1.0f;
         return result;
     }
 
@@ -724,7 +621,7 @@ private:
 
     static PhaseFixQuality classifyQuality (const PhaseFixResult& result) noexcept
     {
-        if (! result.enoughSignal || result.confidence < minimumSignalConfidence)
+        if (! result.enoughSignal)
             return PhaseFixQuality::NotEnoughSignal;
 
         if (result.unstableRecommendation)
@@ -736,33 +633,18 @@ private:
         if (result.requiresTimelineMove)
             return PhaseFixQuality::TimelineMoveRequired;
 
-        if (result.beforeMatchPercent >= alreadyGoodThreshold
-            && result.phaseFilterEnabled)
-        {
-            return PhaseFixQuality::AlreadyGood;
-        }
-
-        const bool meaningfulTimingCorrection = result.bassDelayMs >= 0.40f;
+        const bool meaningfulTimingCorrection = result.bassDelayMs >= 0.10f;
         const bool meaningfulPolarityCorrection = result.bassPolarityInvert;
-        if (result.afterMatchPercent >= strongAfterThreshold
-            && (result.improvementPercent >= usefulImprovementThreshold
-                || meaningfulTimingCorrection
-                || meaningfulPolarityCorrection))
+        const bool meaningfulPhaseCorrection = result.phaseFilterEnabled;
+
+        if (result.improvementPercent > 1.0f || meaningfulTimingCorrection || meaningfulPolarityCorrection || meaningfulPhaseCorrection)
         {
             return PhaseFixQuality::StrongImprovement;
         }
-
-        if (result.beforeMatchPercent >= alreadyGoodThreshold
-            && result.improvementPercent < usefulImprovementThreshold)
+        
+        if (result.beforeMatchPercent >= 80.0f)
         {
             return PhaseFixQuality::AlreadyGood;
-        }
-
-        if (result.improvementPercent >= partialImprovementThreshold
-            || (result.afterMatchPercent >= 60.0f
-                && result.improvementPercent >= usefulImprovementThreshold))
-        {
-            return PhaseFixQuality::PartialImprovement;
         }
 
         return PhaseFixQuality::NoUsefulChange;
