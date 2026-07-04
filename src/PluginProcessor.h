@@ -15,11 +15,9 @@
 #include "dsp/FractionalDelayLine.h"
 #include "dsp/AllpassPhaseRotator.h"
 #include "dsp/AlignmentAnalyzer.h"
-#include "dsp/AnalyzerInstruction.h"
 #include "dsp/AnalyzeState.h"
 #include "dsp/TransientDetector.h"
 #include "dsp/SignalActivityTracker.h"
-#include "dsp/PerHitAnalyzer.h"
 #include "dsp/PhaseFixEngine.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
@@ -79,14 +77,6 @@ public:
     std::atomic<float> latestVerificationDeltaPercent { 0.0f };
     std::atomic<float> latestFixConfidence { 0.0f };
     ScopeFifo scopeFifo;
-
-    // Runs cross-correlation over the captured raw bass/kick. Default behavior
-    // is recommend-only; AutoApplySafe may change bass-path parameters, but
-    // never delays or otherwise processes the sidechain/kick reference.
-    // Message thread only (allocates).
-    AnalyzerInstruction analyzeAndApply (AnalyzeMode mode = AnalyzeMode::RecommendOnly);
-    HitAnalysisResult analyzeLatestHit();
-    int getLatestHitSequence() const noexcept;
 
     // Synchronous analysis. Snapshots the raw capture, runs the offline
     // PhaseFixEngine search, and publishes the result. Message-thread callers
@@ -153,7 +143,6 @@ private:
     RawCaptureBuffer rawCapture;
     TransientDetector transientDetector;
     HitCaptureBuffer hitCapture;
-    HitAnalysisHistory hitHistory;
     PhaseFixResult latestFixResult;
     std::vector<float> lastAnalyzedBassWindow;
     std::vector<float> lastAnalyzedKickWindow;

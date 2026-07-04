@@ -3,16 +3,20 @@
 #include <JuceHeader.h>
 #include <atomic>
 
-// Timer-polled phase-match read-out. Shows a titled panel with the correlation
-// percent as large text, a status word (ALIGNED / PARTIAL / FIGHTING), and a
-// horizontal level bar. Colour lerps red (0%, out of phase) -> green (100%,
-// perfectly aligned). The value is smoothed on the UI side so the number and
-// bar glide rather than jitter.
+// Timer-polled live-match read-out. Shows a large multi-band percent, a short
+// status word, supporting low-end / broadband figures, and a horizontal level
+// bar. Colour lerps red (0%, out of phase) -> green (100%, perfectly
+// aligned). Values are smoothed on the UI side so the display glides rather
+// than jittering.
 class CorrelationDisplay : public juce::Component, private juce::Timer
 {
 public:
-    explicit CorrelationDisplay (std::atomic<float>& percentToRead)
-        : percentRef (percentToRead)
+    CorrelationDisplay (std::atomic<float>& multiBandPercentToRead,
+                        std::atomic<float>& lowEndPercentToRead,
+                        std::atomic<float>& broadbandPercentToRead)
+        : multiBandPercentRef (multiBandPercentToRead),
+          lowEndPercentRef (lowEndPercentToRead),
+          broadbandPercentRef (broadbandPercentToRead)
     {
         startTimerHz (30);
     }
@@ -26,6 +30,8 @@ public:
     {
         auto bounds = getLocalBounds().toFloat().reduced (1.0f);
         const float pct = juce::jlimit (0.0f, 100.0f, displayPercent);
+        const float lowPct = juce::jlimit (0.0f, 100.0f, displayLowEndPercent);
+        const float broadbandPct = juce::jlimit (0.0f, 100.0f, displayBroadbandPercent);
         const auto  accent = juce::Colours::red.interpolatedWith (juce::Colours::green, pct / 100.0f);
 
         // Panel background + subtle border in the accent colour.
@@ -39,29 +45,36 @@ public:
         // Title.
         g.setColour (juce::Colour (0xff9a9a9a));
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-        g.drawText ("PHASE MATCH", area.removeFromTop (16.0f).toNearestInt(),
+        g.drawText ("LIVE MATCH", area.removeFromTop (16.0f).toNearestInt(),
                     juce::Justification::centred);
 
         g.setColour (juce::Colour (0xff6f7d89));
         g.setFont (juce::Font (juce::FontOptions (10.0f)));
-        g.drawText ("Multi-band 20 Hz-2 kHz (low-end weighted)",
+        g.drawText ("Multi-band 20 Hz-2 kHz while audio is playing",
                     area.removeFromTop (14.0f).toNearestInt(),
                     juce::Justification::centred);
 
         // Big percent.
         g.setColour (accent);
-        g.setFont (juce::Font (juce::FontOptions (44.0f)).boldened());
+        g.setFont (juce::Font (juce::FontOptions (52.0f)).boldened());
         g.drawText (juce::String ((int) std::round (pct)) + "%",
-                    area.removeFromTop (48.0f).toNearestInt(),
+                    area.removeFromTop (56.0f).toNearestInt(),
                     juce::Justification::centred);
 
         // Status word.
-        const juce::String status = pct >= 75.0f ? "% ALIGNED"
-                                   : pct >= 50.0f ? "MIXED"
-                                                  : "CANCELING";
+        const juce::String status = pct >= 85.0f ? "LOCKED"
+                                   : pct >= 65.0f ? "CLOSING"
+                                                  : "FIGHTING";
         g.setColour (accent);
         g.setFont (juce::Font (juce::FontOptions (13.0f)).boldened());
         g.drawText (status, area.removeFromTop (18.0f).toNearestInt(),
+                    juce::Justification::centred);
+
+        g.setColour (juce::Colour (0xffc7d2db));
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.drawText ("Low-End " + juce::String ((int) std::round (lowPct))
+                        + "%   |   20-2k " + juce::String ((int) std::round (broadbandPct)) + "%",
+                    area.removeFromTop (16.0f).toNearestInt(),
                     juce::Justification::centred);
 
         // Level bar.
@@ -77,13 +90,21 @@ public:
 private:
     void timerCallback() override
     {
-        const float target = percentRef.load();
-        displayPercent += 0.25f * (target - displayPercent); // UI-side smoothing
+        const float target = multiBandPercentRef.load();
+        const float lowTarget = lowEndPercentRef.load();
+        const float broadbandTarget = broadbandPercentRef.load();
+        displayPercent += 0.25f * (target - displayPercent);
+        displayLowEndPercent += 0.25f * (lowTarget - displayLowEndPercent);
+        displayBroadbandPercent += 0.25f * (broadbandTarget - displayBroadbandPercent);
         repaint();
     }
 
-    std::atomic<float>& percentRef;
+    std::atomic<float>& multiBandPercentRef;
+    std::atomic<float>& lowEndPercentRef;
+    std::atomic<float>& broadbandPercentRef;
     float displayPercent = 0.0f;
+    float displayLowEndPercent = 0.0f;
+    float displayBroadbandPercent = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CorrelationDisplay)
 };
