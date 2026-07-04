@@ -474,8 +474,16 @@ public:
         smoothedAllpassFreq.reset (sampleRate, 0.030);
         smoothedAllpassFreq.setCurrentAndTargetValue (50.0f);
 
+        // Q is smoothed with the same 30 ms ramp as frequency so that a change
+        // to the rotator resonance recomputes coefficients gradually instead of
+        // snapping (the same reason frequency is smoothed).
+        smoothedAllpassQ.reset (sampleRate, 0.030);
+        smoothedAllpassQ.setCurrentAndTargetValue (defaultAllpassQ);
+
         allpassWet.reset (sampleRate, 0.010);
         allpassWet.setCurrentAndTargetValue (0.0f);
+
+        activeStages = 2;
 
         initialiseFilters();
         reset();
@@ -485,26 +493,48 @@ public:
     {
         delayLine.reset();
 
-        for (auto& filter : allpassFilters)
-            filter.reset();
+        for (auto& channel : allpassFilters)
+            for (auto& stage : channel)
+                stage.reset();
 
         smoothedDelay.setCurrentAndTargetValue ((float) baseDelaySamples);
         smoothedAllpassFreq.setCurrentAndTargetValue (50.0f);
+        smoothedAllpassQ.setCurrentAndTargetValue (defaultAllpassQ);
         allpassWet.setCurrentAndTargetValue (0.0f);
         lastAppliedAllpassFreq = -1.0f;
+        lastAppliedAllpassQ = -1.0f;
     }
 
     void process (juce::AudioBuffer<float>& mainBuffer,
                   float delayMs,
                   bool polarityInvert,
                   float allpassFreqHz,
-                  bool allpassEnabled)
+                  bool allpassEnabled,
+                  float allpassQ,
+                  int allpassStages)
     {
         const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
         const auto numSamples = mainBuffer.getNumSamples();
 
+        // Match AllpassPhaseRotator's clamp so the audio path and the offline
+        // analyzer/verification agree on how many stages actually run.
+        const int clampedStages = juce::jlimit (2, 4, allpassStages);
+        if (clampedStages != activeStages)
+        {
+            // A stage-count change alters the cascade topology; the trailing
+            // stages' z-state is stale for the new routing, so clear it to avoid
+            // a click. Coefficients are re-pushed below via the epsilon guard.
+            activeStages = clampedStages;
+            for (auto& channel : allpassFilters)
+                for (auto& stage : channel)
+                    stage.reset();
+            lastAppliedAllpassFreq = -1.0f;
+            lastAppliedAllpassQ = -1.0f;
+        }
+
         smoothedDelay.setTargetValue (delaySamplesForUserDelayMs (delayMs));
         smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 500.0f, allpassFreqHz));
+        smoothedAllpassQ.setTargetValue (juce::jlimit (minAllpassQ, maxAllpassQ, allpassQ));
         allpassWet.setTargetValue (allpassEnabled ? 1.0f : 0.0f);
 
         for (int i = 0; i < numSamples; ++i)
@@ -516,7 +546,8 @@ public:
             const bool runAllpass = wet > 1.0e-5f || allpassWet.isSmoothing();
 
             if (runAllpass)
-                updateAllpassCoefficients (smoothedAllpassFreq.getNextValue());
+                updateAllpassCoefficients (smoothedAllpassFreq.getNextValue(),
+                                           smoothedAllpassQ.getNextValue());
 
             for (int ch = 0; ch < numChannels; ++ch)
             {
@@ -529,7 +560,9 @@ public:
                 if (runAllpass)
                 {
                     const auto dry = sample;
-                    const auto rotated = allpassFilters[(size_t) ch].processSample (sample);
+                    auto rotated = sample;
+                    for (int s = 0; s < activeStages; ++s)
+                        rotated = allpassFilters[(size_t) ch][(size_t) s].processSample (rotated);
                     sample = dry + wet * (rotated - dry);
                 }
 
@@ -569,13 +602,16 @@ public:
 private:
     void initialiseFilters()
     {
-        for (auto& filter : allpassFilters)
+        for (auto& channel : allpassFilters)
         {
-            filter.coefficients = new juce::dsp::IIR::Coefficients<float> (1.0f, 0.0f, 1.0f, 0.0f);
-            filter.prepare ({ sampleRate, 1, 1 });
+            for (auto& stage : channel)
+            {
+                stage.coefficients = new juce::dsp::IIR::Coefficients<float> (1.0f, 0.0f, 1.0f, 0.0f);
+                stage.prepare ({ sampleRate, 1, 1 });
+            }
         }
 
-        updateAllpassCoefficients (50.0f);
+        updateAllpassCoefficients (50.0f, defaultAllpassQ);
     }
 
     float delaySamplesForUserDelayMs (float delayMs) const noexcept
@@ -584,29 +620,50 @@ private:
         return (float) baseDelaySamples + (float) (clampedMs * sampleRate / 1000.0);
     }
 
-    void updateAllpassCoefficients (float frequencyHz)
+    // Recompute the shared allpass coefficients when either the (smoothed)
+    // frequency or Q moves past a small epsilon. Both guards matter: the runtime
+    // cascade must track the same freq/Q/stage settings the analyzer predicted
+    // and applyLatestFix() writes, or the audible result won't match the
+    // reported "after" match (the P1 bug). Coefficients are shared across all
+    // four stages of both channels; only the first activeStages are run.
+    void updateAllpassCoefficients (float frequencyHz, float q)
     {
-        const auto limited = juce::jlimit (20.0f, 500.0f, frequencyHz);
-        if (std::abs (limited - lastAppliedAllpassFreq) < 0.01f)
+        const auto limitedFreq = juce::jlimit (20.0f, 500.0f, frequencyHz);
+        const auto limitedQ = juce::jlimit (minAllpassQ, maxAllpassQ, q);
+
+        if (std::abs (limitedFreq - lastAppliedAllpassFreq) < 0.01f
+            && std::abs (limitedQ - lastAppliedAllpassQ) < 1.0e-4f)
             return;
 
-        const auto coeffs = juce::dsp::IIR::ArrayCoefficients<float>::makeAllPass (sampleRate, limited, 0.70710678f);
+        const auto coeffs = juce::dsp::IIR::ArrayCoefficients<float>::makeAllPass (sampleRate, limitedFreq, limitedQ);
 
-        for (auto& filter : allpassFilters)
-            *filter.coefficients = coeffs;
+        for (auto& channel : allpassFilters)
+            for (auto& stage : channel)
+                *stage.coefficients = coeffs;
 
-        lastAppliedAllpassFreq = limited;
+        lastAppliedAllpassFreq = limitedFreq;
+        lastAppliedAllpassQ = limitedQ;
     }
+
+    static constexpr int maxAllpassStages = 4;
+    static constexpr float defaultAllpassQ = 0.70710678f;
+    static constexpr float minAllpassQ = 0.1f;
+    static constexpr float maxAllpassQ = 10.0f;
 
     double sampleRate = 44100.0;
     int baseDelaySamples = 0;
+    int activeStages = 2;
     float lastAppliedAllpassFreq = -1.0f;
+    float lastAppliedAllpassQ = -1.0f;
 
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLine;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDelay;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassFreq;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassQ;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> allpassWet;
-    std::array<juce::dsp::IIR::Filter<float>, 2> allpassFilters;
+
+    // Per-channel cascade of up to 4 allpass stages (matching AllpassPhaseRotator).
+    std::array<std::array<juce::dsp::IIR::Filter<float>, (size_t) maxAllpassStages>, 2> allpassFilters;
 };
 
 class KickLockAudioProcessor::AutoAlignEngine : public juce::Thread
@@ -1185,10 +1242,20 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float snakeFreq = rotatorFreqParam != nullptr ? rotatorFreqParam->load() : 50.0f;
     const float legacyFreq = rotatorFreqLegacyParam != nullptr ? rotatorFreqLegacyParam->load() : 50.0f;
     const float allpassFreq = std::abs (snakeFreq - 50.0f) > 1.0e-4f ? snakeFreq : legacyFreq;
+
+    // P1: the runtime cascade must honour the Q and stage count the analyzer
+    // predicted and applyLatestFix() wrote, not a hardcoded single stage at
+    // Q = 0.7071. rotatorQ is a plain float; rotatorStages is a 0/1/2 choice
+    // that maps to 2/3/4 active stages (see createParameterLayout).
+    const float allpassQ = rotatorQParam != nullptr ? rotatorQParam->load() : 0.70710678f;
+    const int allpassStages = 2 + (rotatorStagesParam != nullptr
+                                       ? juce::jlimit (0, 2, (int) std::lround (rotatorStagesParam->load()))
+                                       : 0);
     const bool processingNeeded = ! neutral;
 
     if (phaseAlignmentEngine != nullptr)
-        phaseAlignmentEngine->process (mainBuffer, delayMs, polarityInvert, allpassFreq, phaseFilterEnabled);
+        phaseAlignmentEngine->process (mainBuffer, delayMs, polarityInvert, allpassFreq,
+                                       phaseFilterEnabled, allpassQ, allpassStages);
 
     // Feed the correlation meter and scope fifo with mono-summed
     // main/sidechain values. Skipped entirely when there's no sidechain,

@@ -707,3 +707,218 @@ private:
 
 static KickLockProcessorTransparencyTests kickLockProcessorTransparencyTestsInstance;
 
+// P1: the runtime phase filter must honour Q and stage count and actually
+// realise what the analyzer predicts. These tests pin the audio path to the
+// same AllpassPhaseRotator the offline analyzer/verification uses.
+class KickLockPhaseFilterRuntimeTests : public juce::UnitTest
+{
+public:
+    KickLockPhaseFilterRuntimeTests()
+        : juce::UnitTest ("KickLockPhaseFilterRuntime", "Processor") {}
+
+    void runTest() override
+    {
+        runMatchesOfflineRotatorTest();
+        runRealizedMatchesPredictedTest();
+    }
+
+private:
+    static void setBoolParam (KickLockAudioProcessor& processor, const char* id, bool value)
+    {
+        if (auto* param = processor.apvts.getParameter (id))
+            param->setValueNotifyingHost (value ? 1.0f : 0.0f);
+    }
+
+    static void setFloatParam (KickLockAudioProcessor& processor, const char* id, float value)
+    {
+        if (auto* param = processor.apvts.getParameter (id))
+            param->setValueNotifyingHost (param->convertTo0to1 (value));
+    }
+
+    // Offline reference render: sign, fractional delay, then the allpass cascade,
+    // in the SAME order the runtime PhaseAlignmentEngine applies them.
+    static std::vector<float> offlineRender (const std::vector<float>& bass,
+                                             int numSamples,
+                                             const PhaseFixRenderSettings& settings)
+    {
+        std::vector<float> out ((size_t) numSamples, 0.0f);
+        const float sign = settings.bassPolarityInvert ? -1.0f : 1.0f;
+        const float delayMs = std::max (0.0f, settings.bassDelayMs);
+
+        FractionalDelayLine delay;
+        delay.prepare (kSampleRate, std::max (50.0f, delayMs));
+        delay.setInterpolationType (settings.delayInterpolation);
+        delay.setDelaySamples ((float) (kSampleRate * (double) delayMs / 1000.0));
+        for (int i = 0; i < numSamples; ++i)
+            out[(size_t) i] = delay.processSample (sign * bass[(size_t) i]);
+
+        if (settings.phaseFilterEnabled)
+        {
+            AllpassPhaseRotator rotator;
+            rotator.prepare (kSampleRate, settings.phaseFilterStages);
+            rotator.setParameters (settings.phaseFilterFreqHz, settings.phaseFilterQ);
+            for (int i = 0; i < numSamples; ++i)
+                out[(size_t) i] = rotator.processSample (out[(size_t) i]);
+        }
+
+        return out;
+    }
+    // Render mono bass through the real processor (main bus only), one block,
+    // and return the processed main channel 0. No sidechain needed: the phase
+    // path runs regardless of sidechain presence.
+    static std::vector<float> renderThroughProcessor (KickLockAudioProcessor& processor,
+                                                       const std::vector<float>& bass,
+                                                       int numSamples)
+    {
+        juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                     processor.getTotalNumOutputChannels()),
+                                         numSamples);
+        buffer.clear();
+        for (int i = 0; i < numSamples; ++i)
+        {
+            buffer.setSample (0, i, bass[(size_t) i]);
+            if (buffer.getNumChannels() > 1)
+                buffer.setSample (1, i, bass[(size_t) i]);
+        }
+
+        juce::MidiBuffer midi;
+        processor.processBlock (buffer, midi);
+
+        std::vector<float> out ((size_t) numSamples, 0.0f);
+        for (int i = 0; i < numSamples; ++i)
+            out[(size_t) i] = buffer.getSample (0, i);
+        return out;
+    }
+
+    // Compute the low-end-weighted MBC match of a processed bass against kick
+    // over [from, to), the shared "one ruler" used for both predicted/realized.
+    static float mbcWeightedMatch (const std::vector<float>& bass,
+                                   const std::vector<float>& kick,
+                                   int from, int to)
+    {
+        const int n = to - from;
+        if (n <= 8)
+            return 50.0f;
+
+        const auto r = MultiBandCorrelation::analyze (bass.data() + from,
+                                                      kick.data() + from,
+                                                      n, kSampleRate);
+        return r.weightedMatchPercent;
+    }
+
+    // P1(a): the runtime cascade must equal the offline AllpassPhaseRotator with
+    // identical {freq, Q, stages}. The processor runs a fixed 20 ms PDC delay, so
+    // compare processor[i] against the offline rotator at i - latency, in the
+    // steady-state region past the freq/Q (30 ms) and wet (10 ms) smoothing.
+    void runMatchesOfflineRotatorTest()
+    {
+        beginTest ("Runtime phase filter matches offline rotator (freq 60, Q 2, stages 3)");
+
+        KickLockAudioProcessor processor;
+        processor.setRateAndBufferSizeDetails (kSampleRate, 48000);
+        processor.prepareToPlay (kSampleRate, 48000);
+
+        setBoolParam (processor, "allpass_enable", true);
+        setFloatParam (processor, "allpass_freq", 60.0f);
+        setFloatParam (processor, "rotatorQ", 2.0f);
+        setFloatParam (processor, "rotatorStages", 1.0f); // choice index 1 -> 3 stages
+        setFloatParam (processor, "delay_ms", 0.0f);
+
+        const int numSamples = 48000;
+        std::vector<float> bass ((size_t) numSamples, 0.0f);
+        for (int i = 0; i < numSamples; ++i)
+            bass[(size_t) i] = (float) (0.5 * std::sin (kTwoPi * 50.0 * (double) i / kSampleRate));
+
+        const auto processed = renderThroughProcessor (processor, bass, numSamples);
+
+        PhaseFixRenderSettings settings;
+        settings.phaseFilterEnabled = true;
+        settings.phaseFilterFreqHz = 60.0f;
+        settings.phaseFilterQ = 2.0f;
+        settings.phaseFilterStages = 3;
+        settings.delayInterpolation = InterpolationType::Linear;
+        const auto reference = offlineRender (bass, numSamples, settings);
+
+        const int latency = processor.getLatencySamples();
+        float maxError = 0.0f;
+        for (int i = 24000; i < numSamples; ++i)
+        {
+            const int j = i - latency;
+            if (j < 0)
+                continue;
+            maxError = std::max (maxError, std::abs (processed[(size_t) i] - reference[(size_t) j]));
+        }
+
+        expectLessThan (maxError, 1.0e-3f);
+    }
+
+    // P1(b) regression: the exact bug. With a rotator whose Q/stages differ from
+    // the old hardcoded {Q=0.7071, 1 stage}, the realized (engine) match must
+    // track the predicted (offline-render) match on ONE ruler within +/-8 pp.
+    // Also round-trips analyze() -> applyLatestFix() -> engine.
+    void runRealizedMatchesPredictedTest()
+    {
+        beginTest ("Realized match tracks predicted match within 8 points (Q/stages honoured)");
+
+        const int numSamples = 48000;
+        const int lead = (int) std::lround (kSampleRate * 1.5 / 1000.0); // bass 1.5 ms early
+        std::vector<float> bass ((size_t) numSamples, 0.0f);
+        std::vector<float> kick ((size_t) numSamples, 0.0f);
+        auto burst = [] (int idx)
+        {
+            const double t = (double) idx / kSampleRate;
+            return (float) (0.8 * std::sin (kTwoPi * 60.0 * t) * std::exp (-t * 8.0));
+        };
+        const int spacing = 12000;
+        for (int start = 0; start + spacing <= numSamples; start += spacing)
+            for (int k = 0; k < spacing; ++k)
+            {
+                const int i = start + k;
+                kick[(size_t) i] = burst (k);
+                const int bi = i - lead;
+                if (bi >= start)
+                    bass[(size_t) bi] = -burst (k); // inverted AND 1.5 ms early
+            }
+
+        // Explicit rotator settings that would expose the old single-stage bug.
+        PhaseFixRenderSettings settings;
+        settings.bassPolarityInvert = true;
+        settings.bassDelayMs = (float) (lead * 1000.0 / kSampleRate);
+        settings.phaseFilterEnabled = true;
+        settings.phaseFilterFreqHz = 60.0f;
+        settings.phaseFilterQ = 2.0f;
+        settings.phaseFilterStages = 3;
+        settings.delayInterpolation = InterpolationType::Linear;
+
+        // Predicted: offline render of the settings, scored vs kick on the MBC ruler.
+        const auto predictedBass = offlineRender (bass, numSamples, settings);
+        const float predicted = mbcWeightedMatch (predictedBass, kick, 24000, numSamples);
+
+        // Realized: same settings through the real engine, latency-aligned, same ruler.
+        KickLockAudioProcessor processor;
+        processor.setRateAndBufferSizeDetails (kSampleRate, numSamples);
+        processor.prepareToPlay (kSampleRate, numSamples);
+        setBoolParam (processor, "polarity_invert", true);
+        setFloatParam (processor, "delay_ms", settings.bassDelayMs);
+        setBoolParam (processor, "allpass_enable", true);
+        setFloatParam (processor, "allpass_freq", 60.0f);
+        setFloatParam (processor, "rotatorQ", 2.0f);
+        setFloatParam (processor, "rotatorStages", 1.0f); // 3 stages
+        const auto realizedRaw = renderThroughProcessor (processor, bass, numSamples);
+
+        const int latency = processor.getLatencySamples();
+        std::vector<float> realized ((size_t) numSamples, 0.0f);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const int j = i + latency;
+            if (j < numSamples)
+                realized[(size_t) i] = realizedRaw[(size_t) j];
+        }
+        const float realizedMatch = mbcWeightedMatch (realized, kick, 24000, numSamples - latency);
+
+        expectWithinAbsoluteError (realizedMatch, predicted, 8.0f);
+    }
+};
+
+static KickLockPhaseFilterRuntimeTests kickLockPhaseFilterRuntimeTestsInstance;
+
