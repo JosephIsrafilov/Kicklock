@@ -459,28 +459,22 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
     g.drawLine ((float) topBar.getX(), (float) topBar.getBottom(),
                 (float) topBar.getRight(), (float) topBar.getBottom(), 1.0f);
 
-    auto barInner = topBar.reduced (14, 8);
+    auto barInner = topBar.reduced (14, 6);
+    auto infoRow = barInner.removeFromTop (20);
 
     g.setColour (text);
-    g.setFont (juce::Font (juce::FontOptions (22.0f)).boldened());
-    g.drawText ("KICKLOCK", barInner.removeFromLeft (150),
+    g.setFont (juce::Font (juce::FontOptions (18.0f)).boldened());
+    g.drawText ("KICKLOCK", infoRow.removeFromLeft (124),
                 juce::Justification::centredLeft);
 
-    g.setColour (mutedText);
-    g.setFont (juce::Font (juce::FontOptions (10.5f)));
-    g.drawText ("v0.2-dev Visual Manual Build",
-                juce::Rectangle<int> (barInner.getX(), topBar.getBottom() - 20, 200, 14),
-                juce::Justification::centredLeft);
-
-    // Status block: sidechain state (top), BPM + PDC (bottom).
-    auto statusArea = barInner.removeFromLeft (240);
     g.setColour (sidechainStatusColour);
-    g.setFont (juce::Font (juce::FontOptions (14.0f)).boldened());
-    g.drawText (sidechainStatusText, statusArea.removeFromTop (statusArea.getHeight() / 2),
+    g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+    g.drawText (sidechainStatusText, infoRow.removeFromLeft (168),
                 juce::Justification::centredLeft);
+
     g.setColour (mutedText);
     g.setFont (juce::Font (juce::FontOptions (11.0f)));
-    g.drawText (bpmText + "   |   " + pdcText, statusArea,
+    g.drawText (bpmText + "   |   " + pdcText, infoRow,
                 juce::Justification::centredLeft);
 
     // --- Lower panel backgrounds (geometry set in resized) -----------------
@@ -543,33 +537,34 @@ void KickLockAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
 
-    // --- Top bar (right side: grid, view, analyze, apply) ------------------
-    auto topBar = bounds.removeFromTop (kTopBarHeight).reduced (14, 12);
+    // --- Top bar -----------------------------------------------------------
+    auto topBar = bounds.removeFromTop (kTopBarHeight).reduced (14, 6);
+    auto controls = topBar.removeFromBottom (30);
 
-    helpButton.setBounds (topBar.removeFromRight (34).reduced (0, 2));
-    topBar.removeFromRight (8);
-    applyFixButton.setBounds (topBar.removeFromRight (96).reduced (0, 2));
-    topBar.removeFromRight (8);
-    revertButton.setBounds (topBar.removeFromRight (78).reduced (0, 2));
-    topBar.removeFromRight (8);
-    analyzeButton.setBounds (topBar.removeFromRight (96).reduced (0, 2));
-    topBar.removeFromRight (16);
-    compareCopyButton.setBounds (topBar.removeFromRight (58).reduced (0, 2));
-    topBar.removeFromRight (6);
-    compareBButton.setBounds (topBar.removeFromRight (34).reduced (0, 2));
-    topBar.removeFromRight (4);
-    compareAButton.setBounds (topBar.removeFromRight (34).reduced (0, 2));
-    topBar.removeFromRight (14);
-    viewCombo.setBounds (topBar.removeFromRight (110).reduced (0, 4));
-    topBar.removeFromRight (8);
-    gridCombo.setBounds (topBar.removeFromRight (80).reduced (0, 4));
+    gridCombo.setBounds (controls.removeFromLeft (68).reduced (0, 3));
+    controls.removeFromLeft (5);
+    viewCombo.setBounds (controls.removeFromLeft (96).reduced (0, 3));
+    controls.removeFromLeft (10);
+    compareAButton.setBounds (controls.removeFromLeft (30).reduced (0, 2));
+    controls.removeFromLeft (4);
+    compareBButton.setBounds (controls.removeFromLeft (30).reduced (0, 2));
+    controls.removeFromLeft (4);
+    compareCopyButton.setBounds (controls.removeFromLeft (48).reduced (0, 2));
+    controls.removeFromLeft (10);
+    analyzeButton.setBounds (controls.removeFromLeft (170).reduced (0, 2));
+    controls.removeFromLeft (6);
+    applyFixButton.setBounds (controls.removeFromLeft (82).reduced (0, 2));
+    controls.removeFromLeft (6);
+    revertButton.setBounds (controls.removeFromLeft (64).reduced (0, 2));
+    controls.removeFromLeft (6);
+    helpButton.setBounds (controls.removeFromLeft (30).reduced (0, 2));
 
     bounds.reduce (14, 12);
 
     // --- Live hero + scope overlays ---------------------------------------
-    const int scopeBlockHeight = juce::jlimit (220, 300, bounds.getHeight() - 270);
+    const int scopeBlockHeight = juce::jlimit (222, 320, bounds.getHeight() - 226);
     auto scopeBlock = bounds.removeFromTop (scopeBlockHeight);
-    correlationDisplay.setBounds (scopeBlock.removeFromTop (96));
+    correlationDisplay.setBounds (scopeBlock.removeFromTop (108));
     scopeBlock.removeFromTop (6);
     auto scopeArea = scopeBlock;
     oscilloscope.setBounds (scopeArea);
@@ -597,50 +592,50 @@ void KickLockAudioProcessorEditor::resized()
     manualHeader.setBounds (manualArea.removeFromTop (20));
     manualArea.removeFromTop (4);
 
-    auto row1 = manualArea.removeFromTop (118);
-    const int knobW = 110;
+    auto row1 = manualArea.removeFromTop (88);
+    const int knobW = juce::jlimit (88, 110, (manualArea.getWidth() - 24) / 4);
 
     auto delayCell = row1.removeFromLeft (knobW);
-    delayLabel.setBounds (delayCell.removeFromTop (16));
+    delayLabel.setBounds (delayCell.removeFromTop (14));
     delaySlider.setBounds (delayCell);
 
     row1.removeFromLeft (8);
     auto freqCell = row1.removeFromLeft (knobW);
-    phaseFreqLabel.setBounds (freqCell.removeFromTop (16));
+    phaseFreqLabel.setBounds (freqCell.removeFromTop (14));
     phaseFreqSlider.setBounds (freqCell);
 
     row1.removeFromLeft (8);
     auto qCell = row1.removeFromLeft (knobW);
-    phaseQLabel.setBounds (qCell.removeFromTop (16));
+    phaseQLabel.setBounds (qCell.removeFromTop (14));
     phaseQSlider.setBounds (qCell);
 
     row1.removeFromLeft (8);
     auto visualCell = row1.removeFromLeft (knobW);
-    visualOffsetLabel.setBounds (visualCell.removeFromTop (16));
+    visualOffsetLabel.setBounds (visualCell.removeFromTop (14));
     visualOffsetSlider.setBounds (visualCell);
 
-    manualArea.removeFromTop (8);
-    auto row2 = manualArea.removeFromTop (56);
+    manualArea.removeFromTop (4);
+    auto row2 = manualArea.removeFromTop (42);
     auto polCell = row2.removeFromLeft (knobW * 2 + 8);
-    polarityLabel.setBounds (polCell.removeFromTop (16));
-    polarityInvertButton.setBounds (polCell.removeFromTop (28));
+    polarityLabel.setBounds (polCell.removeFromTop (14));
+    polarityInvertButton.setBounds (polCell.removeFromTop (24));
 
     row2.removeFromLeft (8);
     auto phCell = row2.removeFromLeft (knobW * 2);
-    phaseFilterLabel.setBounds (phCell.removeFromTop (16));
-    phaseFilterButton.setBounds (phCell.removeFromTop (28));
+    phaseFilterLabel.setBounds (phCell.removeFromTop (14));
+    phaseFilterButton.setBounds (phCell.removeFromTop (24));
 
-    manualArea.removeFromTop (10);
-    advancedHeader.setBounds (manualArea.removeFromTop (18));
+    manualArea.removeFromTop (4);
+    advancedHeader.setBounds (manualArea.removeFromTop (16));
     manualArea.removeFromTop (2);
-    auto advRow = manualArea.removeFromTop (44);
+    auto advRow = manualArea.removeFromTop (34);
     auto interpCell = advRow.removeFromLeft (knobW * 2 + 8);
-    delayInterpLabel.setBounds (interpCell.removeFromTop (16));
-    delayInterpCombo.setBounds (interpCell.removeFromTop (24).reduced (0, 2));
+    delayInterpLabel.setBounds (interpCell.removeFromTop (12));
+    delayInterpCombo.setBounds (interpCell.removeFromTop (22).reduced (0, 1));
     advRow.removeFromLeft (8);
     auto stagesCell = advRow.removeFromLeft (knobW * 2);
-    phaseStagesLabel.setBounds (stagesCell.removeFromTop (16));
-    phaseStagesCombo.setBounds (stagesCell.removeFromTop (24).reduced (0, 2));
+    phaseStagesLabel.setBounds (stagesCell.removeFromTop (12));
+    phaseStagesCombo.setBounds (stagesCell.removeFromTop (22).reduced (0, 1));
 
     // Right column: analyzer explanation.
     analyzerTitle.setBounds (right.removeFromTop (20));

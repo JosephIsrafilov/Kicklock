@@ -860,7 +860,11 @@ private:
     void setParameter (const char* id, float value)
     {
         if (auto* parameter = owner.apvts.getParameter (id))
+        {
+            parameter->beginChangeGesture();
             parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+            parameter->endChangeGesture();
+        }
     }
 
     KickLockAudioProcessor& owner;

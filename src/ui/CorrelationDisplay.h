@@ -46,17 +46,18 @@ public:
         g.setColour (accent.withAlpha (0.58f));
         g.drawRoundedRectangle (bounds, 7.0f, 1.1f);
 
-        auto area = bounds.reduced (12.0f, 8.0f);
+        auto area = bounds.reduced (10.0f, 6.0f);
+        const bool drawDetails = detailsVisible && area.getHeight() >= 86.0f;
 
-        auto top = area.removeFromTop (detailsVisible ? 72.0f : area.getHeight());
+        auto top = area.removeFromTop (drawDetails ? 56.0f : area.getHeight());
         g.setColour (juce::Colour (0xff97a5b2));
-        g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-        g.drawText ("LIVE MATCH", top.removeFromTop (14.0f).toNearestInt(), juce::Justification::centred);
+        g.setFont (juce::Font (juce::FontOptions (10.5f)).boldened());
+        g.drawText ("LIVE MATCH", top.removeFromTop (12.0f).toNearestInt(), juce::Justification::centred);
 
         g.setColour (accent);
-        g.setFont (juce::Font (juce::FontOptions (48.0f)).boldened());
+        g.setFont (juce::Font (juce::FontOptions (drawDetails ? 42.0f : 48.0f)).boldened());
         g.drawText (juce::String ((int) std::round (pct)) + "%",
-                    top.removeFromTop (48.0f).toNearestInt(),
+                    top.toNearestInt(),
                     juce::Justification::centred);
 
         if (displayAppliedBeforePercent >= 0.0f)
@@ -81,17 +82,17 @@ public:
                     detailsToggleBounds,
                     juce::Justification::centredLeft);
 
-        if (! detailsVisible)
+        if (! drawDetails)
             return;
 
-        area.removeFromTop (4.0f);
-        auto summary = area.removeFromTop (20.0f);
+        area.removeFromTop (2.0f);
+        auto summary = area.removeFromTop (14.0f);
         drawSummaryCell (g, summary.removeFromLeft (summary.getWidth() / 3.0f), "WTD", displayWeightedPercent);
         drawSummaryCell (g, summary.removeFromLeft (summary.getWidth() / 2.0f), "LOW", displayLowEndPercent);
         drawSummaryCell (g, summary, "BROAD", displayBroadbandPercent);
 
-        area.removeFromTop (5.0f);
-        auto bands = area.removeFromTop (26.0f);
+        area.removeFromTop (3.0f);
+        auto bands = area.removeFromTop (20.0f);
         const float gap = 6.0f;
         const float cellW = (bands.getWidth() - gap * 3.0f) / 4.0f;
         for (int i = 0; i < PhaseBands::numBands; ++i)
