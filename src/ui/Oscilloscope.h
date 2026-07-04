@@ -14,7 +14,9 @@
 // a freeze toggle stops the scroll so the waveform can be inspected, and
 // time/amplitude zoom (sliders or mouse wheel) let you inspect alignment
 // closely.
-class Oscilloscope : public juce::Component, private juce::Timer
+class Oscilloscope : public juce::Component,
+                     public juce::SettableTooltipClient,
+                     private juce::Timer
 {
 public:
     Oscilloscope (ScopeFifo& fifoToRead, const HitCaptureBuffer& hitCaptureToRead);

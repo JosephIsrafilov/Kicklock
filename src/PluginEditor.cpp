@@ -19,7 +19,6 @@ namespace
     const auto amber      = juce::Colour (0xfff59e0b);
 
     constexpr int kTopBarHeight = 62;
-    constexpr int kScopeHeight   = 260;
 }
 
 KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcessor& p)
@@ -28,7 +27,9 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
       oscilloscope (p.scopeFifo, p.getTriggeredHitCapture()),
       correlationDisplay (p.liveMultiBandMatchPercent,
                           p.liveLowEndMatchPercent,
-                          p.liveBroadbandMatchPercent)
+                          p.liveBroadbandMatchPercent,
+                          p.liveBandMatchPercent,
+                          p.latestAppliedBeforePercent)
 {
     setLookAndFeel (&lookAndFeel);
     sidechainStatusColour = mutedText;
@@ -36,10 +37,13 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     // --- Top bar controls --------------------------------------------------
     configureCombo (gridCombo, { "1/4", "1/8", "1/16", "1/32", "Bar", "ms" });
     configureCombo (viewCombo, { "Triggered", "Phase Delta", "Overlay", "Separate" });
+    gridCombo.setTooltip ("Sets the scope time grid.");
+    viewCombo.setTooltip ("Chooses triggered or scrolling scope display.");
 
     analyzeButton.setButtonText ("Analyze");
     analyzeButton.setColour (juce::TextButton::buttonColourId, teal);
     analyzeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
+    analyzeButton.setTooltip ("Captures the current kick and bass loop and recommends a bass-path correction.");
     analyzeButton.setEnabled (false);
     analyzeButton.onClick = [this]
     {
@@ -61,11 +65,42 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     applyFixButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
     applyFixButton.setEnabled (false);
     applyFixButton.onClick = [this] { audioProcessor.applyLatestFix(); };
+    applyFixButton.setTooltip ("Applies the latest analyzer correction to the bass-path controls.");
     addAndMakeVisible (applyFixButton);
+
+    revertButton.setButtonText ("Revert");
+    revertButton.setColour (juce::TextButton::buttonColourId, panel);
+    revertButton.setColour (juce::TextButton::textColourOffId, text);
+    revertButton.setEnabled (false);
+    revertButton.onClick = [this] { audioProcessor.revertLatestFix(); };
+    revertButton.setTooltip ("Restores the bass-path settings that were active before Apply Fix.");
+    addAndMakeVisible (revertButton);
+
+    compareAButton.setButtonText ("A");
+    compareAButton.setTooltip ("Switches to compare slot A.");
+    compareAButton.onClick = [this] { audioProcessor.selectCompareSlot (0); refreshCompareButtons(); };
+    addAndMakeVisible (compareAButton);
+
+    compareBButton.setButtonText ("B");
+    compareBButton.setTooltip ("Switches to compare slot B.");
+    compareBButton.onClick = [this] { audioProcessor.selectCompareSlot (1); refreshCompareButtons(); };
+    addAndMakeVisible (compareBButton);
+
+    compareCopyButton.setButtonText ("Copy");
+    compareCopyButton.setTooltip ("Copies the active compare slot to the other slot.");
+    compareCopyButton.onClick = [this] { audioProcessor.copyActiveCompareSlotToOther(); refreshCompareButtons(); };
+    addAndMakeVisible (compareCopyButton);
+
+    helpButton.setButtonText ("?");
+    helpButton.setTooltip ("Shows sidechain routing steps for common DAWs.");
+    helpButton.onClick = [this] { helpOverlayVisible = ! helpOverlayVisible; repaint(); };
+    addAndMakeVisible (helpButton);
 
     // --- Centre scope + live match ----------------------------------------
     addAndMakeVisible (oscilloscope);
+    oscilloscope.setTooltip ("Triggered mode: drag left/right to nudge Delay. Shift-drag uses fine steps; double-click resets Delay.");
     addAndMakeVisible (correlationDisplay);
+    correlationDisplay.setTooltip ("Live match. Click Details to collapse or expand the detailed meters.");
 
     // Scope overlays draw on top of the scope (added after it).
     auto configureOverlay = [this] (juce::Label& label, juce::Justification just, juce::Colour colour)
@@ -140,7 +175,9 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     advancedHeader.setColour (juce::Label::textColourId, mutedText.withAlpha (0.7f));
 
     configureCombo (delayInterpCombo, { "Linear", "Allpass" });
+    delayInterpCombo.setTooltip ("Chooses the fractional-delay interpolation used by Analyze and manual delay.");
     configureCombo (phaseStagesCombo, { "2", "3", "4" });
+    phaseStagesCombo.setTooltip ("Number of cascaded allpass stages used by the phase filter.");
     configureControlLabel (delayInterpLabel, "Delay Interp");
     configureControlLabel (phaseStagesLabel, "Phase Stages");
 
@@ -178,7 +215,15 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
     pushScopeSettings();
 
-    setSize (1000, 680);
+    resizeConstrainer.setSizeLimits (800, 544, 1500, 1020);
+    resizeConstrainer.setFixedAspectRatio (1000.0 / 680.0);
+    setConstrainer (&resizeConstrainer);
+    setResizable (true, true);
+
+    const int savedWidth = (int) audioProcessor.apvts.state.getProperty ("editorWidth", 1000);
+    const int savedHeight = (int) audioProcessor.apvts.state.getProperty ("editorHeight", 680);
+    setSize (juce::jlimit (800, 1500, savedWidth),
+             juce::jlimit (544, 1020, savedHeight));
     startTimerHz (30);
 }
 
@@ -240,14 +285,14 @@ void KickLockAudioProcessorEditor::refreshStatusStrings()
 {
     hasSidechain = audioProcessor.hasSidechainReference();
 
-    const auto status = classifyAnalysisMaterialStatus (hasSidechain,
-                                                        audioProcessor.isKickActive(),
-                                                        audioProcessor.isBassActive(),
-                                                        audioProcessor.isAnalysisSignalUsable(),
-                                                        audioProcessor.hasEnoughMaterialForAnalysis());
-    canStartAnalyze = analysisStatusCanStartAnalyze (status);
+    latestMaterialStatus = classifyAnalysisMaterialStatus (hasSidechain,
+                                                           audioProcessor.isKickActive(),
+                                                           audioProcessor.isBassActive(),
+                                                           audioProcessor.isAnalysisSignalUsable(),
+                                                           audioProcessor.hasEnoughMaterialForAnalysis());
+    canStartAnalyze = analysisStatusCanStartAnalyze (latestMaterialStatus);
 
-    switch (status)
+    switch (latestMaterialStatus)
     {
         case AnalysisMaterialStatus::WaitingForSidechain:
             sidechainStatusText = "NO SIDECHAIN"; sidechainStatusColour = mutedText; break;
@@ -286,7 +331,8 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
     const auto state = audioProcessor.getAnalyzeState();
     const bool busy = analyzeStateIsBusy (state);
 
-    analyzeButton.setButtonText (analyzeStateButtonText (state));
+    analyzeButton.setButtonText (busy ? analyzeStateButtonText (state)
+                                      : juce::String (analyzeButtonTextForStatus (latestMaterialStatus)));
     analyzeButton.setEnabled (! busy && canStartAnalyze);
 
     if (busy)
@@ -364,6 +410,24 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
 
     const bool canApply = applyFixAvailable (hasSidechain, haveResult);
     applyFixButton.setEnabled (canApply);
+    revertButton.setEnabled (audioProcessor.hasRevertSnapshot());
+}
+
+void KickLockAudioProcessorEditor::refreshCompareButtons()
+{
+    const int activeSlot = audioProcessor.getActiveCompareSlot();
+    auto styleSlot = [] (juce::TextButton& button, bool active)
+    {
+        button.setColour (juce::TextButton::buttonColourId, active ? teal : panel);
+        button.setColour (juce::TextButton::textColourOffId, active ? juce::Colours::black : text);
+    };
+
+    styleSlot (compareAButton, activeSlot == 0);
+    styleSlot (compareBButton, activeSlot == 1);
+    compareCopyButton.setColour (juce::TextButton::buttonColourId, panel);
+    compareCopyButton.setColour (juce::TextButton::textColourOffId, text);
+    helpButton.setColour (juce::TextButton::buttonColourId, helpOverlayVisible ? orange : panel);
+    helpButton.setColour (juce::TextButton::textColourOffId, helpOverlayVisible ? juce::Colours::black : text);
 }
 
 void KickLockAudioProcessorEditor::timerCallback()
@@ -376,6 +440,7 @@ void KickLockAudioProcessorEditor::timerCallback()
 
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
+    refreshCompareButtons();
 
     repaint();
 }
@@ -433,6 +498,47 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
     drawPanel (analyzerPanelBounds);
 }
 
+void KickLockAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
+{
+    if (! helpOverlayVisible)
+        return;
+
+    auto bounds = getLocalBounds().reduced (70, 64);
+    g.setColour (juce::Colours::black.withAlpha (0.58f));
+    g.fillAll();
+
+    g.setColour (panel);
+    g.fillRoundedRectangle (bounds.toFloat(), 8.0f);
+    g.setColour (orange.withAlpha (0.8f));
+    g.drawRoundedRectangle (bounds.toFloat(), 8.0f, 1.4f);
+
+    auto area = bounds.reduced (22, 18);
+    g.setColour (text);
+    g.setFont (juce::Font (juce::FontOptions (20.0f)).boldened());
+    g.drawText ("Kick to Sidechain", area.removeFromTop (28), juce::Justification::centredLeft);
+
+    g.setColour (mutedText);
+    g.setFont (juce::Font (juce::FontOptions (12.5f)));
+
+    const juce::StringArray lines {
+        "Ableton Live: Drop KickLock on the bass track, open Sidechain in the device header, choose the kick track.",
+        "FL Studio: Put KickLock on the bass mixer insert, route the kick insert to it with Sidechain to this track, select that input in the wrapper.",
+        "Logic Pro: Insert KickLock on bass, enable the plug-in sidechain menu, choose the kick track or bus.",
+        "Cubase: Insert KickLock on bass, activate sidechain in the plug-in header, send the kick channel to that sidechain.",
+        "Reaper: Put KickLock on bass, route kick channels 1/2 to bass channels 3/4, keep bass audio on 1/2."
+    };
+
+    for (const auto& line : lines)
+    {
+        g.drawFittedText (line, area.removeFromTop (44), juce::Justification::centredLeft, 2);
+        area.removeFromTop (4);
+    }
+
+    g.setColour (orange);
+    g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+    g.drawText ("Press ? to close", area.removeFromBottom (18), juce::Justification::centredRight);
+}
+
 void KickLockAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
@@ -440,18 +546,32 @@ void KickLockAudioProcessorEditor::resized()
     // --- Top bar (right side: grid, view, analyze, apply) ------------------
     auto topBar = bounds.removeFromTop (kTopBarHeight).reduced (14, 12);
 
+    helpButton.setBounds (topBar.removeFromRight (34).reduced (0, 2));
+    topBar.removeFromRight (8);
     applyFixButton.setBounds (topBar.removeFromRight (96).reduced (0, 2));
+    topBar.removeFromRight (8);
+    revertButton.setBounds (topBar.removeFromRight (78).reduced (0, 2));
     topBar.removeFromRight (8);
     analyzeButton.setBounds (topBar.removeFromRight (96).reduced (0, 2));
     topBar.removeFromRight (16);
+    compareCopyButton.setBounds (topBar.removeFromRight (58).reduced (0, 2));
+    topBar.removeFromRight (6);
+    compareBButton.setBounds (topBar.removeFromRight (34).reduced (0, 2));
+    topBar.removeFromRight (4);
+    compareAButton.setBounds (topBar.removeFromRight (34).reduced (0, 2));
+    topBar.removeFromRight (14);
     viewCombo.setBounds (topBar.removeFromRight (110).reduced (0, 4));
     topBar.removeFromRight (8);
     gridCombo.setBounds (topBar.removeFromRight (80).reduced (0, 4));
 
     bounds.reduce (14, 12);
 
-    // --- Centre scope + overlays ------------------------------------------
-    auto scopeArea = bounds.removeFromTop (kScopeHeight);
+    // --- Live hero + scope overlays ---------------------------------------
+    const int scopeBlockHeight = juce::jlimit (220, 300, bounds.getHeight() - 270);
+    auto scopeBlock = bounds.removeFromTop (scopeBlockHeight);
+    correlationDisplay.setBounds (scopeBlock.removeFromTop (96));
+    scopeBlock.removeFromTop (6);
+    auto scopeArea = scopeBlock;
     oscilloscope.setBounds (scopeArea);
 
     noSidechainOverlay.setBounds (scopeArea.withSizeKeepingCentre (scopeArea.getWidth(), 24));
@@ -522,9 +642,10 @@ void KickLockAudioProcessorEditor::resized()
     phaseStagesLabel.setBounds (stagesCell.removeFromTop (16));
     phaseStagesCombo.setBounds (stagesCell.removeFromTop (24).reduced (0, 2));
 
-    // Right column: live match on top, analyzer explanation below.
-    correlationDisplay.setBounds (right.removeFromTop (150));
-    right.removeFromTop (10);
+    // Right column: analyzer explanation.
     analyzerTitle.setBounds (right.removeFromTop (20));
     analyzerBody.setBounds (right);
+
+    audioProcessor.apvts.state.setProperty ("editorWidth", getWidth(), nullptr);
+    audioProcessor.apvts.state.setProperty ("editorHeight", getHeight(), nullptr);
 }

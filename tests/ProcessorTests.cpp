@@ -215,6 +215,121 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 100.0f, 0.01f);
         }
 
+        beginTest ("Apply Fix snapshots previous settings and Revert restores them");
+        {
+            KickLockAudioProcessor processor;
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            setFloatParam (processor, "delay_ms", -3.25f);
+            setFloatParam (processor, "delayMs", -3.25f);
+            setBoolParam (processor, "polarity_invert", true);
+            setBoolParam (processor, "polarityInvert", true);
+            setBoolParam (processor, "allpass_enable", true);
+            setBoolParam (processor, "phaseFilterEnabled", true);
+            setFloatParam (processor, "allpass_freq", 220.0f);
+            setFloatParam (processor, "rotatorFreq", 220.0f);
+            setFloatParam (processor, "rotatorQ", 3.5f);
+            setFloatParam (processor, "rotatorStages", 2.0f);
+
+            PhaseFixResult fix;
+            fix.valid = true;
+            fix.enoughSignal = true;
+            fix.bassPolarityInvert = false;
+            fix.bassDelayMs = 1.5f;
+            fix.phaseFilterEnabled = true;
+            fix.phaseFilterFreqHz = 60.0f;
+            fix.phaseFilterQ = 2.0f;
+            fix.phaseFilterStages = 3;
+            fix.beforeMatchPercent = 42.0f;
+            fix.afterMatchPercent = 91.0f;
+            fix.improvementPercent = 49.0f;
+            fix.confidence = 0.9f;
+            PhaseFixEngine::updateDerivedResultFields (fix);
+            processor.setLatestFixResultForTesting (fix);
+
+            expect (! processor.hasRevertSnapshot());
+            expect (processor.applyLatestFix());
+            expect (processor.hasRevertSnapshot());
+            expectWithinAbsoluteError (processor.latestAppliedBeforePercent.load(), 42.0f, 1.0e-7f);
+
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 1.5f, 0.02f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 60.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 2.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 1.0f, 1.0e-7f);
+
+            expect (processor.revertLatestFix());
+            expect (! processor.hasRevertSnapshot());
+            expectWithinAbsoluteError (processor.latestAppliedBeforePercent.load(), -1.0f, 1.0e-7f);
+
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), -3.25f, 0.02f);
+            expectWithinAbsoluteError (rawParam (processor, "delayMs"), -3.25f, 0.02f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "polarityInvert"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 220.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 220.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 3.5f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 2.0f, 1.0e-7f);
+            expect (! processor.revertLatestFix());
+        }
+
+        beginTest ("A/B compare slots save, switch, and copy bass-path settings");
+        {
+            KickLockAudioProcessor processor;
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            setFloatParam (processor, "delay_ms", 1.0f);
+            setBoolParam (processor, "polarity_invert", false);
+            processor.selectCompareSlot (1);
+            expectEquals (processor.getActiveCompareSlot(), 1);
+
+            setFloatParam (processor, "delay_ms", 4.0f);
+            setBoolParam (processor, "polarity_invert", true);
+            processor.selectCompareSlot (0);
+            expectEquals (processor.getActiveCompareSlot(), 0);
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 1.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
+
+            processor.selectCompareSlot (1);
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 4.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 1.0f, 1.0e-7f);
+
+            processor.copyActiveCompareSlotToOther();
+            processor.selectCompareSlot (0);
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 4.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 1.0f, 1.0e-7f);
+        }
+
+        beginTest ("Factory presets expose four programs and apply expected settings");
+        {
+            KickLockAudioProcessor processor;
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            expectEquals (processor.getNumPrograms(), 4);
+            expectEquals (processor.getProgramName (0), juce::String ("Tight EDM"));
+            expectEquals (processor.getProgramName (1), juce::String ("Deep House Sub"));
+            expectEquals (processor.getProgramName (2), juce::String ("Trap 808"));
+            expectEquals (processor.getProgramName (3), juce::String ("Neutral"));
+
+            processor.setCurrentProgram (1);
+            expectEquals (processor.getCurrentProgram(), 1);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 55.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 2.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 1.0f, 1.0e-7f);
+
+            processor.setCurrentProgram (3);
+            expectEquals (processor.getCurrentProgram(), 3);
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 0.0f, 1.0e-7f);
+        }
+
         beginTest ("Apply Fix enables phase filter and writes rotator settings when recommended");
         {
             KickLockAudioProcessor processor;

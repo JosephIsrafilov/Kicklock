@@ -1,166 +1,111 @@
 # KickLock
 
-KickLock is an open-source kick/bass phase alignment plugin focused on visual
-manual alignment with optional automatic assistance.
+KickLock is an open-source JUCE plugin for visually aligning kick and bass phase.
+It processes the bass on the main input, reads the kick from the sidechain, and
+shows a trigger-locked oscilloscope plus a live low-end match score.
 
-It puts a large oscilloscope at the center of the interface so you can *see* how
-your kick and bass line up in the low end, then correct that relationship by
-hand — delay, polarity, and a phase-rotating filter — with an Analyze helper
-that recommends settings and explains what it found. Nothing is hidden behind a
-single "fix it" button: the manual controls are always live, and Analyze only
-ever recommends.
+![Routing GIF placeholder](docs/routing-placeholder.gif)
 
-- **Format:** VST3 / AU / Standalone (JUCE 8, C++20)
-- **Platforms:** Windows, macOS
-- **Input model:** bass on the main input, kick on the sidechain
+## What It Does
 
----
+- Shows kick-triggered bass and kick waveforms so each hit stands still on the scope.
+- Measures a multi-band, low-end-weighted phase match from 20 Hz to 500 Hz.
+- Lets you adjust bass delay, polarity, and an allpass phase filter by hand.
+- Can Analyze recent kick hits and recommend delay, polarity, frequency, Q, and stage settings.
+- Supports A/B compare slots, Revert after Apply Fix, and four factory presets.
 
-## What KickLock does
+## Routing
 
-When a kick and a bass note occupy the same low-frequency range at the same
-time, their waveforms can partially or fully cancel, leaving the low end weak or
-inconsistent. KickLock helps you line up the bass to the kick so they reinforce
-each other instead of fighting.
+KickLock has two inputs:
 
-It continuously measures a multi-band, low-end-weighted **phase match** between
-the two signals and draws both waveforms on a shared oscilloscope. You correct
-the relationship with three tools — a signed **Delay**, a **Polarity** flip, and
-an all-pass **Phase Filter** — and watch the match improve in real time.
+1. Put KickLock on the bass track or bass bus. This is the audio it processes.
+2. Route the kick to KickLock's sidechain input. The kick is only a reference.
 
-## How to route kick and bass
+DAW notes:
 
-KickLock listens to two inputs:
+- Ableton Live: Drop KickLock on bass, open the device sidechain chooser, select the kick track.
+- FL Studio: Put KickLock on the bass mixer insert, route the kick insert with "Sidechain to this track", then select that input in the wrapper.
+- Logic Pro: Insert KickLock on bass, use the plugin sidechain menu, choose the kick track or bus.
+- Cubase: Insert KickLock on bass, enable the plugin sidechain, send the kick channel to it.
+- Reaper: Put KickLock on bass, route kick channels 1/2 to bass channels 3/4.
 
-1. **Main input — bass.** Insert KickLock on your bass track (or bus). This is
-   the signal KickLock actually processes and outputs.
-2. **Sidechain input — kick.** Route your kick to KickLock's sidechain input.
-   The kick is only used as a reference; it is never altered or passed to the
-   output.
+## Workflow
 
-The top bar shows the current routing state:
+1. Play a loop with bass on the main input and kick on the sidechain.
+2. Use the Triggered scope to watch the kick and bass around each hit.
+3. Drag horizontally on the scope, or use the Delay control, to nudge bass timing.
+4. Try Invert Polarity if the low end is cancelling.
+5. Use the Phase Filter for frequency-local phase conflicts that delay cannot fix cleanly.
+6. Press Analyze after a few hits, review the recommendation, then Apply Fix if it is useful.
+7. Use Revert to restore the settings that were active before Apply Fix.
 
-- `NO SIDECHAIN` — no kick is routed to the sidechain.
-- `WAITING FOR KICK` / `WAITING FOR BASS` — one side is silent.
-- `SIGNAL TOO LOW` — both are present but too quiet for a reliable read.
-- `SIDECHAIN ACTIVE` — both are playing and KickLock is comparing them.
+## Controls
 
-The oscilloscope stays visible even with no sidechain connected; it simply shows
-a reminder to route the kick.
+- Delay: signed bass timing offset from -20 ms to +20 ms. Negative values use host PDC headroom to advance the bass.
+- Polarity: flips bass polarity by 180 degrees.
+- Phase Filter: allpass phase rotation around the selected frequency.
+- Q / Stages: shape and depth of the phase rotation.
+- A / B: two processor-side compare slots for bass-path settings.
+- Copy: copies the active A/B slot into the other slot.
+- Details: expands or collapses the live weighted, low-end, broadband, and per-band match meters.
 
-## Manual workflow
+## Factory Presets
 
-The **MANUAL ALIGNMENT** section is always live — you never have to press
-Analyze to use it.
+- Tight EDM
+- Deep House Sub
+- Trap 808
+- Neutral
 
-1. Play the loop and watch the oscilloscope. In **Overlay** view the bass and
-   kick share a center line; in **Separate** view they get their own lanes; in
-   **Phase Delta** view the display emphasises where they reinforce (green) or
-   cancel (red).
-2. If the low end sounds hollow or thin, try **Invert Polarity** first — a full
-   cancellation often clears up instantly.
-3. Use **Delay** to slide the bass earlier or later until the waveforms line up
-   and the live match rises. The Δ read-out and peak markers on the scope help
-   you judge the offset.
-4. If a specific frequency region still conflicts, enable the **Phase Filter**
-   and set its frequency and Q to rotate phase around that region without moving
-   the whole signal in time.
+The presets are starting points for the bass-path controls. They do not replace
+manual listening or the Analyze workflow.
 
-## Auto-align workflow
+## KickLock vs. ReVision
 
-Analyze is an assistant, not a replacement for the manual controls.
+| Area | KickLock | ReVision |
+| --- | --- | --- |
+| License | GPL-3.0 open source | Commercial proprietary |
+| Core workflow | Triggered scope, manual controls, Analyze assistant | Commercial kick/bass phase alignment workflow |
+| Bass processing | Delay, polarity, allpass phase filter | Product-specific processing |
+| Scope | Trigger-locked hit display with ghost hits | Triggered visual alignment focus |
+| Cost | Free/open source | Paid |
 
-1. Let the loop play for a second or two so KickLock captures several kick hits.
-2. Press **Analyze**. KickLock searches recent kick hits for the best delay,
-   polarity, and phase-filter settings and scores the low-end match before and
-   after.
-3. Read the **Analyzer** panel. It reports the recommended Delay, Polarity, and
-   Phase Filter, a **Confidence** figure, a before → after low-end match, and a
-   short plain-language reason. It also warns when a large timing offset would
-   be better fixed by moving the clip in your DAW than by delaying the bass.
-4. If you like the recommendation, press **Apply Fix** to write it into the
-   manual controls. You can then fine-tune anything by hand. If you don't, just
-   ignore it — nothing changes until you apply.
-
-## What the controls mean
-
-### Delay
-Moves the bass earlier or later relative to the kick, from **−20.00 ms to
-+20.00 ms**.
-
-- Negative values *advance* the bass (make it earlier).
-- Positive values *delay* the bass (make it later).
-
-Because audio can't literally be moved earlier, KickLock reports a fixed 20 ms
-of latency to your host (see PDC) and shifts within that headroom, so a negative
-Delay is achieved without ever running a negative delay line.
-
-### Polarity
-**Invert Polarity** flips the bass by 180°. Use it when the kick and bass are
-cancelling each other — an inverted bass that was subtracting from the kick will
-start adding to it.
-
-### Phase Filter
-An all-pass filter that **rotates phase around a chosen frequency without moving
-the whole signal in time**. Set the **Phase Freq** (20 Hz – 2 kHz) to the region
-where kick and bass conflict and adjust **Q** for how narrow that rotation is.
-Unlike Delay, this only changes phase near that frequency, so it can resolve a
-localised conflict without smearing the transient.
-
-The **Advanced** section adds Delay Interpolation (Linear / Allpass) and Phase
-Stages (2 / 3 / 4) for finer control; the defaults are fine for most material.
-
-### Visual Offset
-Moves **only the waveform display** left or right. This is a viewing aid for
-lining traces up by eye — it does **not** affect the audio in any way. Keep it
-separate in your mind from Delay: Delay changes what you hear, Visual Offset
-changes only what you see.
-
-### PDC (Plugin Delay Compensation)
-KickLock reports a fixed 20 ms of latency to your DAW so it has headroom to move
-the bass *earlier* as well as later. Your host compensates for this
-automatically, keeping everything in sync. The top bar shows the exact latency
-reported, in both samples and milliseconds.
-
-## Recommended use case
-
-Insert KickLock on a bass track and sidechain the kick to it in an
-electronic/hip-hop/pop context where a sustained bass and a tonal kick share the
-sub range. It's most useful on looped or repetitive material, where a consistent
-kick hit lets Analyze form a confident recommendation and where a stable
-low-end lock is most audible.
-
-## Limitations
-
-- KickLock processes **bass only**. It can recommend moving the kick, but it
-  cannot move it for you — the kick is a reference on the sidechain.
-- Analyze works best on repetitive loops with clear, consistent kick hits.
-  Very sparse, wildly varying, or extremely quiet material yields low
-  confidence.
-- Very large timing offsets (well beyond a few milliseconds) are better fixed by
-  moving the clip in your DAW timeline; KickLock will say so rather than apply an
-  unnaturally large delay.
-- The delay range is intentionally limited to ±20 ms. It is a phase-alignment
-  tool, not a general-purpose delay.
+KickLock is an original implementation. It does not use code, assets, presets,
+or proprietary behavior from ReVision or any other commercial plugin.
 
 ## Building
 
-KickLock uses CMake and fetches JUCE automatically.
+Requirements:
 
-```
+- CMake 3.22 or newer
+- A C++20 compiler
+- Network access for the first configure so CMake can fetch JUCE 8
+
+Configure and build:
+
+```sh
 cmake -B build
 cmake --build build --config Release
 ```
 
-Tests build as a console target and can be run directly:
+Build and run tests:
 
-```
+```sh
 cmake --build build --target KickLockDspTests --config Debug
 ./build/tests/Debug/KickLockDspTests
 ```
 
-## License / positioning
+On Windows with Visual Studio's bundled CMake, use the generated build directory
+and run the test executable directly if `ctest` is not on PATH.
 
-KickLock is an original, clean-room implementation of the kick/bass
-phase-alignment category. It is not a clone of, and contains no code or assets
-from, any commercial plugin.
+## Validation
+
+The intended release gate is:
+
+```sh
+pluginval --strictness-level 10 path/to/KickLock.vst3
+```
+
+## License
+
+KickLock is licensed under GPL-3.0. The project uses JUCE under GPL-compatible
+terms; distributing non-GPL builds requires satisfying JUCE's licensing terms.

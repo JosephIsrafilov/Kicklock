@@ -1042,6 +1042,9 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     latestBpm.store (0.0f);
     bassSignalRms.store (0.0f);
     kickSignalRms.store (0.0f);
+    for (auto& bandMatch : liveBandMatchPercent)
+        bandMatch.store (50.0f);
+    latestAppliedBeforePercent.store (-1.0f);
     correlationProductLpf = 0.0f;
     correlationMainEnergyLpf = 0.0f;
     correlationSideEnergyLpf = 0.0f;
@@ -1060,6 +1063,7 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
         lastAnalyzedBassWindow.clear();
         lastAnalyzedKickWindow.clear();
     }
+    revertSnapshotValid.store (false, std::memory_order_release);
 
     // Reset the Analyze state machine unless a background job is mid-flight
     // (leave a running/analyzing job to resolve itself so its terminal store
@@ -1342,6 +1346,9 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float activeMatch = hasSidechain ? activeMeter.getWeightedMatchPercent() : 50.0f;
     const float activeLowEnd = hasSidechain ? activeMeter.getLowEndMatchPercent() : 50.0f;
     const float activeBroad = hasSidechain ? activeMeter.getBroadbandMatchPercent() : 50.0f;
+    std::array<float, PhaseBands::numBands> activeBands {};
+    for (int band = 0; band < PhaseBands::numBands; ++band)
+        activeBands[(size_t) band] = hasSidechain ? activeMeter.getBandMatchPercent (band) : 50.0f;
 
     // Smooth the UI values with a slow ~500ms EMA to prevent the numbers from dancing too fast
     const float dt = (float)buffer.getNumSamples() / (float)getSampleRate();
@@ -1370,6 +1377,8 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothAtomic(liveLowEndMatchPercent, activeLowEnd);
     smoothAtomic(liveBroadbandMatchPercent, activeBroad);
     smoothAtomic(realtimeLowBandMatchPercent, activeLowEnd); // legacy alias (sub/low)
+    for (int band = 0; band < PhaseBands::numBands; ++band)
+        smoothAtomic (liveBandMatchPercent[(size_t) band], activeBands[(size_t) band]);
 
     uiSmoothingInitialized.store (true, std::memory_order_relaxed);
 
@@ -1413,29 +1422,215 @@ double KickLockAudioProcessor::getTailLengthSeconds() const
 
 int KickLockAudioProcessor::getNumPrograms()
 {
-    return 1;
+    return 4;
 }
 
 int KickLockAudioProcessor::getCurrentProgram()
 {
-    return 0;
+    return currentProgramIndex;
 }
 
-void KickLockAudioProcessor::setCurrentProgram (int /*index*/)
+void KickLockAudioProcessor::setCurrentProgram (int index)
 {
+    currentProgramIndex = juce::jlimit (0, getNumPrograms() - 1, index);
+    const auto preset = makeFactoryPresetSnapshot (currentProgramIndex);
+    restoreParameterSnapshot (preset);
+
+    initialiseCompareSlotsIfNeeded();
+    compareSlots[(size_t) activeCompareSlot.load (std::memory_order_acquire)] = preset;
+    writeCompareSlotsToState();
 }
 
-const juce::String KickLockAudioProcessor::getProgramName (int /*index*/)
+const juce::String KickLockAudioProcessor::getProgramName (int index)
 {
-    return {};
+    switch (index)
+    {
+        case 0:  return "Tight EDM";
+        case 1:  return "Deep House Sub";
+        case 2:  return "Trap 808";
+        case 3:  return "Neutral";
+        default: return {};
+    }
 }
 
 void KickLockAudioProcessor::changeProgramName (int /*index*/, const juce::String& /*newName*/)
 {
 }
 
+float KickLockAudioProcessor::readParameterValue (const char* id, float fallback) const
+{
+    if (auto* parameter = apvts.getParameter (id))
+        return parameter->convertFrom0to1 (parameter->getValue());
+
+    if (const auto* value = apvts.getRawParameterValue (id))
+        return value->load();
+
+    return fallback;
+}
+
+void KickLockAudioProcessor::setParameterValueWithGesture (const char* id, float value)
+{
+    if (auto* parameter = apvts.getParameter (id))
+    {
+        parameter->beginChangeGesture();
+        parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+        parameter->endChangeGesture();
+    }
+}
+
+KickLockAudioProcessor::ParameterSnapshot KickLockAudioProcessor::captureCurrentParameterSnapshot() const
+{
+    ParameterSnapshot snapshot;
+    snapshot.delayMs = readParameterValue ("delay_ms", readParameterValue ("delayMs", 0.0f));
+    snapshot.polarityInvert = readParameterValue ("polarity_invert", readParameterValue ("polarityInvert", 0.0f)) > 0.5f;
+    snapshot.phaseFilterEnabled = readParameterValue ("allpass_enable", readParameterValue ("phaseFilterEnabled", 0.0f)) > 0.5f;
+    snapshot.phaseFilterFreqHz = readParameterValue ("allpass_freq", readParameterValue ("rotatorFreq", 50.0f));
+    snapshot.phaseFilterQ = readParameterValue ("rotatorQ", 0.7f);
+    snapshot.phaseFilterStageIndex = juce::jlimit (0, 2, (int) std::lround (readParameterValue ("rotatorStages", 0.0f)));
+    return snapshot;
+}
+
+void KickLockAudioProcessor::restoreParameterSnapshot (const ParameterSnapshot& snapshot)
+{
+    setParameterValueWithGesture ("delay_ms", snapshot.delayMs);
+    setParameterValueWithGesture ("delayMs", snapshot.delayMs);
+    setParameterValueWithGesture ("polarity_invert", snapshot.polarityInvert ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("polarityInvert", snapshot.polarityInvert ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("allpass_enable", snapshot.phaseFilterEnabled ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("phaseFilterEnabled", snapshot.phaseFilterEnabled ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("allpass_freq", snapshot.phaseFilterFreqHz);
+    setParameterValueWithGesture ("rotatorFreq", snapshot.phaseFilterFreqHz);
+    setParameterValueWithGesture ("rotatorQ", snapshot.phaseFilterQ);
+    setParameterValueWithGesture ("rotatorStages", (float) snapshot.phaseFilterStageIndex);
+}
+
+KickLockAudioProcessor::ParameterSnapshot KickLockAudioProcessor::makeFactoryPresetSnapshot (int index)
+{
+    ParameterSnapshot preset;
+
+    switch (index)
+    {
+        case 0: // Tight EDM
+            preset.phaseFilterEnabled = true;
+            preset.phaseFilterFreqHz = 95.0f;
+            preset.phaseFilterQ = 1.2f;
+            preset.phaseFilterStageIndex = 0;
+            break;
+
+        case 1: // Deep House Sub
+            preset.phaseFilterEnabled = true;
+            preset.phaseFilterFreqHz = 55.0f;
+            preset.phaseFilterQ = 2.0f;
+            preset.phaseFilterStageIndex = 1;
+            break;
+
+        case 2: // Trap 808
+            preset.phaseFilterEnabled = true;
+            preset.phaseFilterFreqHz = 45.0f;
+            preset.phaseFilterQ = 1.4f;
+            preset.phaseFilterStageIndex = 2;
+            break;
+
+        case 3: // Neutral
+        default:
+            break;
+    }
+
+    return preset;
+}
+
+void KickLockAudioProcessor::initialiseCompareSlotsIfNeeded()
+{
+    if (compareSlotsInitialised)
+        return;
+
+    if (apvts.state.hasProperty ("compareSlot0DelayMs"))
+    {
+        loadCompareSlotsFromState();
+        return;
+    }
+
+    compareSlots[0] = captureCurrentParameterSnapshot();
+    compareSlots[1] = compareSlots[0];
+    compareSlotsInitialised = true;
+    writeCompareSlotsToState();
+}
+
+void KickLockAudioProcessor::loadCompareSlotsFromState()
+{
+    auto readSlot = [this] (int slot, const ParameterSnapshot& fallback)
+    {
+        const juce::String prefix = "compareSlot" + juce::String (slot);
+        ParameterSnapshot snapshot = fallback;
+        snapshot.delayMs = (float) apvts.state.getProperty (juce::Identifier (prefix + "DelayMs"), snapshot.delayMs);
+        snapshot.polarityInvert = (bool) apvts.state.getProperty (juce::Identifier (prefix + "Polarity"), snapshot.polarityInvert);
+        snapshot.phaseFilterEnabled = (bool) apvts.state.getProperty (juce::Identifier (prefix + "PhaseEnabled"), snapshot.phaseFilterEnabled);
+        snapshot.phaseFilterFreqHz = (float) apvts.state.getProperty (juce::Identifier (prefix + "FreqHz"), snapshot.phaseFilterFreqHz);
+        snapshot.phaseFilterQ = (float) apvts.state.getProperty (juce::Identifier (prefix + "Q"), snapshot.phaseFilterQ);
+        snapshot.phaseFilterStageIndex = juce::jlimit (0, 2, (int) apvts.state.getProperty (juce::Identifier (prefix + "StageIndex"), snapshot.phaseFilterStageIndex));
+        return snapshot;
+    };
+
+    const auto current = captureCurrentParameterSnapshot();
+    compareSlots[0] = readSlot (0, current);
+    compareSlots[1] = readSlot (1, current);
+    activeCompareSlot.store (juce::jlimit (0, 1, (int) apvts.state.getProperty ("compareActiveSlot", 0)),
+                             std::memory_order_release);
+    currentProgramIndex = juce::jlimit (0, getNumPrograms() - 1,
+                                        (int) apvts.state.getProperty ("currentProgramIndex", currentProgramIndex));
+    compareSlotsInitialised = true;
+}
+
+void KickLockAudioProcessor::writeCompareSlotsToState()
+{
+    apvts.state.setProperty ("compareActiveSlot", activeCompareSlot.load (std::memory_order_acquire), nullptr);
+    apvts.state.setProperty ("currentProgramIndex", currentProgramIndex, nullptr);
+
+    for (int slot = 0; slot < 2; ++slot)
+    {
+        const auto& snapshot = compareSlots[(size_t) slot];
+        const juce::String prefix = "compareSlot" + juce::String (slot);
+        apvts.state.setProperty (juce::Identifier (prefix + "DelayMs"), snapshot.delayMs, nullptr);
+        apvts.state.setProperty (juce::Identifier (prefix + "Polarity"), snapshot.polarityInvert, nullptr);
+        apvts.state.setProperty (juce::Identifier (prefix + "PhaseEnabled"), snapshot.phaseFilterEnabled, nullptr);
+        apvts.state.setProperty (juce::Identifier (prefix + "FreqHz"), snapshot.phaseFilterFreqHz, nullptr);
+        apvts.state.setProperty (juce::Identifier (prefix + "Q"), snapshot.phaseFilterQ, nullptr);
+        apvts.state.setProperty (juce::Identifier (prefix + "StageIndex"), snapshot.phaseFilterStageIndex, nullptr);
+    }
+}
+
+void KickLockAudioProcessor::selectCompareSlot (int slotIndex)
+{
+    initialiseCompareSlotsIfNeeded();
+
+    const int target = juce::jlimit (0, 1, slotIndex);
+    const int current = activeCompareSlot.load (std::memory_order_acquire);
+    if (target == current)
+        return;
+
+    compareSlots[(size_t) current] = captureCurrentParameterSnapshot();
+    activeCompareSlot.store (target, std::memory_order_release);
+    restoreParameterSnapshot (compareSlots[(size_t) target]);
+    writeCompareSlotsToState();
+}
+
+void KickLockAudioProcessor::copyActiveCompareSlotToOther()
+{
+    initialiseCompareSlotsIfNeeded();
+
+    const int current = activeCompareSlot.load (std::memory_order_acquire);
+    const int other = 1 - current;
+    compareSlots[(size_t) current] = captureCurrentParameterSnapshot();
+    compareSlots[(size_t) other] = compareSlots[(size_t) current];
+    writeCompareSlotsToState();
+}
+
 void KickLockAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    initialiseCompareSlotsIfNeeded();
+    compareSlots[(size_t) activeCompareSlot.load (std::memory_order_acquire)] = captureCurrentParameterSnapshot();
+    writeCompareSlotsToState();
+
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     copyXmlToBinary (*xml, destData);
@@ -1446,7 +1641,11 @@ void KickLockAudioProcessor::setStateInformation (const void* data, int sizeInBy
     std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, sizeInBytes));
 
     if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
+    {
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        compareSlotsInitialised = false;
+        loadCompareSlotsFromState();
+    }
 }
 
 PhaseFixResult KickLockAudioProcessor::analyzeFix()
@@ -1587,30 +1786,23 @@ bool KickLockAudioProcessor::applyLatestFix()
     if (! fix.applyAllowed && ! fix.optionalApplyAllowed)
         return false;
 
-    auto setParameterValue = [this] (const char* id, float value)
-    {
-        if (auto* parameter = apvts.getParameter (id))
-            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
-    };
+    latestRevertSnapshot = captureCurrentParameterSnapshot();
+    revertSnapshotValid.store (true, std::memory_order_release);
+    latestAppliedBeforePercent.store (fix.beforeMatchPercent);
 
-    setParameterValue ("polarity_invert", fix.bassPolarityInvert ? 1.0f : 0.0f);
-    setParameterValue ("polarityInvert", fix.bassPolarityInvert ? 1.0f : 0.0f);
-    setParameterValue ("delay_ms", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
-    setParameterValue ("delayMs", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
-    setParameterValue ("allpass_enable", fix.phaseFilterEnabled ? 1.0f : 0.0f);
-    setParameterValue ("phaseFilterEnabled", fix.phaseFilterEnabled ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("polarity_invert", fix.bassPolarityInvert ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("polarityInvert", fix.bassPolarityInvert ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("delay_ms", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
+    setParameterValueWithGesture ("delayMs", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
+    setParameterValueWithGesture ("allpass_enable", fix.phaseFilterEnabled ? 1.0f : 0.0f);
+    setParameterValueWithGesture ("phaseFilterEnabled", fix.phaseFilterEnabled ? 1.0f : 0.0f);
 
     if (fix.phaseFilterEnabled)
     {
-        setParameterValue ("allpass_freq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
-        setParameterValue ("rotatorFreq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
-        setParameterValue ("rotatorQ", fix.phaseFilterQ);
-
-        if (auto* stagesParam = apvts.getParameter ("rotatorStages"))
-        {
-            const int stageIndex = juce::jlimit (0, 2, fix.phaseFilterStages - 2);
-            stagesParam->setValueNotifyingHost (stagesParam->convertTo0to1 ((float) stageIndex));
-        }
+        setParameterValueWithGesture ("allpass_freq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
+        setParameterValueWithGesture ("rotatorFreq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
+        setParameterValueWithGesture ("rotatorQ", fix.phaseFilterQ);
+        setParameterValueWithGesture ("rotatorStages", (float) juce::jlimit (0, 2, fix.phaseFilterStages - 2));
     }
 
     if (! bassWindow.empty() && bassWindow.size() == kickWindow.size())
@@ -1643,6 +1835,17 @@ bool KickLockAudioProcessor::applyLatestFix()
         latestVerificationDeltaPercent.store (latestFixResult.verificationDeltaPercent);
     }
 
+    return true;
+}
+
+bool KickLockAudioProcessor::revertLatestFix()
+{
+    if (! revertSnapshotValid.load (std::memory_order_acquire))
+        return false;
+
+    restoreParameterSnapshot (latestRevertSnapshot);
+    revertSnapshotValid.store (false, std::memory_order_release);
+    latestAppliedBeforePercent.store (-1.0f);
     return true;
 }
 

@@ -168,6 +168,22 @@ public:
             expect (! analysisStatusCanStartAnalyze (AnalysisMaterialStatus::CapturingMaterial));
             expect (analysisStatusCanStartAnalyze (AnalysisMaterialStatus::ReadyToAnalyze));
         }
+
+        beginTest ("Analyze button text explains disabled material states");
+        {
+            expectEquals (juce::String (analyzeButtonTextForStatus (AnalysisMaterialStatus::WaitingForSidechain)),
+                          juce::String ("Analyze - no sidechain"));
+            expectEquals (juce::String (analyzeButtonTextForStatus (AnalysisMaterialStatus::WaitingForKick)),
+                          juce::String ("Analyze - waiting for kick"));
+            expectEquals (juce::String (analyzeButtonTextForStatus (AnalysisMaterialStatus::WaitingForBass)),
+                          juce::String ("Analyze - waiting for bass"));
+            expectEquals (juce::String (analyzeButtonTextForStatus (AnalysisMaterialStatus::SignalTooLow)),
+                          juce::String ("Analyze - signal too low"));
+            expectEquals (juce::String (analyzeButtonTextForStatus (AnalysisMaterialStatus::CapturingMaterial)),
+                          juce::String ("Analyze - capturing"));
+            expectEquals (juce::String (analyzeButtonTextForStatus (AnalysisMaterialStatus::ReadyToAnalyze)),
+                          juce::String ("Analyze"));
+        }
     }
 };
 

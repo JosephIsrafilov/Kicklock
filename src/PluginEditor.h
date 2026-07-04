@@ -5,6 +5,7 @@
 #include "ui/LookAndFeel.h"
 #include "ui/Oscilloscope.h"
 #include "ui/CorrelationDisplay.h"
+#include "ui/StatusHelpers.h"
 #include "dsp/AnalyzeState.h"
 
 // Full visual + manual phase-alignment editor. The oscilloscope is the visual
@@ -21,6 +22,7 @@ public:
     ~KickLockAudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void resized() override;
 
 private:
@@ -33,6 +35,7 @@ private:
 
     void refreshStatusStrings();
     void refreshAnalyzeWorkflow();
+    void refreshCompareButtons();
     void pushScopeSettings();
 
     KickLockAudioProcessor& audioProcessor;
@@ -44,6 +47,11 @@ private:
     juce::ComboBox viewCombo;
     juce::TextButton analyzeButton;
     juce::TextButton applyFixButton;
+    juce::TextButton revertButton;
+    juce::TextButton compareAButton;
+    juce::TextButton compareBButton;
+    juce::TextButton compareCopyButton;
+    juce::TextButton helpButton;
 
     // --- Centre scope ------------------------------------------------------
     Oscilloscope oscilloscope;
@@ -106,6 +114,8 @@ private:
     juce::String manualDelayText { "Manual Delay: 0.00 ms" };
     bool hasSidechain = false;
     bool canStartAnalyze = false;
+    AnalysisMaterialStatus latestMaterialStatus = AnalysisMaterialStatus::WaitingForSidechain;
+    bool helpOverlayVisible = false;
 
     // Latest analyzer result snapshot for the explanation panel.
     PhaseFixResult latestResult;
@@ -116,6 +126,7 @@ private:
     // controls in paint() so the geometry lives in one place.
     juce::Rectangle<int> manualPanelBounds;
     juce::Rectangle<int> analyzerPanelBounds;
+    juce::ComponentBoundsConstrainer resizeConstrainer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KickLockAudioProcessorEditor)
 };

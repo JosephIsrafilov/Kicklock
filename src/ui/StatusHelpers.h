@@ -105,6 +105,21 @@ inline bool analysisStatusCanStartAnalyze (AnalysisMaterialStatus status) noexce
     return status == AnalysisMaterialStatus::ReadyToAnalyze;
 }
 
+inline const char* analyzeButtonTextForStatus (AnalysisMaterialStatus status) noexcept
+{
+    switch (status)
+    {
+        case AnalysisMaterialStatus::WaitingForSidechain: return "Analyze - no sidechain";
+        case AnalysisMaterialStatus::WaitingForKick:      return "Analyze - waiting for kick";
+        case AnalysisMaterialStatus::WaitingForBass:      return "Analyze - waiting for bass";
+        case AnalysisMaterialStatus::SignalTooLow:        return "Analyze - signal too low";
+        case AnalysisMaterialStatus::CapturingMaterial:   return "Analyze - capturing";
+        case AnalysisMaterialStatus::ReadyToAnalyze:      return "Analyze";
+    }
+
+    return "Analyze";
+}
+
 // Apply Fix must depend on the latest valid analysis result, not on whether the
 // current instant happens to be between kicks. This gate only requires the
 // sidechain to still be connected — never the instantaneous level.

@@ -70,6 +70,8 @@ public:
     std::atomic<float> liveMultiBandMatchPercent { 50.0f };  // low-end-weighted overall
     std::atomic<float> liveLowEndMatchPercent { 50.0f };     // SUB + LOW only
     std::atomic<float> liveBroadbandMatchPercent { 50.0f };  // even 20 Hz-500 Hz blend
+    std::array<std::atomic<float>, PhaseBands::numBands> liveBandMatchPercent {};
+    std::atomic<float> latestAppliedBeforePercent { -1.0f };
 
     // P3: one-shot seed flag for the UI-value EMAs so the first real reading is
     // taken verbatim and later readings blend, without snapping when a value
@@ -98,6 +100,11 @@ public:
     void acknowledgeAnalyzeState() noexcept;
 
     bool applyLatestFix();
+    bool revertLatestFix();
+    bool hasRevertSnapshot() const noexcept { return revertSnapshotValid.load (std::memory_order_acquire); }
+    void selectCompareSlot (int slotIndex);
+    void copyActiveCompareSlotToOther();
+    int getActiveCompareSlot() const noexcept { return activeCompareSlot.load (std::memory_order_acquire); }
     PhaseFixResult getLatestFixResult() const;
     int getScopeDecimationFactor() const noexcept;
     bool hasSidechainReference() const noexcept;
@@ -120,6 +127,16 @@ public:
 private:
     class PhaseAlignmentEngine;
     class AutoAlignEngine;
+
+    struct ParameterSnapshot
+    {
+        float delayMs = 0.0f;
+        bool polarityInvert = false;
+        bool phaseFilterEnabled = false;
+        float phaseFilterFreqHz = 50.0f;
+        float phaseFilterQ = 0.7f;
+        int phaseFilterStageIndex = 0;
+    };
 
     std::atomic<float>* delayMsParam = nullptr;
     std::atomic<float>* delayMsLegacyParam = nullptr;
@@ -152,6 +169,11 @@ private:
     PhaseFixResult latestFixResult;
     std::vector<float> lastAnalyzedBassWindow;
     std::vector<float> lastAnalyzedKickWindow;
+    ParameterSnapshot latestRevertSnapshot;
+    std::atomic<bool> revertSnapshotValid { false };
+    std::array<ParameterSnapshot, 2> compareSlots {};
+    bool compareSlotsInitialised = false;
+    std::atomic<int> activeCompareSlot { 0 };
 
     // Background Analyze. The heavy PhaseFixEngine grid search runs on this
     // single-thread pool so the UI click returns immediately and the audio
@@ -168,6 +190,14 @@ private:
     PhaseFixResult computeAndPublishFix (const std::vector<float>& bass,
                                          const std::vector<float>& kick,
                                          int numSamples);
+    ParameterSnapshot captureCurrentParameterSnapshot() const;
+    void restoreParameterSnapshot (const ParameterSnapshot&);
+    float readParameterValue (const char* id, float fallback) const;
+    void setParameterValueWithGesture (const char* id, float value);
+    void initialiseCompareSlotsIfNeeded();
+    void loadCompareSlotsFromState();
+    void writeCompareSlotsToState();
+    static ParameterSnapshot makeFactoryPresetSnapshot (int index);
 
     int lastInterpChoice = 0;
     int lastStageChoice = 0;
@@ -204,6 +234,7 @@ private:
     std::atomic<bool> bassActiveHeld { false };
     std::atomic<bool> analysisSignalUsable { false };
     std::atomic<bool> analysisMaterialReady { false };
+    int currentProgramIndex = 3;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KickLockAudioProcessor)
 };
