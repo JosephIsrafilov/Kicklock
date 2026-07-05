@@ -212,7 +212,6 @@ private:
     // from the sample rate.
     int scopeDecimationFactor = 1;
     int scopeDecimationCounter = 0;
-    std::vector<unsigned char> transientFlags;
     std::atomic<bool> sidechainReferenceAvailable { false };
     std::atomic<bool> tempoAvailable { false };
     std::atomic<float> latestBpm { 0.0f };

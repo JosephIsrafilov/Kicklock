@@ -78,7 +78,7 @@ public:
     int getWindowSamples() const noexcept { return windowSamples; }
     int getPreRollSamples() const noexcept { return preRollSamples; }
 
-    int snapshotLatest (std::vector<float>& bassOut, std::vector<float>& kickOut) const
+    int snapshotLatest (std::vector<float>& bassOut, std::vector<float>& kickOut, int* copiedSequence = nullptr) const
     {
         for (int attempt = 0; attempt < 3; ++attempt)
         {
@@ -98,7 +98,11 @@ public:
             }
 
             if (sequenceBefore == sequence.load (std::memory_order_acquire))
+            {
+                if (copiedSequence != nullptr)
+                    *copiedSequence = sequenceBefore;
                 return samples;
+            }
         }
 
         return 0;

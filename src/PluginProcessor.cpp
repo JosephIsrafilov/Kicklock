@@ -1036,7 +1036,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     transientDetector.setTriggerRatio (3.0f);
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 20.0f, 150.0f);
-    transientFlags.assign ((size_t) juce::jmax (samplesPerBlock, 8192), 0);
     // Held-activity trackers for the P3 status. ~500 ms hold so a steady loop
     // never flickers to "no signal" in the gaps between kick transients. The
     // activation floor is low: it only needs to tell "playing" from "silent",
@@ -1187,7 +1186,6 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // the audible bass buffer. Skipped without a sidechain.
     if (hasSidechain)
     {
-        const bool canStoreTransientFlags = numSamples <= (int) transientFlags.size();
         const int mainCh = mainBuffer.getNumChannels();
         const int scCh   = sidechainBuffer.getNumChannels();
 
@@ -1206,9 +1204,6 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             kickEnergySum += (double) kickMono * (double) kickMono;
 
             rawCapture.push (bassMono, kickMono);
-            const bool transientDetected = transientDetector.processSample (kickMono);
-            if (canStoreTransientFlags)
-                transientFlags[(size_t) i] = transientDetected ? (unsigned char) 1 : (unsigned char) 0;
 
             if (autoAlignEngine != nullptr)
                 autoAlignEngine->pushSample (bassMono, kickMono);
@@ -1303,7 +1298,6 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     {
         const int mainChannels = mainBuffer.getNumChannels();
         const int sidechainChannels = sidechainBuffer.getNumChannels();
-        const bool canReadTransientFlags = numSamples <= (int) transientFlags.size();
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -1319,12 +1313,12 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             processedMeterSidechainDelay.pushSample (0, sidechainMono);
             const float meteredSidechainMono =
                 processedMeterSidechainDelay.popSample (0, (float) getLatencySamples());
+            const bool transientDetected = transientDetector.processSample (meteredSidechainMono);
 
             // Post-processing multi-band phase read. The meter band-passes both
             // signals internally per band; feed it the raw mono pair.
             processedMultiBandMeter.pushSample (mainMono, meteredSidechainMono);
-            hitCapture.pushSample (mainMono, meteredSidechainMono,
-                                   canReadTransientFlags && transientFlags[(size_t) i] != 0);
+            hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
 
             constexpr float alpha = 0.005f;
             correlationProductLpf += alpha * ((mainMono * meteredSidechainMono) - correlationProductLpf);

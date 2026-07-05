@@ -104,21 +104,28 @@ void Oscilloscope::timerCallback()
 
         anyRead = true;
 
-        if (frozen || viewMode == ScopeViewMode::Triggered)
-            continue;
-
-        for (int i = 0; i < count; ++i)
+        if (! frozen)
         {
-            mainHistory[(size_t) writeIndex]      = mainScratch[(size_t) i];
-            sidechainHistory[(size_t) writeIndex] = sidechainScratch[(size_t) i];
-            writeIndex = (writeIndex + 1) % historyLength;
+            for (int i = 0; i < count; ++i)
+            {
+                mainHistory[(size_t) writeIndex]      = mainScratch[(size_t) i];
+                sidechainHistory[(size_t) writeIndex] = sidechainScratch[(size_t) i];
+                writeIndex = (writeIndex + 1) % historyLength;
+            }
         }
     }
 
     if (viewMode == ScopeViewMode::Triggered)
     {
         if (! frozen)
-            refreshTriggeredSnapshot();
+        {
+            if (refreshTriggeredSnapshot())
+                freeRunTicks = 0;
+            else if (++freeRunTicks >= freeRunWatchdogTicks)
+                buildFreeRunTriggeredSnapshot();
+
+            updateTriggeredAutoGain();
+        }
     }
     else if (anyRead && ! frozen)
     {
@@ -151,8 +158,6 @@ void Oscilloscope::paint (juce::Graphics& g)
             peak = juce::jmax (peak, std::abs (triggeredKick[i]));
         }
 
-        const float targetGain = peak > 1.0e-4f ? juce::jlimit (1.0f, 40.0f, 0.88f / peak) : 1.0f;
-        displayGain += 0.18f * (targetGain - displayGain);
         drawTriggeredMode (g, plotBounds, displayGain * ampZoom);
 
         g.setColour (juce::Colours::white.withAlpha (0.9f));
@@ -684,17 +689,21 @@ void Oscilloscope::reserveTriggeredBuffers()
     reservedTriggeredSamples = required;
 }
 
-void Oscilloscope::refreshTriggeredSnapshot()
+bool Oscilloscope::refreshTriggeredSnapshot()
 {
     const int sequence = hitCapture.getSequence();
     if (sequence == latestTriggeredSequence)
-        return;
+        return false;
 
     reserveTriggeredBuffers();
 
-    const int samples = hitCapture.snapshotLatest (triggeredScratchBass, triggeredScratchKick);
+    int copiedSequence = 0;
+    const int samples = hitCapture.snapshotLatest (triggeredScratchBass, triggeredScratchKick, &copiedSequence);
     if (samples <= 0)
-        return;
+        return false;
+
+    if (copiedSequence == latestTriggeredSequence)
+        return false;
 
     if (! triggeredBass.empty())
     {
@@ -711,8 +720,47 @@ void Oscilloscope::refreshTriggeredSnapshot()
     triggeredBass.swap (triggeredScratchBass);
     triggeredKick.swap (triggeredScratchKick);
     triggeredPreRollSamples = hitCapture.getPreRollSamples();
-    latestTriggeredSequence = sequence;
+    latestTriggeredSequence = copiedSequence;
     repaint();
+    return true;
+}
+
+void Oscilloscope::buildFreeRunTriggeredSnapshot()
+{
+    reserveTriggeredBuffers();
+
+    const int desiredSamples = juce::jlimit (2, historyLength,
+                                            msToSamples (170.0f, sampleRate) / juce::jmax (1, decimationFactor));
+    triggeredScratchBass.resize ((size_t) desiredSamples);
+    triggeredScratchKick.resize ((size_t) desiredSamples);
+
+    const int start = writeIndex - desiredSamples;
+    for (int i = 0; i < desiredSamples; ++i)
+    {
+        const int idx = wrapHistoryIndex (start + i, historyLength);
+        triggeredScratchBass[(size_t) i] = mainHistory[(size_t) idx];
+        triggeredScratchKick[(size_t) i] = sidechainHistory[(size_t) idx];
+    }
+
+    triggeredBass.swap (triggeredScratchBass);
+    triggeredKick.swap (triggeredScratchKick);
+    triggeredPreRollSamples = juce::jlimit (0, desiredSamples - 1,
+                                            msToSamples (20.0f, sampleRate) / juce::jmax (1, decimationFactor));
+    freeRunTicks = freeRunWatchdogTicks;
+    repaint();
+}
+
+void Oscilloscope::updateTriggeredAutoGain() noexcept
+{
+    float peak = 0.0f;
+    for (size_t i = 0; i < triggeredBass.size() && i < triggeredKick.size(); ++i)
+    {
+        peak = juce::jmax (peak, std::abs (triggeredBass[i]));
+        peak = juce::jmax (peak, std::abs (triggeredKick[i]));
+    }
+
+    const float targetGain = peak > 1.0e-4f ? juce::jlimit (1.0f, 40.0f, 0.88f / peak) : 1.0f;
+    displayGain += 0.18f * (targetGain - displayGain);
 }
 
 void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)

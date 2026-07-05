@@ -86,8 +86,10 @@ private:
     void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void rebuildVisibleBuffers (int visible);
-    void refreshTriggeredSnapshot();
+    bool refreshTriggeredSnapshot();
     void reserveTriggeredBuffers();
+    void buildFreeRunTriggeredSnapshot();
+    void updateTriggeredAutoGain() noexcept;
     void setDelayFromDrag (const juce::MouseEvent&);
 
     static constexpr int historyLength = 8192;
@@ -133,6 +135,8 @@ private:
     int latestTriggeredSequence = 0;
     int triggeredPreRollSamples = 0;
     int reservedTriggeredSamples = 0;
+    int freeRunTicks = 0;
+    static constexpr int freeRunWatchdogTicks = 18;
 
     juce::RangedAudioParameter* delayParameter = nullptr;
     bool delayGestureActive = false;
