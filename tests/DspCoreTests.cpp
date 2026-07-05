@@ -531,6 +531,157 @@ public:
 static Stage2AnalysisTests stage2AnalysisTestsInstance;
 
 //==============================================================================
+class FrequencyDomainPhaseRefinerTests : public juce::UnitTest
+{
+public:
+    FrequencyDomainPhaseRefinerTests() : juce::UnitTest ("FrequencyDomainPhaseRefiner", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Coherence phase slope resolves clean sub-sample delay");
+        {
+            constexpr int n = 4096;
+            constexpr float delaySamples = 3.35f;
+
+            std::vector<std::vector<float>> bassHits;
+            std::vector<std::vector<float>> kickHits;
+            std::vector<FrequencyDomainPhaseRefiner::Hit> hits;
+            buildHits (bassHits, kickHits, hits, 4, n, delaySamples, false, false);
+
+            const auto refined = FrequencyDomainPhaseRefiner::refine (hits, kSampleRate);
+
+            expect (refined.valid);
+            expectWithinAbsoluteError (refined.phaseDelaySamples.front(), delaySamples, 0.05f);
+            expectWithinAbsoluteError (refined.medianDelaySamples, delaySamples, 0.05f);
+        }
+
+        beginTest ("Coherence weighting does not underperform plain PHAT on distorted bass");
+        {
+            constexpr int n = 4096;
+            constexpr float delaySamples = 3.35f;
+
+            std::vector<std::vector<float>> bassHits;
+            std::vector<std::vector<float>> kickHits;
+            std::vector<FrequencyDomainPhaseRefiner::Hit> hits;
+            buildHits (bassHits, kickHits, hits, 6, n, delaySamples, true, false);
+
+            const auto coherence = FrequencyDomainPhaseRefiner::refine (
+                hits, kSampleRate, 30.0f, 120.0f, FrequencyDomainPhaseRefiner::WeightingMode::Coherence);
+            const auto phat = FrequencyDomainPhaseRefiner::refine (
+                hits, kSampleRate, 30.0f, 120.0f, FrequencyDomainPhaseRefiner::WeightingMode::PlainPhat);
+
+            expect (coherence.valid);
+            expect (phat.valid);
+
+            const float coherenceError = std::abs (coherence.medianDelaySamples - delaySamples);
+            const float phatError = std::abs (phat.medianDelaySamples - delaySamples);
+            expectLessOrEqual (coherenceError, phatError + 0.02f);
+        }
+
+        beginTest ("Refinement falls back when anchored phase estimate disagrees");
+        {
+            constexpr int n = 4096;
+            constexpr float coarseDelaySamples = 3.0f;
+            constexpr float competingDelaySamples = 9.5f;
+
+            std::vector<std::vector<float>> bassHits;
+            std::vector<std::vector<float>> kickHits;
+            std::vector<FrequencyDomainPhaseRefiner::Hit> hits;
+            buildHits (bassHits, kickHits, hits, 4, n, competingDelaySamples, false, true);
+
+            for (auto& hit : hits)
+                hit.coarseDelaySamples = coarseDelaySamples;
+
+            const auto refined = FrequencyDomainPhaseRefiner::refine (hits, kSampleRate);
+
+            expect (refined.valid);
+            expectWithinAbsoluteError (refined.medianDelaySamples, coarseDelaySamples, 1.0e-6f);
+            expect (std::all_of (refined.usedFallback.begin(), refined.usedFallback.end(),
+                                 [] (bool used) { return used; }));
+        }
+    }
+
+private:
+    static float sampleLinear (const std::vector<float>& x, double index) noexcept
+    {
+        if (index < 0.0 || index >= (double) (x.size() - 1))
+            return 0.0f;
+
+        const int i = (int) std::floor (index);
+        const float frac = (float) (index - (double) i);
+        return x[(size_t) i] + frac * (x[(size_t) i + 1] - x[(size_t) i]);
+    }
+
+    static void buildHits (std::vector<std::vector<float>>& bassHits,
+                           std::vector<std::vector<float>>& kickHits,
+                           std::vector<FrequencyDomainPhaseRefiner::Hit>& hits,
+                           int numHits,
+                           int numSamples,
+                           float delaySamples,
+                           bool distortBass,
+                           bool addCompetingComponent)
+    {
+        bassHits.assign ((size_t) numHits, std::vector<float> ((size_t) numSamples, 0.0f));
+        kickHits.assign ((size_t) numHits, std::vector<float> ((size_t) numSamples, 0.0f));
+        hits.clear();
+        hits.reserve ((size_t) numHits);
+
+        const std::array<double, 6> phases { 0.0, 1.1, 2.4, 3.2, 4.4, 5.5 };
+
+        for (int h = 0; h < numHits; ++h)
+        {
+            std::vector<float> clean ((size_t) numSamples, 0.0f);
+            std::vector<float> competing ((size_t) numSamples, 0.0f);
+            const double phase = phases[(size_t) h % phases.size()];
+            const float amp = 0.75f - 0.04f * (float) h;
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const double fadeIn = std::min (1.0, (double) i / 128.0);
+                const double fadeOut = std::min (1.0, (double) (numSamples - 1 - i) / 128.0);
+                const float env = (float) (fadeIn * fadeOut);
+
+                const float fundamental = amp * env * (float) std::sin (kTwoPi * 67.0 * t);
+                const float harmonic = 0.38f * amp * env * (float) std::sin (kTwoPi * 101.0 * t + phase);
+                clean[(size_t) i] = fundamental;
+                competing[(size_t) i] = 0.9f * amp * env * (float) std::sin (kTwoPi * 96.0 * t + 0.3 * phase);
+
+                float bass = fundamental;
+                if (distortBass)
+                    bass = std::tanh (2.2f * (fundamental + harmonic)) / std::tanh (2.2f);
+
+                if (addCompetingComponent)
+                    bass += competing[(size_t) i];
+
+                bassHits[(size_t) h][(size_t) i] = bass;
+            }
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double delayedT = ((double) i - (double) delaySamples) / kSampleRate;
+                const double fadeIn = std::min (1.0, (double) i / 128.0);
+                const double fadeOut = std::min (1.0, (double) (numSamples - 1 - i) / 128.0);
+                const float env = (float) (fadeIn * fadeOut);
+                float kick = amp * env * (float) std::sin (kTwoPi * 67.0 * delayedT);
+                if (addCompetingComponent)
+                    kick += sampleLinear (competing, (double) i - 9.5);
+
+                kickHits[(size_t) h][(size_t) i] = kick;
+            }
+
+            hits.push_back ({ bassHits[(size_t) h].data(),
+                              kickHits[(size_t) h].data(),
+                              numSamples,
+                              std::round (delaySamples),
+                              false });
+        }
+    }
+};
+
+static FrequencyDomainPhaseRefinerTests frequencyDomainPhaseRefinerTestsInstance;
+
+//==============================================================================
 class PhaseFixEngineTests : public juce::UnitTest
 {
 public:

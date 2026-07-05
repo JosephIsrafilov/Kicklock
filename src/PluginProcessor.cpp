@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "dsp/FrequencyDomainPhaseRefiner.h"
 #include "dsp/HitConsensus.h"
 #include "dsp/MultiBandCorrelation.h"
 
@@ -254,8 +255,10 @@ namespace
 
         std::vector<PhaseFixResult> perHitResults;
         std::vector<HitObservation> hitObservations;
+        std::vector<FrequencyDomainPhaseRefiner::Hit> refinementHits;
         perHitResults.reserve (hits.size());
         hitObservations.reserve (hits.size());
+        refinementHits.reserve (hits.size());
         
         std::vector<float> allHitBass;
         std::vector<float> allHitKick;
@@ -281,6 +284,11 @@ namespace
             if (hitResult.enoughSignal)
             {
                 perHitResults.push_back (hitResult);
+                refinementHits.push_back ({ bass.data() + hit.start,
+                                            kick.data() + hit.start,
+                                            hit.length,
+                                            hitResult.bassDelayMs * (float) sampleRate / 1000.0f,
+                                            hitResult.bassPolarityInvert });
                 
                 auto multiBandResult = MultiBandCorrelation::analyze (bass.data() + hit.start,
                                                                       kick.data() + hit.start,
@@ -318,6 +326,17 @@ namespace
             aggregated.contributingHits = 0;
             PhaseFixEngine::updateDerivedResultFields (aggregated);
             return aggregated;
+        }
+
+        const auto refined = FrequencyDomainPhaseRefiner::refine (refinementHits, sampleRate);
+        if (refined.valid && refined.delaySamples.size() == perHitResults.size())
+        {
+            for (size_t i = 0; i < refined.delaySamples.size(); ++i)
+            {
+                const float delayMs = refined.delaySamples[i] * 1000.0f / (float) sampleRate;
+                perHitResults[i].bassDelayMs = delayMs;
+                hitObservations[i].delayMs = delayMs;
+            }
         }
 
         // --- NEW CLUSTERING CONSENSUS ---
