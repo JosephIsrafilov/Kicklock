@@ -21,11 +21,40 @@ namespace
     constexpr int kTopBarHeight = 62;
 }
 
+void TransientHealthComponent::paint (juce::Graphics& g)
+{
+    auto bounds = getLocalBounds().toFloat();
+    g.setColour (juce::Colour (0xff101418));
+    g.fillRoundedRectangle (bounds, 6.0f);
+    g.setColour (juce::Colour (0xff2b3540));
+    g.drawRoundedRectangle (bounds, 6.0f, 1.0f);
+
+    auto inner = getLocalBounds().reduced (8, 6);
+    auto title = inner.removeFromTop (16);
+    g.setColour (mutedText);
+    g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+    g.drawText ("TRANSIENT HEALTH", title, juce::Justification::centredLeft);
+
+    auto readout = title.removeFromRight (70);
+    g.setColour (healthDb >= 0.0f ? green : red);
+    g.drawText ((healthDb >= 0.0f ? "+" : "") + juce::String (healthDb, 1) + " dB",
+                readout, juce::Justification::centredRight);
+
+    auto bars = inner.removeFromTop (20).toFloat();
+    const float preW = bars.getWidth() * juce::jlimit (0.0f, 1.0f, prePeak * 2.0f);
+    const float postW = bars.getWidth() * juce::jlimit (0.0f, 1.0f, postPeak * 2.0f);
+
+    g.setColour (orange.withAlpha (0.22f));
+    g.fillRoundedRectangle (bars.withWidth (preW), 3.0f);
+    g.setColour (teal.withAlpha (0.85f));
+    g.fillRoundedRectangle (bars.withWidth (postW).reduced (0.0f, 4.0f), 3.0f);
+}
+
 KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcessor& p)
     : AudioProcessorEditor (&p),
       audioProcessor (p),
       oscilloscope (p.scopeFifo, p.getTriggeredHitCapture()),
-      correlationDisplay (p.liveMultiBandMatchPercent,
+      correlationDisplay (p.realtimeLowBandMatchPercent,
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent,
                           p.liveBandMatchPercent,
@@ -36,7 +65,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     // --- Top bar controls --------------------------------------------------
     configureCombo (gridCombo, { "1/4", "1/8", "1/16", "1/32", "Bar", "ms" });
-    configureCombo (viewCombo, { "Triggered", "Phase Delta", "Overlay", "Separate" });
+    configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Overlay", "Separate" });
     gridCombo.setTooltip ("Sets the scope time grid.");
     viewCombo.setTooltip ("Chooses triggered or scrolling scope display.");
 
@@ -173,12 +202,40 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     visualOffsetSlider.setTooltip ("Moves only the waveform display. This does not affect audio.");
     addAndMakeVisible (visualOffsetSlider);
 
+    configureRotary (crossoverSlider);
+    crossoverSlider.setTextValueSuffix (" Hz");
+    crossoverSlider.setNumDecimalPlacesToDisplay (0);
+    addAndMakeVisible (crossoverSlider);
+
+    configureRotary (dynEqAmountSlider);
+    dynEqAmountSlider.setNumDecimalPlacesToDisplay (2);
+    addAndMakeVisible (dynEqAmountSlider);
+
+    configureRotary (dynEqFreqSlider);
+    dynEqFreqSlider.setTextValueSuffix (" Hz");
+    dynEqFreqSlider.setNumDecimalPlacesToDisplay (0);
+    addAndMakeVisible (dynEqFreqSlider);
+
+    configureRotary (dynEqQSlider);
+    dynEqQSlider.setNumDecimalPlacesToDisplay (2);
+    addAndMakeVisible (dynEqQSlider);
+
+    configureRotary (dynEqBoostSlider);
+    dynEqBoostSlider.setTextValueSuffix (" dB");
+    dynEqBoostSlider.setNumDecimalPlacesToDisplay (1);
+    addAndMakeVisible (dynEqBoostSlider);
+
     configureControlLabel (delayLabel, "Delay");
     configureControlLabel (polarityLabel, "Polarity");
     configureControlLabel (phaseFilterLabel, "Phase");
     configureControlLabel (phaseFreqLabel, "Phase Freq");
     configureControlLabel (phaseQLabel, "Q");
     configureControlLabel (visualOffsetLabel, "Visual Offset");
+    configureControlLabel (crossoverLabel, "Crossover");
+    configureControlLabel (dynEqAmountLabel, "Transient");
+    configureControlLabel (dynEqFreqLabel, "EQ Freq");
+    configureControlLabel (dynEqQLabel, "EQ Q");
+    configureControlLabel (dynEqBoostLabel, "EQ Boost");
 
     // --- Advanced ----------------------------------------------------------
     configureSectionLabel (advancedHeader, "ADVANCED");
@@ -206,6 +263,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                           "recommend a delay, polarity and phase setting and "
                           "explain what it found.", juce::dontSendNotification);
     addAndMakeVisible (analyzerBody);
+    addAndMakeVisible (transientHealth);
 
     // --- Parameter attachments --------------------------------------------
     auto& apvts = audioProcessor.apvts;
@@ -215,6 +273,11 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     phaseFreqAttachment    = std::make_unique<SliderAttachment> (apvts, "allpass_freq", phaseFreqSlider);
     phaseQAttachment       = std::make_unique<SliderAttachment> (apvts, "rotatorQ", phaseQSlider);
     visualOffsetAttachment = std::make_unique<SliderAttachment> (apvts, "visualOffsetSamples", visualOffsetSlider);
+    crossoverAttachment    = std::make_unique<SliderAttachment> (apvts, "crossover_freq", crossoverSlider);
+    dynEqAmountAttachment  = std::make_unique<SliderAttachment> (apvts, "dyneq_amount", dynEqAmountSlider);
+    dynEqFreqAttachment    = std::make_unique<SliderAttachment> (apvts, "dyneq_freq", dynEqFreqSlider);
+    dynEqQAttachment       = std::make_unique<SliderAttachment> (apvts, "dyneq_q", dynEqQSlider);
+    dynEqBoostAttachment   = std::make_unique<SliderAttachment> (apvts, "dyneq_boost_db", dynEqBoostSlider);
     gridAttachment         = std::make_unique<ComboAttachment> (apvts, "gridDivision", gridCombo);
     viewAttachment         = std::make_unique<ComboAttachment> (apvts, "scopeViewMode", viewCombo);
     delayInterpAttachment  = std::make_unique<ComboAttachment> (apvts, "delayInterp", delayInterpCombo);
@@ -460,6 +523,9 @@ void KickLockAudioProcessorEditor::timerCallback()
     oscilloscope.setTempoInfo (audioProcessor.getLatestBpm(),
                                audioProcessor.isTempoAvailable());
     pushScopeSettings();
+    transientHealth.setValues (audioProcessor.getTransientPrePeak(),
+                               audioProcessor.getTransientPostPeak(),
+                               audioProcessor.getTransientHealthDb());
 
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
@@ -587,7 +653,7 @@ void KickLockAudioProcessorEditor::resized()
     bounds.reduce (14, 12);
 
     // --- Live hero + scope overlays ---------------------------------------
-    const int scopeBlockHeight = juce::jlimit (222, 320, bounds.getHeight() - 226);
+    const int scopeBlockHeight = juce::jlimit (190, 292, bounds.getHeight() - 318);
     auto scopeBlock = bounds.removeFromTop (scopeBlockHeight);
     correlationDisplay.setBounds (scopeBlock.removeFromTop (108));
     scopeBlock.removeFromTop (6);
@@ -618,11 +684,16 @@ void KickLockAudioProcessorEditor::resized()
     manualArea.removeFromTop (4);
 
     auto row1 = manualArea.removeFromTop (88);
-    const int knobW = juce::jlimit (88, 110, (manualArea.getWidth() - 24) / 4);
+    const int knobW = juce::jlimit (74, 98, (manualArea.getWidth() - 32) / 5);
 
     auto delayCell = row1.removeFromLeft (knobW);
     delayLabel.setBounds (delayCell.removeFromTop (14));
     delaySlider.setBounds (delayCell);
+
+    row1.removeFromLeft (8);
+    auto crossoverCell = row1.removeFromLeft (knobW);
+    crossoverLabel.setBounds (crossoverCell.removeFromTop (14));
+    crossoverSlider.setBounds (crossoverCell);
 
     row1.removeFromLeft (8);
     auto freqCell = row1.removeFromLeft (knobW);
@@ -638,6 +709,27 @@ void KickLockAudioProcessorEditor::resized()
     auto visualCell = row1.removeFromLeft (knobW);
     visualOffsetLabel.setBounds (visualCell.removeFromTop (14));
     visualOffsetSlider.setBounds (visualCell);
+
+    manualArea.removeFromTop (4);
+    auto transientRow = manualArea.removeFromTop (88);
+    auto dynAmtCell = transientRow.removeFromLeft (knobW);
+    dynEqAmountLabel.setBounds (dynAmtCell.removeFromTop (14));
+    dynEqAmountSlider.setBounds (dynAmtCell);
+
+    transientRow.removeFromLeft (8);
+    auto dynFreqCell = transientRow.removeFromLeft (knobW);
+    dynEqFreqLabel.setBounds (dynFreqCell.removeFromTop (14));
+    dynEqFreqSlider.setBounds (dynFreqCell);
+
+    transientRow.removeFromLeft (8);
+    auto dynQCell = transientRow.removeFromLeft (knobW);
+    dynEqQLabel.setBounds (dynQCell.removeFromTop (14));
+    dynEqQSlider.setBounds (dynQCell);
+
+    transientRow.removeFromLeft (8);
+    auto dynBoostCell = transientRow.removeFromLeft (knobW);
+    dynEqBoostLabel.setBounds (dynBoostCell.removeFromTop (14));
+    dynEqBoostSlider.setBounds (dynBoostCell);
 
     manualArea.removeFromTop (4);
     auto row2 = manualArea.removeFromTop (42);
@@ -663,6 +755,8 @@ void KickLockAudioProcessorEditor::resized()
     phaseStagesCombo.setBounds (stagesCell.removeFromTop (22).reduced (0, 1));
 
     // Right column: analyzer explanation.
+    transientHealth.setBounds (right.removeFromTop (54));
+    right.removeFromTop (8);
     analyzerTitle.setBounds (right.removeFromTop (20));
     analyzerBody.setBounds (right);
 

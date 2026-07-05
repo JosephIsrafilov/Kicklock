@@ -6,6 +6,7 @@
 enum class ScopeViewMode
 {
     Triggered,
+    FreeRun,
     PhaseDelta,
     Overlay,
     Separate
@@ -46,9 +47,10 @@ inline ScopeViewMode scopeViewModeFromChoiceIndex (int index) noexcept
 {
     switch (index)
     {
-        case 1:  return ScopeViewMode::PhaseDelta;
-        case 2:  return ScopeViewMode::Overlay;
-        case 3:  return ScopeViewMode::Separate;
+        case 1:  return ScopeViewMode::FreeRun;
+        case 2:  return ScopeViewMode::PhaseDelta;
+        case 3:  return ScopeViewMode::Overlay;
+        case 4:  return ScopeViewMode::Separate;
         default: return ScopeViewMode::Triggered;
     }
 }

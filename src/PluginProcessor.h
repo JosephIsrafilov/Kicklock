@@ -19,6 +19,7 @@
 #include "dsp/TransientDetector.h"
 #include "dsp/SignalActivityTracker.h"
 #include "dsp/PhaseFixEngine.h"
+#include "dsp/MultibandPhaseCore.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
 
@@ -64,6 +65,9 @@ public:
     std::atomic<float> realtimeLowBandMatchPercent { 0.0f };
     std::atomic<float> dryInputMatchPercent { 0.0f };
     std::atomic<float> processedMatchPercent { 0.0f };
+    std::atomic<float> transientHealthDb { 0.0f };
+    std::atomic<float> transientPrePeak { 0.0f };
+    std::atomic<float> transientPostPeak { 0.0f };
 
     // Live multi-band phase-match read-outs (P5/P8), updated per block from the
     // realtime meter over the currently-monitored (dry or processed) low end.
@@ -113,6 +117,9 @@ public:
     float getBassSignalRms() const noexcept;
     float getKickSignalRms() const noexcept;
     const HitCaptureBuffer& getTriggeredHitCapture() const noexcept { return hitCapture; }
+    float getTransientPrePeak() const noexcept { return transientPrePeak.load(); }
+    float getTransientPostPeak() const noexcept { return transientPostPeak.load(); }
+    float getTransientHealthDb() const noexcept { return transientHealthDb.load(); }
 
     // Musically-aware activity flags for P3 status. These hold "active" for a
     // window after the last transient/level crossing, so a normal beat does not
@@ -149,8 +156,17 @@ private:
     std::atomic<float>* rotatorFreqLegacyParam = nullptr;
     std::atomic<float>* rotatorQParam = nullptr;
     std::atomic<float>* rotatorStagesParam = nullptr;
+    std::atomic<float>* crossoverFreqParam = nullptr;
+    std::atomic<float>* dynEqFreqParam = nullptr;
+    std::atomic<float>* dynEqQParam = nullptr;
+    std::atomic<float>* dynEqBoostDbParam = nullptr;
+    std::atomic<float>* dynEqAmountParam = nullptr;
+    std::atomic<float>* dynEqAttackMsParam = nullptr;
+    std::atomic<float>* dynEqHoldMsParam = nullptr;
+    std::atomic<float>* dynEqReleaseMsParam = nullptr;
+    std::atomic<float>* dynEqTriggerRatioParam = nullptr;
 
-    std::unique_ptr<PhaseAlignmentEngine> phaseAlignmentEngine;
+    MultibandPhaseCore multibandCore;
     std::unique_ptr<AutoAlignEngine> autoAlignEngine;
 
     // Live phase-match meters (P5). Multi-band across 20 Hz-500 Hz, low-end
@@ -160,6 +176,11 @@ private:
     RealtimeMultiBandMeter dryMultiBandMeter;
     RealtimeMultiBandMeter processedMultiBandMeter;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> processedMeterSidechainDelay;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> bypassDelay;
+    juce::dsp::LinkwitzRileyFilter<float> rawBassLowpass;
+    juce::dsp::LinkwitzRileyFilter<float> rawKickLowpass;
+    juce::dsp::LinkwitzRileyFilter<float> processedBassLowpass;
+    juce::dsp::LinkwitzRileyFilter<float> processedKickLowpass;
 
     // Rolling capture of raw (pre-processing) mono bass/kick for the Analyze
     // button. Sized in prepareToPlay (~2 s). Written on the audio thread,

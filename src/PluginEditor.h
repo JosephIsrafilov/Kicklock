@@ -8,6 +8,25 @@
 #include "ui/StatusHelpers.h"
 #include "dsp/AnalyzeState.h"
 
+class TransientHealthComponent : public juce::Component
+{
+public:
+    void setValues (float pre, float post, float health) noexcept
+    {
+        prePeak = juce::jlimit (0.0f, 1.0f, pre);
+        postPeak = juce::jlimit (0.0f, 1.0f, post);
+        healthDb = health;
+        repaint();
+    }
+
+    void paint (juce::Graphics&) override;
+
+private:
+    float prePeak = 0.0f;
+    float postPeak = 0.0f;
+    float healthDb = 0.0f;
+};
+
 // Full visual + manual phase-alignment editor. The oscilloscope is the visual
 // centre; a top status bar reports sidechain/BPM/PDC state and hosts the grid,
 // view, Analyze and Apply Fix controls; a MANUAL ALIGNMENT section drives the
@@ -66,6 +85,7 @@ private:
     // --- Analyzer explanation panel ---------------------------------------
     juce::Label analyzerTitle;
     juce::Label analyzerBody;
+    TransientHealthComponent transientHealth;
 
     // --- Manual alignment --------------------------------------------------
     juce::Label manualHeader;
@@ -75,6 +95,11 @@ private:
     juce::Slider phaseFreqSlider;
     juce::Slider phaseQSlider;
     juce::Slider visualOffsetSlider;
+    juce::Slider crossoverSlider;
+    juce::Slider dynEqAmountSlider;
+    juce::Slider dynEqFreqSlider;
+    juce::Slider dynEqQSlider;
+    juce::Slider dynEqBoostSlider;
 
     juce::Label delayLabel;
     juce::Label polarityLabel;
@@ -82,6 +107,11 @@ private:
     juce::Label phaseFreqLabel;
     juce::Label phaseQLabel;
     juce::Label visualOffsetLabel;
+    juce::Label crossoverLabel;
+    juce::Label dynEqAmountLabel;
+    juce::Label dynEqFreqLabel;
+    juce::Label dynEqQLabel;
+    juce::Label dynEqBoostLabel;
 
     // --- Advanced ----------------------------------------------------------
     juce::Label advancedHeader;
@@ -100,6 +130,11 @@ private:
     std::unique_ptr<SliderAttachment> phaseFreqAttachment;
     std::unique_ptr<SliderAttachment> phaseQAttachment;
     std::unique_ptr<SliderAttachment> visualOffsetAttachment;
+    std::unique_ptr<SliderAttachment> crossoverAttachment;
+    std::unique_ptr<SliderAttachment> dynEqAmountAttachment;
+    std::unique_ptr<SliderAttachment> dynEqFreqAttachment;
+    std::unique_ptr<SliderAttachment> dynEqQAttachment;
+    std::unique_ptr<SliderAttachment> dynEqBoostAttachment;
     std::unique_ptr<ComboAttachment>  gridAttachment;
     std::unique_ptr<ComboAttachment>  viewAttachment;
     std::unique_ptr<ComboAttachment>  delayInterpAttachment;

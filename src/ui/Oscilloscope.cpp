@@ -197,6 +197,7 @@ void Oscilloscope::paint (juce::Graphics& g)
     switch (viewMode)
     {
         case ScopeViewMode::Triggered:  break;
+        case ScopeViewMode::FreeRun:    drawOverlayMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::PhaseDelta: drawPhaseDeltaMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::Overlay:    drawOverlayMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::Separate:   drawSeparateMode (g, plotBounds, visible, gain); break;
@@ -207,9 +208,10 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     g.setColour (juce::Colours::white.withAlpha (0.9f));
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-    g.drawText (viewMode == ScopeViewMode::PhaseDelta ? "PHASE DELTA"
-               : viewMode == ScopeViewMode::Overlay  ? "OVERLAY"
-                                                     : "SEPARATE",
+    g.drawText (viewMode == ScopeViewMode::FreeRun    ? "FREE-RUN"
+               : viewMode == ScopeViewMode::PhaseDelta ? "PHASE DELTA"
+               : viewMode == ScopeViewMode::Overlay    ? "OVERLAY"
+                                                       : "SEPARATE",
                 plotBounds.removeFromTop (16.0f).toNearestInt(),
                 juce::Justification::centredLeft);
 

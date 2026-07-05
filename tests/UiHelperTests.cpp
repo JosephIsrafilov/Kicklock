@@ -94,9 +94,10 @@ public:
         beginTest ("Triggered scope is the default first view mode");
         {
             expectEquals ((int) scopeViewModeFromChoiceIndex (0), (int) ScopeViewMode::Triggered);
-            expectEquals ((int) scopeViewModeFromChoiceIndex (1), (int) ScopeViewMode::PhaseDelta);
-            expectEquals ((int) scopeViewModeFromChoiceIndex (2), (int) ScopeViewMode::Overlay);
-            expectEquals ((int) scopeViewModeFromChoiceIndex (3), (int) ScopeViewMode::Separate);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (1), (int) ScopeViewMode::FreeRun);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (2), (int) ScopeViewMode::PhaseDelta);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (3), (int) ScopeViewMode::Overlay);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (4), (int) ScopeViewMode::Separate);
         }
 
         beginTest ("Triggered scope drag maps pixels to delay nudges");
