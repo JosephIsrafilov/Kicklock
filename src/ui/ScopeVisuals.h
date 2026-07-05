@@ -58,6 +58,25 @@ inline float scopeDragPixelsToDelayDeltaMs (float pixelDelta, bool fine) noexcep
     return pixelDelta * (fine ? 0.01f : 0.1f) / 4.0f;
 }
 
+inline int calculateTriggeredRenderPointCount (int sampleCount, int pixelWidth) noexcept
+{
+    if (sampleCount <= 1)
+        return std::max (0, sampleCount);
+
+    const int targetPoints = std::max (2, pixelWidth * 2);
+    return std::clamp (targetPoints, 2, sampleCount);
+}
+
+inline int triggeredRenderSampleIndex (int pointIndex, int pointCount, int sampleCount) noexcept
+{
+    if (sampleCount <= 1 || pointCount <= 1)
+        return 0;
+
+    return std::clamp ((int) std::lround ((double) pointIndex * (double) (sampleCount - 1)
+                                          / (double) (pointCount - 1)),
+                       0, sampleCount - 1);
+}
+
 inline GridDivision gridDivisionFromChoiceIndex (int index) noexcept
 {
     switch (index)

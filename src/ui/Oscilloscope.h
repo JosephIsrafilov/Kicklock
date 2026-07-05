@@ -87,6 +87,7 @@ private:
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void rebuildVisibleBuffers (int visible);
     void refreshTriggeredSnapshot();
+    void reserveTriggeredBuffers();
     void setDelayFromDrag (const juce::MouseEvent&);
 
     static constexpr int historyLength = 8192;
@@ -125,10 +126,13 @@ private:
     static constexpr int ghostCount = 3;
     std::vector<float> triggeredBass;
     std::vector<float> triggeredKick;
+    std::vector<float> triggeredScratchBass;
+    std::vector<float> triggeredScratchKick;
     std::array<std::vector<float>, ghostCount> ghostBass;
     std::array<std::vector<float>, ghostCount> ghostKick;
     int latestTriggeredSequence = 0;
     int triggeredPreRollSamples = 0;
+    int reservedTriggeredSamples = 0;
 
     juce::RangedAudioParameter* delayParameter = nullptr;
     bool delayGestureActive = false;

@@ -105,6 +105,16 @@ public:
             expectWithinAbsoluteError (scopeDragPixelsToDelayDeltaMs (-8.0f, false), -0.2f, 1.0e-7f);
             expectWithinAbsoluteError (scopeDragPixelsToDelayDeltaMs (4.0f, true), 0.01f, 1.0e-7f);
         }
+
+        beginTest ("Triggered rendering is capped to screen-resolution points");
+        {
+            expectEquals (calculateTriggeredRenderPointCount (0, 800), 0);
+            expectEquals (calculateTriggeredRenderPointCount (1, 800), 1);
+            expectEquals (calculateTriggeredRenderPointCount (400, 800), 400);
+            expectEquals (calculateTriggeredRenderPointCount (96000, 800), 1600);
+            expectEquals (triggeredRenderSampleIndex (0, 1600, 96000), 0);
+            expectEquals (triggeredRenderSampleIndex (1599, 1600, 96000), 95999);
+        }
     }
 };
 

@@ -54,7 +54,7 @@ Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, const HitCaptureBuffer& hitCa
       mainHistory ((size_t) historyLength, 0.0f),
       sidechainHistory ((size_t) historyLength, 0.0f)
 {
-    startTimerHz (30);
+    startTimerHz (60);
 }
 
 Oscilloscope::~Oscilloscope()
@@ -71,6 +71,7 @@ void Oscilloscope::setTimebase (double newSampleRate, int newDecimationFactor) n
     {
         sampleRate = resolvedSampleRate;
         decimationFactor = resolvedDecimation;
+        reserveTriggeredBuffers();
         repaint();
     }
 }
@@ -243,14 +244,11 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     }
 
     const int safePreRoll = juce::jlimit (0, n - 1, triggeredPreRollSamples);
-    const float totalMsForScroll = samplesToMs (n, sampleRate);
-    const float shiftPixels = totalMsForScroll > 0.0f ? bounds.getWidth() * (displayScrollMs / totalMsForScroll) : 0.0f;
-    const float triggerX = bounds.getX() + bounds.getWidth() * (float) safePreRoll / (float) (n - 1) + shiftPixels;
+    const float triggerX = bounds.getX() + bounds.getWidth() * (float) safePreRoll / (float) (n - 1);
 
     const float totalMs = samplesToMs (n, sampleRate);
     const float preMs = samplesToMs (safePreRoll, sampleRate);
     const float postMs = totalMs - preMs;
-    const float xStep = bounds.getWidth() / (float) (n - 1);
 
     g.setColour (gridMinor);
     for (float ms = -20.0f; ms <= 150.0f; ms += 10.0f)
@@ -272,13 +270,19 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
             return;
 
         juce::Path bassPath, kickPath;
-        for (int i = 0; i < samples; ++i)
+        const int pointCount = calculateTriggeredRenderPointCount (samples, (int) std::ceil (bounds.getWidth()));
+        const float sampleXStep = bounds.getWidth() / (float) (samples - 1);
+        bassPath.preallocateSpace (pointCount * 3);
+        kickPath.preallocateSpace (pointCount * 3);
+
+        for (int point = 0; point < pointCount; ++point)
         {
-            const float x = bounds.getX() + (float) i * xStep + shiftPixels;
+            const int i = triggeredRenderSampleIndex (point, pointCount, samples);
+            const float x = bounds.getX() + (float) i * sampleXStep;
             const float bassY = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) i] * gain) * halfHeight;
             const float kickY = midY - juce::jlimit (-1.0f, 1.0f, kick[(size_t) i] * gain) * halfHeight;
 
-            if (i == 0)
+            if (point == 0)
             {
                 bassPath.startNewSubPath (x, bassY);
                 kickPath.startNewSubPath (x, kickY);
@@ -655,15 +659,40 @@ void Oscilloscope::rebuildVisibleBuffers (int visible)
     smoothScopeEnvelope (visibleSideBuffer.data(), smoothedSideBuffer.data(), visible, scopeRate);
 }
 
+void Oscilloscope::reserveTriggeredBuffers()
+{
+    const int required = hitCapture.getWindowSamples();
+    if (required <= 0 || required == reservedTriggeredSamples)
+        return;
+
+    auto reserveOne = [required] (std::vector<float>& buffer)
+    {
+        if ((int) buffer.capacity() < required)
+            buffer.reserve ((size_t) required);
+    };
+
+    reserveOne (triggeredBass);
+    reserveOne (triggeredKick);
+    reserveOne (triggeredScratchBass);
+    reserveOne (triggeredScratchKick);
+
+    for (auto& buffer : ghostBass)
+        reserveOne (buffer);
+    for (auto& buffer : ghostKick)
+        reserveOne (buffer);
+
+    reservedTriggeredSamples = required;
+}
+
 void Oscilloscope::refreshTriggeredSnapshot()
 {
     const int sequence = hitCapture.getSequence();
     if (sequence == latestTriggeredSequence)
         return;
 
-    std::vector<float> bass;
-    std::vector<float> kick;
-    const int samples = hitCapture.snapshotLatest (bass, kick);
+    reserveTriggeredBuffers();
+
+    const int samples = hitCapture.snapshotLatest (triggeredScratchBass, triggeredScratchKick);
     if (samples <= 0)
         return;
 
@@ -671,16 +700,16 @@ void Oscilloscope::refreshTriggeredSnapshot()
     {
         for (int i = ghostCount - 1; i > 0; --i)
         {
-            ghostBass[(size_t) i] = std::move (ghostBass[(size_t) (i - 1)]);
-            ghostKick[(size_t) i] = std::move (ghostKick[(size_t) (i - 1)]);
+            ghostBass[(size_t) i].swap (ghostBass[(size_t) (i - 1)]);
+            ghostKick[(size_t) i].swap (ghostKick[(size_t) (i - 1)]);
         }
 
-        ghostBass[0] = triggeredBass;
-        ghostKick[0] = triggeredKick;
+        ghostBass[0].swap (triggeredBass);
+        ghostKick[0].swap (triggeredKick);
     }
 
-    triggeredBass = std::move (bass);
-    triggeredKick = std::move (kick);
+    triggeredBass.swap (triggeredScratchBass);
+    triggeredKick.swap (triggeredScratchKick);
     triggeredPreRollSamples = hitCapture.getPreRollSamples();
     latestTriggeredSequence = sequence;
     repaint();
@@ -721,16 +750,14 @@ void Oscilloscope::mouseDrag (const juce::MouseEvent& e)
     }
     else if (panGestureActive)
     {
-        const float pixelsMoved = e.position.x - dragStartX;
-        
-        float msPerPixel = 1.0f;
         if (viewMode == ScopeViewMode::Triggered)
-            msPerPixel = 170.0f / (float) getWidth();
-        else
-        {
-            const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
-            msPerPixel = (float) calculateVisibleWindowMs(visible, sampleRate, decimationFactor) / (float) getWidth();
-        }
+            return;
+
+        const float pixelsMoved = e.position.x - dragStartX;
+        const int componentWidth = juce::jmax (1, getWidth());
+        const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
+        const float msPerPixel = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor)
+                               / (float) componentWidth;
         
         displayScrollMs = panStartScrollMs - (pixelsMoved * msPerPixel);
         repaint();
@@ -766,7 +793,7 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
 
     const float step = 1.0f + juce::jlimit (-0.5f, 0.5f, wheel.deltaY) * 0.6f;
 
-    if (std::abs(wheel.deltaY) > 0.0f)
+    if (std::abs (wheel.deltaY) > 0.0f)
     {
         if (e.mods.isShiftDown())
             setAmpZoom (ampZoom * step);
@@ -777,16 +804,15 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
             onZoomChanged();
     }
 
-    if (std::abs(wheel.deltaX) > 0.0f)
+    if (std::abs (wheel.deltaX) > 0.0f)
     {
-        float msPerPixel = 1.0f;
         if (viewMode == ScopeViewMode::Triggered)
-            msPerPixel = 170.0f / (float) getWidth();
-        else
-        {
-            const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
-            msPerPixel = (float) calculateVisibleWindowMs(visible, sampleRate, decimationFactor) / (float) getWidth();
-        }
+            return;
+
+        const int componentWidth = juce::jmax (1, getWidth());
+        const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
+        const float msPerPixel = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor)
+                               / (float) componentWidth;
         
         displayScrollMs -= wheel.deltaX * 100.0f * msPerPixel;
         repaint();
