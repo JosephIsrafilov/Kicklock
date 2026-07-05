@@ -153,6 +153,105 @@ public:
 static AllpassPhaseRotatorTests allpassPhaseRotatorTestsInstance;
 
 //==============================================================================
+class MultibandPhaseModuleTests : public juce::UnitTest
+{
+public:
+    MultibandPhaseModuleTests() : juce::UnitTest ("MultibandPhaseModules", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("LR crossover produces finite low/high bands");
+        {
+            constexpr int n = 1024;
+            juce::AudioBuffer<float> in (2, n), low (2, n), high (2, n);
+            for (int i = 0; i < n; ++i)
+            {
+                const float s = (float) (0.4 * std::sin (kTwoPi * 80.0 * (double) i / kSampleRate)
+                                       + 0.2 * std::sin (kTwoPi * 2000.0 * (double) i / kSampleRate));
+                in.setSample (0, i, s);
+                in.setSample (1, i, s);
+            }
+
+            LinkwitzRileyCrossover crossover;
+            crossover.prepare ({ kSampleRate, (juce::uint32) n, 2 });
+            crossover.setCrossoverFrequency (150.0f);
+            crossover.split (in, low, high, n);
+
+            float sumAbs = 0.0f;
+            for (int i = 0; i < n; ++i)
+            {
+                expect (std::isfinite (low.getSample (0, i)));
+                expect (std::isfinite (high.getSample (0, i)));
+                sumAbs += std::abs (low.getSample (0, i)) + std::abs (high.getSample (0, i));
+            }
+            expectGreaterThan (sumAbs, 1.0f);
+        }
+
+        beginTest ("Transient envelope emits attack/hold/release window");
+        {
+            TransientEnvelopeFollower follower;
+            follower.prepare (1000.0);
+            follower.setWindow (2.0f, 4.0f, 20.0f);
+            follower.setTriggerRatio (2.0f);
+
+            float peak = 0.0f;
+            for (int i = 0; i < 80; ++i)
+                peak = juce::jmax (peak, follower.processSample (i == 10 ? 1.0f : 0.0f));
+
+            expectGreaterThan (peak, 0.8f);
+        }
+
+        beginTest ("Dynamic EQ can increase high-band peak when envelope is open");
+        {
+            DynamicHighBandEQ eq;
+            eq.prepare ({ kSampleRate, 512, 2 });
+            eq.setFrequency (3200.0f);
+            eq.setQ (4.0f);
+            eq.setMaxBoostDb (9.0f);
+
+            float pre = 0.0f, post = 0.0f;
+            for (int i = 0; i < 2048; ++i)
+            {
+                const float x = (float) (0.2 * std::sin (kTwoPi * 3200.0 * (double) i / kSampleRate));
+                pre = juce::jmax (pre, std::abs (x));
+                post = juce::jmax (post, std::abs (eq.processSample (0, x, 1.0f, 1.0f)));
+            }
+
+            expectGreaterThan (post, pre);
+        }
+
+        beginTest ("Transient health reports positive delta when post peak is larger");
+        {
+            TransientHealthMeter meter;
+            meter.prepare (kSampleRate, 80.0f);
+            meter.pushBlock (0.25f, 0.5f);
+            expectGreaterThan (meter.getPostPeak(), meter.getPrePeak());
+            expectGreaterThan (meter.getHealthDb(), 0.0f);
+        }
+
+        beginTest ("Multiband core reports fixed 20 ms latency");
+        {
+            MultibandPhaseCore core;
+            core.prepare (kSampleRate, 512, 2, 20.0f);
+            expectEquals (core.reportLatencySamples(), (int) std::ceil (kSampleRate * 0.020));
+
+            juce::AudioBuffer<float> main (2, 512), kick (2, 512);
+            main.clear();
+            kick.clear();
+            MultibandPhaseCore::Params params;
+            params.dynEqAmount = 0.0f;
+            params.allpassEnabled = false;
+            params.polarityInvert = false;
+            core.process (main, kick, params, 512);
+            expectEquals (core.reportLatencySamples(), (int) std::ceil (kSampleRate * 0.020));
+            expectWithinAbsoluteError (core.getHealthMeter().getHealthDb(), 0.0f, 0.01f);
+        }
+    }
+};
+
+static MultibandPhaseModuleTests multibandPhaseModuleTestsInstance;
+
+//==============================================================================
 class AlignmentAnalyzerTests : public juce::UnitTest
 {
 public:
