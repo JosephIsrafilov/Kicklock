@@ -890,16 +890,130 @@ KickLockAudioProcessor::KickLockAudioProcessor()
     dynEqReleaseMsParam = apvts.getRawParameterValue ("dyneq_release_ms");
     dynEqTriggerRatioParam = apvts.getRawParameterValue ("dyneq_trigger_ratio");
 
+    for (const auto* id : { "delay_ms", "delayMs",
+                            "polarity_invert", "polarityInvert",
+                            "allpass_enable", "phaseFilterEnabled",
+                            "allpass_freq", "rotatorFreq" })
+        apvts.addParameterListener (id, this);
+
     autoAlignEngine = std::make_unique<AutoAlignEngine> (*this);
 }
 
 KickLockAudioProcessor::~KickLockAudioProcessor()
 {
+    for (const auto* id : { "delay_ms", "delayMs",
+                            "polarity_invert", "polarityInvert",
+                            "allpass_enable", "phaseFilterEnabled",
+                            "allpass_freq", "rotatorFreq" })
+        apvts.removeParameterListener (id, this);
+
     // The background analysis job captures `this`. Remove any queued job and
     // wait for a running one to finish before the members it touches (the
     // capture buffer, the result fields) start tearing down.
     analysisThreadPool.removeAllJobs (true, 2000);
     autoAlignEngine.reset();
+}
+
+void KickLockAudioProcessor::parameterChanged (const juce::String& parameterID, float)
+{
+    const auto stamp = parameterChangeCounter.fetch_add (1, std::memory_order_relaxed) + 1;
+
+    if (parameterID == "delay_ms")             { delayCanonicalChange.store (stamp, std::memory_order_release); return; }
+    if (parameterID == "delayMs")              { delayLegacyChange.store (stamp, std::memory_order_release); return; }
+    if (parameterID == "polarity_invert")      { polarityCanonicalChange.store (stamp, std::memory_order_release); return; }
+    if (parameterID == "polarityInvert")       { polarityLegacyChange.store (stamp, std::memory_order_release); return; }
+    if (parameterID == "allpass_enable")       { phaseCanonicalChange.store (stamp, std::memory_order_release); return; }
+    if (parameterID == "phaseFilterEnabled")   { phaseLegacyChange.store (stamp, std::memory_order_release); return; }
+    if (parameterID == "allpass_freq")         { allpassFreqCanonicalChange.store (stamp, std::memory_order_release); return; }
+    if (parameterID == "rotatorFreq")          { allpassFreqLegacyChange.store (stamp, std::memory_order_release); return; }
+}
+
+void KickLockAudioProcessor::markRestoredParameterSources (bool hasDelayMs,
+                                                           bool hasLegacyDelayMs,
+                                                           bool hasPolarityInvert,
+                                                           bool hasLegacyPolarityInvert,
+                                                           bool hasAllpassEnable,
+                                                           bool hasLegacyPhaseFilterEnabled,
+                                                           bool hasAllpassFreq,
+                                                           bool hasLegacyRotatorFreq) noexcept
+{
+    auto markPair = [this] (bool hasCanonical, bool hasLegacy,
+                            std::atomic<uint32_t>& canonicalStamp,
+                            std::atomic<uint32_t>& legacyStamp) noexcept
+    {
+        const auto base = parameterChangeCounter.fetch_add (2, std::memory_order_relaxed) + 1;
+
+        if (! hasCanonical && hasLegacy)
+        {
+            canonicalStamp.store (base, std::memory_order_release);
+            legacyStamp.store (base + 1, std::memory_order_release);
+            return;
+        }
+
+        legacyStamp.store (base, std::memory_order_release);
+        canonicalStamp.store (base + 1, std::memory_order_release);
+    };
+
+    markPair (hasDelayMs, hasLegacyDelayMs, delayCanonicalChange, delayLegacyChange);
+    markPair (hasPolarityInvert, hasLegacyPolarityInvert, polarityCanonicalChange, polarityLegacyChange);
+    markPair (hasAllpassEnable, hasLegacyPhaseFilterEnabled, phaseCanonicalChange, phaseLegacyChange);
+    markPair (hasAllpassFreq, hasLegacyRotatorFreq, allpassFreqCanonicalChange, allpassFreqLegacyChange);
+}
+
+float KickLockAudioProcessor::getEffectiveDelayMs() const noexcept
+{
+    const bool useLegacy =
+        delayLegacyChange.load (std::memory_order_acquire) > delayCanonicalChange.load (std::memory_order_acquire);
+
+    if (useLegacy && delayMsLegacyParam != nullptr)
+        return delayMsLegacyParam->load();
+
+    if (delayMsParam != nullptr)
+        return delayMsParam->load();
+
+    return delayMsLegacyParam != nullptr ? delayMsLegacyParam->load() : 0.0f;
+}
+
+bool KickLockAudioProcessor::getEffectivePolarityInvert() const noexcept
+{
+    const bool useLegacy =
+        polarityLegacyChange.load (std::memory_order_acquire) > polarityCanonicalChange.load (std::memory_order_acquire);
+
+    if (useLegacy && polarityInvertLegacyParam != nullptr)
+        return polarityInvertLegacyParam->load() > 0.5f;
+
+    if (polarityInvertParam != nullptr)
+        return polarityInvertParam->load() > 0.5f;
+
+    return polarityInvertLegacyParam != nullptr && polarityInvertLegacyParam->load() > 0.5f;
+}
+
+bool KickLockAudioProcessor::getEffectivePhaseFilterEnabled() const noexcept
+{
+    const bool useLegacy =
+        phaseLegacyChange.load (std::memory_order_acquire) > phaseCanonicalChange.load (std::memory_order_acquire);
+
+    if (useLegacy && phaseFilterEnabledLegacyParam != nullptr)
+        return phaseFilterEnabledLegacyParam->load() > 0.5f;
+
+    if (phaseFilterEnabledParam != nullptr)
+        return phaseFilterEnabledParam->load() > 0.5f;
+
+    return phaseFilterEnabledLegacyParam != nullptr && phaseFilterEnabledLegacyParam->load() > 0.5f;
+}
+
+float KickLockAudioProcessor::getEffectiveAllpassFreqHz() const noexcept
+{
+    const bool useLegacy =
+        allpassFreqLegacyChange.load (std::memory_order_acquire) > allpassFreqCanonicalChange.load (std::memory_order_acquire);
+
+    if (useLegacy && rotatorFreqLegacyParam != nullptr)
+        return rotatorFreqLegacyParam->load();
+
+    if (rotatorFreqParam != nullptr)
+        return rotatorFreqParam->load();
+
+    return rotatorFreqLegacyParam != nullptr ? rotatorFreqLegacyParam->load() : 50.0f;
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::createParameterLayout()
@@ -1202,15 +1316,12 @@ bool KickLockAudioProcessor::isBassProcessingNeutral() const noexcept
 {
     constexpr float epsilon = 1.0e-6f;
 
-    const float delayMs = delayMsParam != nullptr ? delayMsParam->load()
-                                                  : (delayMsLegacyParam != nullptr ? delayMsLegacyParam->load() : 0.0f);
-    const bool polarity = (polarityInvertParam != nullptr && polarityInvertParam->load() > 0.5f)
-                       || (polarityInvertLegacyParam != nullptr && polarityInvertLegacyParam->load() > 0.5f);
-    const bool phaseFilter = (phaseFilterEnabledParam != nullptr && phaseFilterEnabledParam->load() > 0.5f)
-                          || (phaseFilterEnabledLegacyParam != nullptr && phaseFilterEnabledLegacyParam->load() > 0.5f);
     const float dynEqAmount = dynEqAmountParam != nullptr ? dynEqAmountParam->load() : 0.0f;
 
-    return std::abs (delayMs) <= epsilon && ! polarity && ! phaseFilter && dynEqAmount <= epsilon;
+    return std::abs (getEffectiveDelayMs()) <= epsilon
+        && ! getEffectivePolarityInvert()
+        && ! getEffectivePhaseFilterEnabled()
+        && dynEqAmount <= epsilon;
 }
 
 void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -1254,17 +1365,10 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     double bassEnergySum = 0.0;
     double kickEnergySum = 0.0;
 
-    const float snakeDelayMs = delayMsParam != nullptr ? delayMsParam->load() : 0.0f;
-    const float legacyDelayMs = delayMsLegacyParam != nullptr ? delayMsLegacyParam->load() : 0.0f;
-    const float delayMs = std::abs (snakeDelayMs) > 1.0e-6f ? snakeDelayMs : legacyDelayMs;
-
-    const bool polarityInvert = (polarityInvertParam != nullptr && polarityInvertParam->load() > 0.5f)
-                             || (polarityInvertLegacyParam != nullptr && polarityInvertLegacyParam->load() > 0.5f);
-    const bool phaseFilterEnabled = (phaseFilterEnabledParam != nullptr && phaseFilterEnabledParam->load() > 0.5f)
-                                 || (phaseFilterEnabledLegacyParam != nullptr && phaseFilterEnabledLegacyParam->load() > 0.5f);
-    const float snakeFreq = rotatorFreqParam != nullptr ? rotatorFreqParam->load() : 50.0f;
-    const float legacyFreq = rotatorFreqLegacyParam != nullptr ? rotatorFreqLegacyParam->load() : 50.0f;
-    const float allpassFreq = std::abs (snakeFreq - 50.0f) > 1.0e-4f ? snakeFreq : legacyFreq;
+    const float delayMs = getEffectiveDelayMs();
+    const bool polarityInvert = getEffectivePolarityInvert();
+    const bool phaseFilterEnabled = getEffectivePhaseFilterEnabled();
+    const float allpassFreq = getEffectiveAllpassFreqHz();
     const float allpassQ = rotatorQParam != nullptr ? rotatorQParam->load() : 0.70710678f;
     const int allpassStages = 2 + (rotatorStagesParam != nullptr
                                        ? juce::jlimit (0, 2, (int) std::lround (rotatorStagesParam->load()))
@@ -1585,10 +1689,10 @@ void KickLockAudioProcessor::setParameterValueWithGesture (const char* id, float
 KickLockAudioProcessor::ParameterSnapshot KickLockAudioProcessor::captureCurrentParameterSnapshot() const
 {
     ParameterSnapshot snapshot;
-    snapshot.delayMs = readParameterValue ("delay_ms", readParameterValue ("delayMs", 0.0f));
-    snapshot.polarityInvert = readParameterValue ("polarity_invert", readParameterValue ("polarityInvert", 0.0f)) > 0.5f;
-    snapshot.phaseFilterEnabled = readParameterValue ("allpass_enable", readParameterValue ("phaseFilterEnabled", 0.0f)) > 0.5f;
-    snapshot.phaseFilterFreqHz = readParameterValue ("allpass_freq", readParameterValue ("rotatorFreq", 50.0f));
+    snapshot.delayMs = getEffectiveDelayMs();
+    snapshot.polarityInvert = getEffectivePolarityInvert();
+    snapshot.phaseFilterEnabled = getEffectivePhaseFilterEnabled();
+    snapshot.phaseFilterFreqHz = getEffectiveAllpassFreqHz();
     snapshot.phaseFilterQ = readParameterValue ("rotatorQ", 0.7f);
     snapshot.phaseFilterStageIndex = juce::jlimit (0, 2, (int) std::lround (readParameterValue ("rotatorStages", 0.0f)));
     return snapshot;
@@ -1747,7 +1851,39 @@ void KickLockAudioProcessor::setStateInformation (const void* data, int sizeInBy
     if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
     {
         auto restoredState = juce::ValueTree::fromXml (*xml);
+        const bool hasDelayMs = restoredState.hasProperty (juce::Identifier ("delay_ms"));
+        const bool hasLegacyDelayMs = restoredState.hasProperty (juce::Identifier ("delayMs"));
+        const bool hasPolarityInvert = restoredState.hasProperty (juce::Identifier ("polarity_invert"));
+        const bool hasLegacyPolarityInvert = restoredState.hasProperty (juce::Identifier ("polarityInvert"));
+        const bool hasAllpassEnable = restoredState.hasProperty (juce::Identifier ("allpass_enable"));
+        const bool hasLegacyPhaseFilterEnabled = restoredState.hasProperty (juce::Identifier ("phaseFilterEnabled"));
+        const bool hasAllpassFreq = restoredState.hasProperty (juce::Identifier ("allpass_freq"));
+        const bool hasLegacyRotatorFreq = restoredState.hasProperty (juce::Identifier ("rotatorFreq"));
+
         apvts.replaceState (restoredState);
+
+        auto migrateLegacyToCanonical = [this, &restoredState] (bool hasCanonical,
+                                                                bool hasLegacy,
+                                                                const char* canonicalId,
+                                                                const char* legacyId)
+        {
+            if (hasCanonical || ! hasLegacy)
+                return;
+
+            auto* parameter = apvts.getParameter (canonicalId);
+            if (parameter == nullptr)
+                return;
+
+            const auto value = (float) restoredState.getProperty (juce::Identifier (legacyId),
+                                                                  parameter->convertFrom0to1 (parameter->getValue()));
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+            apvts.state.setProperty (juce::Identifier (canonicalId), value, nullptr);
+        };
+
+        migrateLegacyToCanonical (hasDelayMs, hasLegacyDelayMs, "delay_ms", "delayMs");
+        migrateLegacyToCanonical (hasPolarityInvert, hasLegacyPolarityInvert, "polarity_invert", "polarityInvert");
+        migrateLegacyToCanonical (hasAllpassEnable, hasLegacyPhaseFilterEnabled, "allpass_enable", "phaseFilterEnabled");
+        migrateLegacyToCanonical (hasAllpassFreq, hasLegacyRotatorFreq, "allpass_freq", "rotatorFreq");
 
         auto snapBoolParameter = [this, &restoredState] (const char* id)
         {
@@ -1765,6 +1901,15 @@ void KickLockAudioProcessor::setStateInformation (const void* data, int sizeInBy
         snapBoolParameter ("polarityInvert");
         snapBoolParameter ("allpass_enable");
         snapBoolParameter ("phaseFilterEnabled");
+
+        markRestoredParameterSources (hasDelayMs || hasLegacyDelayMs,
+                                      hasLegacyDelayMs,
+                                      hasPolarityInvert || hasLegacyPolarityInvert,
+                                      hasLegacyPolarityInvert,
+                                      hasAllpassEnable || hasLegacyPhaseFilterEnabled,
+                                      hasLegacyPhaseFilterEnabled,
+                                      hasAllpassFreq || hasLegacyRotatorFreq,
+                                      hasLegacyRotatorFreq);
 
         compareSlotsInitialised = false;
         loadCompareSlotsFromState();
@@ -1917,11 +2062,11 @@ bool KickLockAudioProcessor::applyLatestFix()
     setParameterValueWithGesture ("polarityInvert", fix.bassPolarityInvert ? 1.0f : 0.0f);
     setParameterValueWithGesture ("delay_ms", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
     setParameterValueWithGesture ("delayMs", juce::jlimit (-20.0f, 20.0f, fix.bassDelayMs));
-    setParameterValueWithGesture ("allpass_enable", fix.phaseFilterEnabled ? 1.0f : 0.0f);
-    setParameterValueWithGesture ("phaseFilterEnabled", fix.phaseFilterEnabled ? 1.0f : 0.0f);
 
     if (fix.phaseFilterEnabled)
     {
+        setParameterValueWithGesture ("allpass_enable", 1.0f);
+        setParameterValueWithGesture ("phaseFilterEnabled", 1.0f);
         setParameterValueWithGesture ("allpass_freq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
         setParameterValueWithGesture ("rotatorFreq", juce::jlimit (20.0f, 500.0f, fix.phaseFilterFreqHz));
         setParameterValueWithGesture ("rotatorQ", fix.phaseFilterQ);
@@ -1931,12 +2076,13 @@ bool KickLockAudioProcessor::applyLatestFix()
     if (! bassWindow.empty() && bassWindow.size() == kickWindow.size())
     {
         PhaseFixRenderSettings settings;
-        settings.bassPolarityInvert = fix.bassPolarityInvert;
-        settings.bassDelayMs = fix.bassDelayMs;
-        settings.phaseFilterEnabled = fix.phaseFilterEnabled;
-        settings.phaseFilterFreqHz = fix.phaseFilterFreqHz;
-        settings.phaseFilterQ = fix.phaseFilterQ;
-        settings.phaseFilterStages = fix.phaseFilterStages;
+        const auto appliedSnapshot = captureCurrentParameterSnapshot();
+        settings.bassPolarityInvert = appliedSnapshot.polarityInvert;
+        settings.bassDelayMs = appliedSnapshot.delayMs;
+        settings.phaseFilterEnabled = appliedSnapshot.phaseFilterEnabled;
+        settings.phaseFilterFreqHz = appliedSnapshot.phaseFilterFreqHz;
+        settings.phaseFilterQ = appliedSnapshot.phaseFilterQ;
+        settings.phaseFilterStages = 2 + appliedSnapshot.phaseFilterStageIndex;
         settings.delayInterpolation = interpolationFromChoice (delayInterpParam != nullptr
                                                                    ? delayInterpParam->load()
                                                                    : 0.0f);

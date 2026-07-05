@@ -639,6 +639,25 @@ public:
             expectWithinAbsoluteError (r.predictedAfterMatchPercent, rendered.matchPercent, 0.01f);
         }
 
+        beginTest ("Render candidate honours negative bass delay");
+        {
+            std::vector<float> bass ((size_t) n, 0.0f);
+            bass[1000] = 1.0f;
+
+            PhaseFixRenderSettings settings;
+            settings.bassDelayMs = -2.0f;
+
+            std::vector<float> rendered;
+            PhaseFixEngine::renderCandidate (bass.data(), n, kSampleRate, settings, rendered, 20.0f);
+
+            int peak = 0;
+            for (int i = 1; i < n; ++i)
+                if (std::abs (rendered[(size_t) i]) > std::abs (rendered[(size_t) peak]))
+                    peak = i;
+
+            expectEquals (peak, 904);
+        }
+
         beginTest ("Analyze confidence is measured, not forced to 100 percent");
         {
             std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);

@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -23,7 +24,8 @@
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
 
-class KickLockAudioProcessor : public juce::AudioProcessor
+class KickLockAudioProcessor : public juce::AudioProcessor,
+                               private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     KickLockAudioProcessor();
@@ -165,6 +167,30 @@ private:
     std::atomic<float>* dynEqHoldMsParam = nullptr;
     std::atomic<float>* dynEqReleaseMsParam = nullptr;
     std::atomic<float>* dynEqTriggerRatioParam = nullptr;
+
+    void parameterChanged (const juce::String& parameterID, float newValue) override;
+    void markRestoredParameterSources (bool hasDelayMs,
+                                       bool hasLegacyDelayMs,
+                                       bool hasPolarityInvert,
+                                       bool hasLegacyPolarityInvert,
+                                       bool hasAllpassEnable,
+                                       bool hasLegacyPhaseFilterEnabled,
+                                       bool hasAllpassFreq,
+                                       bool hasLegacyRotatorFreq) noexcept;
+    float getEffectiveDelayMs() const noexcept;
+    bool getEffectivePolarityInvert() const noexcept;
+    bool getEffectivePhaseFilterEnabled() const noexcept;
+    float getEffectiveAllpassFreqHz() const noexcept;
+
+    std::atomic<uint32_t> parameterChangeCounter { 1 };
+    std::atomic<uint32_t> delayCanonicalChange { 1 };
+    std::atomic<uint32_t> delayLegacyChange { 0 };
+    std::atomic<uint32_t> polarityCanonicalChange { 1 };
+    std::atomic<uint32_t> polarityLegacyChange { 0 };
+    std::atomic<uint32_t> phaseCanonicalChange { 1 };
+    std::atomic<uint32_t> phaseLegacyChange { 0 };
+    std::atomic<uint32_t> allpassFreqCanonicalChange { 1 };
+    std::atomic<uint32_t> allpassFreqLegacyChange { 0 };
 
     MultibandPhaseCore multibandCore;
     std::unique_ptr<AutoAlignEngine> autoAlignEngine;

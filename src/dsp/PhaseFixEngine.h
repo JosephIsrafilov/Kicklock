@@ -475,10 +475,12 @@ private:
                                      std::vector<float>& out)
     {
         const float sign = settings.bassPolarityInvert ? -1.0f : 1.0f;
-        const float clampedDelayMs = std::max (0.0f, settings.bassDelayMs);
-        const bool delayActive = clampedDelayMs > 1.0e-6f;
+        const float clampedDelayMs = juce::jlimit (-renderMaxDelayMs,
+                                                   renderMaxDelayMs,
+                                                   settings.bassDelayMs);
+        const bool delayActive = std::abs (clampedDelayMs) > 1.0e-6f;
 
-        if (delayActive)
+        if (delayActive && clampedDelayMs > 0.0f)
         {
             FractionalDelayLine delay;
             delay.prepare (sampleRate, std::max (renderMaxDelayMs, clampedDelayMs));
@@ -487,6 +489,21 @@ private:
 
             for (int i = 0; i < numSamples; ++i)
                 out[(size_t) i] = delay.processSample (sign * bass[i]);
+        }
+        else if (delayActive)
+        {
+            const float advanceSamples = (float) (sampleRate * (double) -clampedDelayMs / 1000.0);
+            const int wholeSamples = (int) std::floor (advanceSamples);
+            const float frac = advanceSamples - (float) wholeSamples;
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int i0 = i + wholeSamples;
+                const int i1 = i0 + 1;
+                const float x0 = i0 < numSamples ? bass[i0] : 0.0f;
+                const float x1 = i1 < numSamples ? bass[i1] : 0.0f;
+                out[(size_t) i] = sign * (x0 + frac * (x1 - x0));
+            }
         }
         else
         {
@@ -610,12 +627,16 @@ private:
             wroteAction = true;
         }
 
-        if (result.bassDelayMs > 0.02f)
+        if (std::abs (result.bassDelayMs) > 0.02f)
         {
             if (wroteAction)
                 summary << " + ";
 
-            summary << "delay bass " << juce::String (result.bassDelayMs, 2) << " ms";
+            if (result.bassDelayMs >= 0.0f)
+                summary << "delay bass " << juce::String (result.bassDelayMs, 2) << " ms";
+            else
+                summary << "advance bass " << juce::String (-result.bassDelayMs, 2) << " ms";
+
             wroteAction = true;
         }
 

@@ -150,6 +150,44 @@ public:
             expectFixedLatencyOutput (secondBuffer, processor.getLatencySamples(), 2, 4096);
         }
 
+        beginTest ("Visible phase controls override stale legacy phase controls");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
+            processor.prepareToPlay (kSampleRate, 4096);
+
+            setBoolParam (processor, "phaseFilterEnabled", true);
+            setFloatParam (processor, "rotatorFreq", 450.0f);
+            expect (! processor.isBassProcessingNeutral());
+
+            setBoolParam (processor, "allpass_enable", false);
+            setFloatParam (processor, "allpass_freq", 50.0f);
+            expect (processor.isBassProcessingNeutral());
+
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             4096);
+            juce::MidiBuffer midi;
+            fillBass (buffer, 4096);
+            processor.processBlock (buffer, midi);
+            expectFixedLatencyOutput (buffer, processor.getLatencySamples(), 2, 4096);
+        }
+
+        beginTest ("Legacy phase controls still work when touched last");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
+            processor.prepareToPlay (kSampleRate, 4096);
+
+            setBoolParam (processor, "allpass_enable", false);
+            setBoolParam (processor, "phaseFilterEnabled", true);
+            setFloatParam (processor, "rotatorFreq", 450.0f);
+
+            expect (! processor.isBassProcessingNeutral());
+        }
+
         beginTest ("Apply Fix changes only safe bass-path parameters");
         {
             KickLockAudioProcessor processor;
@@ -178,14 +216,18 @@ public:
             }
         }
 
-        beginTest ("Apply Fix disables stale phase filter when the new fix does not use it");
+        beginTest ("Apply Fix preserves manual phase filter when the new fix does not use it");
         {
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
 
+            setBoolParam (processor, "allpass_enable", true);
             setBoolParam (processor, "phaseFilterEnabled", true);
+            setFloatParam (processor, "allpass_freq", 90.0f);
             setFloatParam (processor, "rotatorFreq", 90.0f);
+            setFloatParam (processor, "rotatorQ", 4.0f);
+            setFloatParam (processor, "rotatorStages", 2.0f);
 
             PhaseFixResult fix;
             fix.valid = true;
@@ -200,9 +242,13 @@ public:
             processor.setLatestFixResultForTesting (fix);
 
             expect (processor.applyLatestFix());
-            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 1.0f, 1.0e-7f);
             expectWithinAbsoluteError (rawParam (processor, "polarityInvert"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 90.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 90.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 4.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 2.0f, 1.0e-7f);
         }
 
         beginTest ("Apply Fix can write an optional phase refinement");
