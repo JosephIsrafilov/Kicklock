@@ -208,21 +208,52 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     addAndMakeVisible (crossoverSlider);
 
     configureRotary (dynEqAmountSlider);
-    dynEqAmountSlider.setNumDecimalPlacesToDisplay (2);
+    dynEqAmountSlider.textFromValueFunction = [] (double value)
+    {
+        return juce::String ((int) std::round (value * 100.0)) + "%";
+    };
+    dynEqAmountSlider.valueFromTextFunction = [] (const juce::String& input)
+    {
+        const float value = input.retainCharacters ("0123456789.").getFloatValue();
+        return input.containsChar ('%') ? (double) (value / 100.0f) : (double) value;
+    };
+    dynEqAmountSlider.setTooltip ("Sidechain-triggered high-band transient EQ amount. At 0%, the EQ Freq, EQ Q and EQ Boost controls are intentionally inactive.");
     addAndMakeVisible (dynEqAmountSlider);
 
     configureRotary (dynEqFreqSlider);
-    dynEqFreqSlider.setTextValueSuffix (" Hz");
-    dynEqFreqSlider.setNumDecimalPlacesToDisplay (0);
+    dynEqFreqSlider.textFromValueFunction = [] (double value)
+    {
+        return juce::String ((int) std::round (value)) + " Hz";
+    };
+    dynEqFreqSlider.valueFromTextFunction = [] (const juce::String& input)
+    {
+        return (double) input.retainCharacters ("0123456789.").getFloatValue();
+    };
+    dynEqFreqSlider.setTooltip ("Frequency of the transient enhancer. Audible only when Transient Amt and EQ Boost are above zero.");
     addAndMakeVisible (dynEqFreqSlider);
 
     configureRotary (dynEqQSlider);
-    dynEqQSlider.setNumDecimalPlacesToDisplay (2);
+    dynEqQSlider.textFromValueFunction = [] (double value)
+    {
+        return juce::String (value, 2);
+    };
+    dynEqQSlider.valueFromTextFunction = [] (const juce::String& input)
+    {
+        return (double) input.retainCharacters ("0123456789.").getFloatValue();
+    };
+    dynEqQSlider.setTooltip ("Sharpness of the transient enhancer band. Audible only when Transient Amt and EQ Boost are above zero.");
     addAndMakeVisible (dynEqQSlider);
 
     configureRotary (dynEqBoostSlider);
-    dynEqBoostSlider.setTextValueSuffix (" dB");
-    dynEqBoostSlider.setNumDecimalPlacesToDisplay (1);
+    dynEqBoostSlider.textFromValueFunction = [] (double value)
+    {
+        return juce::String (value, 1) + " dB";
+    };
+    dynEqBoostSlider.valueFromTextFunction = [] (const juce::String& input)
+    {
+        return (double) input.retainCharacters ("0123456789.").getFloatValue();
+    };
+    dynEqBoostSlider.setTooltip ("Maximum transient boost. At 0 dB this section is intentionally silent even if Transient Amt is raised.");
     addAndMakeVisible (dynEqBoostSlider);
 
     configureControlLabel (delayLabel, "Delay");
@@ -232,7 +263,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureControlLabel (phaseQLabel, "Q");
     configureControlLabel (visualOffsetLabel, "Visual Offset");
     configureControlLabel (crossoverLabel, "Crossover");
-    configureControlLabel (dynEqAmountLabel, "Transient");
+    configureControlLabel (dynEqAmountLabel, "Trans Amt");
     configureControlLabel (dynEqFreqLabel, "EQ Freq");
     configureControlLabel (dynEqQLabel, "EQ Q");
     configureControlLabel (dynEqBoostLabel, "EQ Boost");
@@ -516,6 +547,26 @@ void KickLockAudioProcessorEditor::refreshCompareButtons()
     helpButton.setColour (juce::TextButton::textColourOffId, helpOverlayVisible ? juce::Colours::black : text);
 }
 
+void KickLockAudioProcessorEditor::refreshTransientEqControlState()
+{
+    const auto* amountParam = audioProcessor.apvts.getRawParameterValue ("dyneq_amount");
+    const auto* boostParam = audioProcessor.apvts.getRawParameterValue ("dyneq_boost_db");
+    const float amount = amountParam != nullptr ? amountParam->load() : 0.0f;
+    const float boostDb = boostParam != nullptr ? boostParam->load() : 0.0f;
+
+    const bool active = amount > 0.001f && boostDb > 0.01f;
+    const float dependentAlpha = active ? 1.0f : 0.48f;
+    const auto dependentColour = active ? mutedText : mutedText.withAlpha (0.55f);
+
+    dynEqFreqSlider.setAlpha (dependentAlpha);
+    dynEqQSlider.setAlpha (dependentAlpha);
+    dynEqFreqLabel.setColour (juce::Label::textColourId, dependentColour);
+    dynEqQLabel.setColour (juce::Label::textColourId, dependentColour);
+
+    dynEqAmountLabel.setColour (juce::Label::textColourId, active ? teal : amber);
+    dynEqBoostLabel.setColour (juce::Label::textColourId, amount > 0.001f ? mutedText : mutedText.withAlpha (0.75f));
+}
+
 void KickLockAudioProcessorEditor::timerCallback()
 {
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
@@ -530,6 +581,7 @@ void KickLockAudioProcessorEditor::timerCallback()
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
     refreshCompareButtons();
+    refreshTransientEqControlState();
 
     repaint();
 }

@@ -309,10 +309,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
                                                       juce::PathStrokeType::rounded));
     };
 
-    for (int i = ghostCount - 1; i >= 0; --i)
-        drawPair (ghostBass[(size_t) i], ghostKick[(size_t) i], 0.20f);
-
     drawPair (triggeredBass, triggeredKick, 0.95f);
+    drawWaveLegend (g, bounds);
 
     g.setColour (labelColour);
     g.setFont (juce::Font (juce::FontOptions (10.5f)));
@@ -517,6 +515,8 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
     g.setColour (bassColour.withAlpha (0.96f));
     g.strokePath (bassPath, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved,
                                                   juce::PathStrokeType::rounded));
+
+    drawWaveLegend (g, bounds);
 }
 
 void Oscilloscope::drawSeparateMode (juce::Graphics& g,
@@ -576,6 +576,28 @@ void Oscilloscope::drawSeparateMode (juce::Graphics& g,
 
     drawLane (visibleMainBuffer, bassCentreY, bassColour, "BASS");
     drawLane (visibleSideBuffer, kickCentreY, kickColour, "KICK");
+}
+
+void Oscilloscope::drawWaveLegend (juce::Graphics& g, juce::Rectangle<float> bounds) const
+{
+    auto legend = juce::Rectangle<float> (bounds.getRight() - 112.0f,
+                                          bounds.getY() + 18.0f,
+                                          104.0f,
+                                          14.0f);
+
+    auto drawItem = [&] (juce::Rectangle<float> item, juce::Colour colour, const char* label)
+    {
+        const float y = item.getCentreY();
+        g.setColour (colour.withAlpha (0.92f));
+        g.drawLine (item.getX(), y, item.getX() + 14.0f, y, 2.0f);
+        g.setFont (juce::Font (juce::FontOptions (10.5f)).boldened());
+        g.drawText (label,
+                    item.withTrimmedLeft (18.0f).toNearestInt(),
+                    juce::Justification::centredLeft);
+    };
+
+    drawItem (legend.removeFromLeft (52.0f), bassColour, "BASS");
+    drawItem (legend, kickColour, "KICK");
 }
 
 void Oscilloscope::drawTransientMarkers (juce::Graphics& g,

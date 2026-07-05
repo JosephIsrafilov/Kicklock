@@ -55,6 +55,7 @@ private:
     void refreshStatusStrings();
     void refreshAnalyzeWorkflow();
     void refreshCompareButtons();
+    void refreshTransientEqControlState();
     void pushScopeSettings();
 
     KickLockAudioProcessor& audioProcessor;

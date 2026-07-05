@@ -83,6 +83,7 @@ private:
     void drawTriggeredMode (juce::Graphics&, juce::Rectangle<float>, float);
     void drawOverlayMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
     void drawSeparateMode (juce::Graphics&, juce::Rectangle<float>, int, float);
+    void drawWaveLegend (juce::Graphics&, juce::Rectangle<float>) const;
     void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void rebuildVisibleBuffers (int visible);
