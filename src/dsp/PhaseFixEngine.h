@@ -80,8 +80,8 @@ struct PhaseFixResult
 class PhaseFixEngine
 {
 public:
-    static constexpr float defaultAutoFixMaxDelayMs = 5.0f;
-    static constexpr float extendedAutoFixMaxDelayMs = 15.0f;
+    static constexpr float defaultAutoFixMaxDelayMs = 20.0f;
+    static constexpr float extendedAutoFixMaxDelayMs = 20.0f;
     static constexpr float absoluteManualMaxDelayMs = 50.0f;
 
     // Transient-hit window (ReVision-style): crop analysis to just around the
@@ -104,9 +104,11 @@ public:
             return result;
 
         std::vector<float> work ((size_t) numSamples, 0.0f);
-        renderBassCandidate (bass, numSamples, sampleRate, settings, renderMaxDelayMs, work);
+        std::vector<float> renderedKick ((size_t) numSamples, 0.0f);
+        renderCandidatePair (bass, kick, numSamples, sampleRate, settings, renderMaxDelayMs,
+                             work, renderedKick);
 
-        const auto scored = score (work.data(), kick, numSamples, sampleRate);
+        const auto scored = score (work.data(), renderedKick.data(), numSamples, sampleRate);
         result.multi = scored.multi;
         result.matchPercent = scored.match;
         result.confidence = scored.confidence;
@@ -234,7 +236,9 @@ public:
         {
             PhaseFixRenderSettings settings;
             settings.bassPolarityInvert = invert;
-            settings.bassDelayMs = std::max (0.0f, delayMs);
+            settings.bassDelayMs = juce::jlimit (-absoluteManualMaxDelayMs,
+                                                 absoluteManualMaxDelayMs,
+                                                 delayMs);
             settings.phaseFilterEnabled = useRotator && align.adjustRotator;
             settings.phaseFilterFreqHz = align.rotatorFreqHz;
             settings.phaseFilterQ = align.rotatorQ;
@@ -257,12 +261,15 @@ public:
             }
         };
 
-        const float candidateDelayMs = (hasTransientOffset && transientOffsetMs > 0.1f)
+        const float candidateDelayMs = (hasTransientOffset && std::abs (transientOffsetMs) > 0.1f)
             ? transientOffsetMs
-            : std::max (0.0f, align.delayMs);
+            : align.delayMs;
         const bool polarityCandidates[] = { align.invertPolarity, ! align.invertPolarity };
-        const bool useTimingCandidate = candidateDelayMs > 0.1f;
-        const float delayCandidates[] = { candidateDelayMs, useTimingCandidate ? candidateDelayMs : 0.0f };
+        const bool useTimingCandidate = std::abs (candidateDelayMs) > 0.1f;
+        const bool useAnalyzerDelay = std::abs (align.delayMs - candidateDelayMs) > 0.1f;
+        const float delayCandidates[] = { candidateDelayMs,
+                                          useAnalyzerDelay ? align.delayMs : candidateDelayMs,
+                                          useTimingCandidate ? 0.0f : candidateDelayMs };
 
         for (const bool invert : polarityCandidates)
         {
@@ -293,24 +300,14 @@ public:
         result.improvementPercent = result.afterMatchPercent - result.beforeMatchPercent;
         result.confidence = std::min (before.confidence, bestConfidence);
 
-        if (hasTransientOffset && transientOffsetMs < -0.02f && result.improvementPercent < 5.0f)
-        {
-            result.requiresTimelineMove = true;
-            result.suggestedKickMoveMs = std::abs (transientOffsetMs);
-        }
-        else if (align.delayMs < -0.02f && result.improvementPercent < 5.0f)
-        {
-            result.requiresTimelineMove = true;
-            result.suggestedKickMoveMs = std::abs (align.delayMs);
-        }
-        else if ((hasTransientOffset && transientOffsetMs > maxDelayMs + 0.25f)
-                 || std::abs(align.delayMs) > maxDelayMs + 0.25f
+        if ((hasTransientOffset && std::abs (transientOffsetMs) > maxDelayMs + 0.25f)
+                 || std::abs (align.delayMs) > maxDelayMs + 0.25f
                  || (align.hitSearchLimit && std::abs (align.delayMs) >= maxDelayMs - 0.25f))
         {
             result.largeTimingOffset = true;
             result.detectedTimingOffsetMs = hasTransientOffset ? std::abs (transientOffsetMs)
                                                                : std::abs (align.delayMs);
-            result.bassDelayMs = std::min (result.bassDelayMs, maxDelayMs);
+            result.bassDelayMs = juce::jlimit (-maxDelayMs, maxDelayMs, result.bassDelayMs);
         }
 
         updateDerivedResultFields (result);
@@ -341,16 +338,16 @@ public:
             && (result.quality == PhaseFixQuality::StrongImprovement
                 || result.quality == PhaseFixQuality::PartialImprovement);
 
-        // Optional (recommend-but-don't-push) apply: a partial fix the user can
-        // audition, or an already-good match with an optional phase-filter
-        // refinement to offer. Deliberately excludes the large-offset/timeline
-        // advisories so Apply stays disabled for them.
+        // Optional apply: any stable, in-budget analysis can be written to the
+        // controls so the Analyze -> Apply button flow always has an auditionable
+        // result. Hard failures and out-of-budget advisories stay disabled.
         result.optionalApplyAllowed =
             result.valid
             && result.enoughSignal
             && ! result.unstableRecommendation
-            && (result.quality == PhaseFixQuality::PartialImprovement
-                || (result.quality == PhaseFixQuality::AlreadyGood && result.phaseFilterEnabled));
+            && result.quality != PhaseFixQuality::LargeTimingOffset
+            && result.quality != PhaseFixQuality::TimelineMoveRequired
+            && result.quality != PhaseFixQuality::NotEnoughSignal;
 
         result.message = makeMessage (result);
     }
@@ -508,6 +505,54 @@ private:
         }
     }
 
+    static void renderCandidatePair (const float* bass,
+                                     const float* kick,
+                                     int numSamples,
+                                     double sampleRate,
+                                     const PhaseFixRenderSettings& settings,
+                                     float renderMaxDelayMs,
+                                     std::vector<float>& bassOut,
+                                     std::vector<float>& kickOut)
+    {
+        bassOut.assign ((size_t) juce::jmax (0, numSamples), 0.0f);
+        kickOut.assign ((size_t) juce::jmax (0, numSamples), 0.0f);
+        if (bass == nullptr || kick == nullptr || numSamples <= 0 || sampleRate <= 0.0)
+            return;
+
+        const float signedDelayMs = juce::jlimit (-renderMaxDelayMs,
+                                                  renderMaxDelayMs,
+                                                  settings.bassDelayMs);
+        const float bassDelayMs = juce::jmax (0.0f, signedDelayMs);
+        const float kickDelayMs = juce::jmax (0.0f, -signedDelayMs);
+        const float sign = settings.bassPolarityInvert ? -1.0f : 1.0f;
+
+        FractionalDelayLine bassDelay;
+        FractionalDelayLine kickDelay;
+        const float maxDelayMs = juce::jmax (renderMaxDelayMs, std::abs (signedDelayMs));
+        bassDelay.prepare (sampleRate, maxDelayMs);
+        kickDelay.prepare (sampleRate, maxDelayMs);
+        bassDelay.setInterpolationType (settings.delayInterpolation);
+        kickDelay.setInterpolationType (settings.delayInterpolation);
+        bassDelay.setDelaySamples ((float) (sampleRate * (double) bassDelayMs / 1000.0));
+        kickDelay.setDelaySamples ((float) (sampleRate * (double) kickDelayMs / 1000.0));
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            bassOut[(size_t) i] = bassDelay.processSample (sign * bass[i]);
+            kickOut[(size_t) i] = kickDelay.processSample (kick[i]);
+        }
+
+        if (settings.phaseFilterEnabled)
+        {
+            AllpassPhaseRotator rotator;
+            rotator.prepare (sampleRate, settings.phaseFilterStages);
+            rotator.setParameters (settings.phaseFilterFreqHz, settings.phaseFilterQ);
+
+            for (int i = 0; i < numSamples; ++i)
+                bassOut[(size_t) i] = rotator.processSample (bassOut[(size_t) i]);
+        }
+    }
+
     static PhaseFixQuality classifyQuality (const PhaseFixResult& result) noexcept
     {
         if (! result.enoughSignal)
@@ -620,7 +665,7 @@ private:
                         + " Hz may clean up the conflict band.";
                 }
 
-                return "Already close. No major correction needed.";
+                return "Already close. Apply writes the measured low-end alignment so you can A/B it.";
 
             case PhaseFixQuality::StrongImprovement:
                 return "Fix found: Match "
@@ -637,7 +682,7 @@ private:
                     + "%. Apply if it sounds better.";
 
             case PhaseFixQuality::NoUsefulChange:
-                return "No useful bass-path fix found. Try a different kick/bass sample or adjust arrangement.";
+                return "Best low-end suggestion ready: " + formatActionSummary (result) + ". Apply to audition it.";
         }
 
         return "No useful bass-path fix found.";

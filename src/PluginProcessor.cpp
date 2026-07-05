@@ -368,18 +368,14 @@ namespace
             aggregated.confidence = hitObservations[(size_t)bestIdx].signalConfidence * 0.4f; // Penalized fallback
         }
 
-        // Clamp the delay to physics limits, but keep track if we exceeded it
-        if (aggregated.bassDelayMs > PhaseFixEngine::defaultAutoFixMaxDelayMs + 0.25f)
+        // Clamp the delay to the fixed-PDC budget, but keep track if we exceeded it.
+        if (std::abs (aggregated.bassDelayMs) > PhaseFixEngine::defaultAutoFixMaxDelayMs + 0.25f)
         {
             aggregated.largeTimingOffset = true;
-            aggregated.detectedTimingOffsetMs = aggregated.bassDelayMs;
-            aggregated.bassDelayMs = PhaseFixEngine::defaultAutoFixMaxDelayMs; // CLAMP FOR BEST EFFORT
-        }
-        else if (aggregated.bassDelayMs < -0.02f)
-        {
-            aggregated.requiresTimelineMove = true;
-            aggregated.suggestedKickMoveMs = -aggregated.bassDelayMs;
-            aggregated.bassDelayMs = 0.0f; // CLAMP FOR BEST EFFORT
+            aggregated.detectedTimingOffsetMs = std::abs (aggregated.bassDelayMs);
+            aggregated.bassDelayMs = juce::jlimit (-PhaseFixEngine::defaultAutoFixMaxDelayMs,
+                                                   PhaseFixEngine::defaultAutoFixMaxDelayMs,
+                                                   aggregated.bassDelayMs);
         }
 
         PhaseFixRenderSettings settings;
@@ -404,40 +400,21 @@ namespace
                 continue;
             }
 
-            // P4: render the candidate on the RAW hit slice first, then window
-            // both signals identically, then score. Windowing before rendering
-            // (the old order) shifts the delayed content relative to the Hann
-            // window and lets the delay-line fill-in eat early-window energy,
-            // skewing the reported after-match. The before-render is a no-op
-            // settings render (sign only), so both branches window post-render.
-            std::vector<float> renderedBassBefore;
-            std::vector<float> renderedBassAfter;
-            PhaseFixEngine::renderCandidate (bass.data() + hit.start, hit.length, sampleRate,
-                                             {}, renderedBassBefore);
-            PhaseFixEngine::renderCandidate (bass.data() + hit.start, hit.length, sampleRate,
-                                             settings, renderedBassAfter);
+            const auto before = PhaseFixEngine::scoreSettings (bass.data() + hit.start,
+                                                               kick.data() + hit.start,
+                                                               hit.length,
+                                                               sampleRate,
+                                                               {},
+                                                               PhaseFixEngine::absoluteManualMaxDelayMs);
+            const auto after = PhaseFixEngine::scoreSettings (bass.data() + hit.start,
+                                                              kick.data() + hit.start,
+                                                              hit.length,
+                                                              sampleRate,
+                                                              settings,
+                                                              PhaseFixEngine::absoluteManualMaxDelayMs);
 
-            std::vector<float> windowedBassBefore (hit.length);
-            std::vector<float> windowedBassAfter (hit.length);
-            std::vector<float> windowedKick (hit.length);
-
-            for (int i = 0; i < hit.length; ++i)
-            {
-                const float w = 0.5f * (1.0f - std::cos (2.0f * 3.14159265358979323846f * i / (hit.length - 1)));
-                windowedBassBefore[(size_t) i] = renderedBassBefore[(size_t) i] * w;
-                windowedBassAfter[(size_t) i]  = renderedBassAfter[(size_t) i] * w;
-                windowedKick[(size_t) i]       = kick[hit.start + i] * w;
-            }
-
-            // Score the already-rendered, identically-windowed pairs on the one
-            // canonical ruler (P3), no further rendering inside the scorer.
-            const float before = MultiBandCorrelation::scoreRendered (windowedBassBefore.data(),
-                                                                      windowedKick.data(), hit.length, sampleRate);
-            const float after = MultiBandCorrelation::scoreRendered (windowedBassAfter.data(),
-                                                                     windowedKick.data(), hit.length, sampleRate);
-
-            sumBeforeMatch += before;
-            sumAfterMatch += after;
+            sumBeforeMatch += before.matchPercent;
+            sumAfterMatch += after.matchPercent;
             numScores++;
         }
 
@@ -982,7 +959,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
 
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "polarityInvert", 1 },
-        "Polarity Invert",
+        "Legacy Polarity Invert",
         false));
 
     layout.add (std::make_unique<juce::AudioParameterBool> (
@@ -1060,7 +1037,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::ParameterID { "dyneq_trigger_ratio", 1 },
         "Transient EQ Trigger Ratio",
         juce::NormalisableRange<float> (1.05f, 20.0f, 0.01f),
-        3.0f));
+        1.6f));
 
     return layout;
 }
@@ -1308,7 +1285,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     coreParams.dynEqAttackMs = dynEqAttackMsParam != nullptr ? dynEqAttackMsParam->load() : 2.0f;
     coreParams.dynEqHoldMs = dynEqHoldMsParam != nullptr ? dynEqHoldMsParam->load() : 18.0f;
     coreParams.dynEqReleaseMs = dynEqReleaseMsParam != nullptr ? dynEqReleaseMsParam->load() : 80.0f;
-    coreParams.dynEqTriggerRatio = dynEqTriggerRatioParam != nullptr ? dynEqTriggerRatioParam->load() : 3.0f;
+    coreParams.dynEqTriggerRatio = dynEqTriggerRatioParam != nullptr ? dynEqTriggerRatioParam->load() : 1.6f;
 
     rawBassLowpass.setCutoffFrequency (coreParams.crossoverHz);
     rawKickLowpass.setCutoffFrequency (coreParams.crossoverHz);
@@ -1769,7 +1746,26 @@ void KickLockAudioProcessor::setStateInformation (const void* data, int sizeInBy
 
     if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
     {
-        apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        auto restoredState = juce::ValueTree::fromXml (*xml);
+        apvts.replaceState (restoredState);
+
+        auto snapBoolParameter = [this, &restoredState] (const char* id)
+        {
+            auto* parameter = apvts.getParameter (id);
+            if (parameter == nullptr)
+                return;
+
+            const auto restoredValue = (float) restoredState.getProperty (id, parameter->getValue());
+            const float snappedValue = restoredValue >= 0.5f ? 1.0f : 0.0f;
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (snappedValue));
+            apvts.state.setProperty (id, snappedValue, nullptr);
+        };
+
+        snapBoolParameter ("polarity_invert");
+        snapBoolParameter ("polarityInvert");
+        snapBoolParameter ("allpass_enable");
+        snapBoolParameter ("phaseFilterEnabled");
+
         compareSlotsInitialised = false;
         loadCompareSlotsFromState();
     }

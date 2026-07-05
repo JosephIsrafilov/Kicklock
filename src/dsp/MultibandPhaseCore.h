@@ -28,7 +28,7 @@ public:
         float dynEqAttackMs = 2.0f;
         float dynEqHoldMs = 18.0f;
         float dynEqReleaseMs = 80.0f;
-        float dynEqTriggerRatio = 3.0f;
+        float dynEqTriggerRatio = 1.6f;
     };
 
     void prepare (double sr, int maxBlock, int channels, float latencyBudgetMs = 20.0f)

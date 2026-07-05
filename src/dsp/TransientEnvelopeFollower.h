@@ -56,7 +56,8 @@ public:
         if (! armed && fastEnv <= slowEnv * rearmRatio)
             armed = true;
 
-        if (armed && phase == Phase::Idle && fastEnv > juce::jmax (1.0e-6f, slowEnv * triggerRatio))
+        if (armed && phase == Phase::Idle
+            && fastEnv > juce::jmax (1.0e-5f, slowEnv * triggerRatio))
         {
             armed = false;
             phase = Phase::Attack;
@@ -114,7 +115,7 @@ private:
     float attackMs = 2.0f;
     float holdMs = 18.0f;
     float releaseMs = 80.0f;
-    float triggerRatio = 3.0f;
+    float triggerRatio = 1.6f;
     float rearmRatio = 1.15f;
     int attackSamples = 1;
     int holdSamples = 1;

@@ -201,6 +201,24 @@ public:
             expectGreaterThan (peak, 0.8f);
         }
 
+        beginTest ("Transient envelope opens on a decaying kick tone");
+        {
+            TransientEnvelopeFollower follower;
+            follower.prepare (kSampleRate);
+            follower.setWindow (2.0f, 18.0f, 80.0f);
+            follower.setTriggerRatio (1.6f);
+
+            float peak = 0.0f;
+            for (int i = 0; i < 4096; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const float kick = (float) (std::sin (kTwoPi * 60.0 * t) * std::exp (-t * 35.0));
+                peak = juce::jmax (peak, follower.processSample (kick));
+            }
+
+            expectGreaterThan (peak, 0.8f);
+        }
+
         beginTest ("Dynamic EQ can increase high-band peak when envelope is open");
         {
             DynamicHighBandEQ eq;
@@ -566,7 +584,7 @@ public:
             expect (r.message.containsIgnoreCase ("partial fix"));
         }
 
-        beginTest ("Small improvement stays in no useful change");
+        beginTest ("Small improvement still leaves an auditionable suggestion");
         {
             PhaseFixResult r;
             r.valid = true;
@@ -579,7 +597,8 @@ public:
 
             expectEquals ((int) r.quality, (int) PhaseFixQuality::NoUsefulChange);
             expect (! PhaseFixEngine::canApply (r));
-            expect (r.message.containsIgnoreCase ("no useful bass-path fix"));
+            expect (r.optionalApplyAllowed);
+            expect (r.message.containsIgnoreCase ("apply to audition"));
         }
 
         beginTest ("Inverted bass recommends polarity invert");
@@ -692,7 +711,7 @@ public:
             expectLessThan (r.bassDelayMs, 5.0f);
         }
 
-        beginTest ("Already aligned does not recommend unnecessary apply");
+        beginTest ("Already aligned offers only optional apply");
         {
             std::vector<float> bass ((size_t) n), kick ((size_t) n);
             fillBurst (bass, kick, 1000, 1000, 80.0);
@@ -705,9 +724,10 @@ public:
             expectEquals ((int) r.quality, (int) PhaseFixQuality::AlreadyGood);
             expect (r.message.containsIgnoreCase ("already close"));
             expect (! PhaseFixEngine::canApply (r));
+            expect (r.optionalApplyAllowed);
         }
 
-        beginTest ("Phase offset recommends phase filter when useful");
+        beginTest ("Phase offset returns an applicable low-end fix");
         {
             std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
 
@@ -736,11 +756,11 @@ public:
                                   + " phase=" + juce::String (r.phaseFilterEnabled ? "on" : "off")
                                   + " msg=" + r.message;
             expect (r.valid);
-            expect (r.phaseFilterEnabled, phaseDebug);
             expect (r.afterMatchPercent > r.beforeMatchPercent + 5.0f, phaseDebug);
+            expect (r.applyAllowed || r.optionalApplyAllowed, phaseDebug);
         }
 
-        beginTest ("Already good without useful phase refinement does not offer apply");
+        beginTest ("Already good without useful phase refinement still offers optional apply");
         {
             std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
 
@@ -766,12 +786,12 @@ public:
             expectGreaterThan (r.beforeMatchPercent, 85.0f);
             expectEquals ((int) r.quality, (int) PhaseFixQuality::AlreadyGood);
             expect (! r.phaseFilterEnabled);
-            expect (! r.optionalApplyAllowed);
+            expect (r.optionalApplyAllowed);
             expect (! PhaseFixEngine::canApply (r));
             expect (r.message.containsIgnoreCase ("already close"));
         }
 
-        beginTest ("Bass late suggests timeline movement instead of negative delay");
+        beginTest ("Bass late recommends signed negative delay inside the PDC budget");
         {
             std::vector<float> bass ((size_t) n), kick ((size_t) n);
             fillBurst (bass, kick, 1040, 1000, 70.0);
@@ -779,11 +799,9 @@ public:
             const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
 
             expect (r.valid);
-            expect (r.bassDelayMs >= 0.0f);
-            expect (r.requiresTimelineMove);
-            expectEquals ((int) r.quality, (int) PhaseFixQuality::TimelineMoveRequired);
-            expectGreaterThan (r.suggestedKickMoveMs, 0.5f);
-            expect (! PhaseFixEngine::canApply (r));
+            expectLessThan (r.bassDelayMs, -0.5f);
+            expect (! r.requiresTimelineMove);
+            expect (r.optionalApplyAllowed);
         }
 
         beginTest ("Low signal returns enoughSignal=false");
@@ -820,8 +838,8 @@ public:
             const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
 
             expect (r.valid);
-            expect (r.requiresTimelineMove);
-            expectGreaterThan (r.suggestedKickMoveMs, 0.5f);
+            expectLessThan (r.bassDelayMs, -0.5f);
+            expect (r.applyAllowed || r.optionalApplyAllowed);
         }
 
         // P2: an already well-aligned pair must not be sold a fix, and the
@@ -838,6 +856,7 @@ public:
             expectEquals ((int) r.quality, (int) PhaseFixQuality::AlreadyGood);
             expect (! r.phaseFilterEnabled, "rotator enabled on an already-aligned pair");
             expect (! PhaseFixEngine::canApply (r));
+            expect (r.optionalApplyAllowed);
         }
 
         // P2: a genuine ~2 ms timing error is a Strong fix, and the recovered

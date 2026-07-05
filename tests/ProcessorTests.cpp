@@ -96,6 +96,28 @@ public:
             expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::Idle);
         }
 
+        beginTest ("Background Analyze publishes an applyable suggestion");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 },
+                           { false, false, false, false }, 2048);
+
+            expect (processor.beginBackgroundAnalyze());
+
+            for (int tries = 0; tries < 200 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
+                juce::Thread::sleep (5);
+
+            expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::ResultReady);
+
+            const auto fix = processor.getLatestFixResult();
+            expect (fix.applyAllowed || fix.optionalApplyAllowed, fix.message);
+            expect (processor.applyLatestFix());
+        }
+
         beginTest ("Phase filter off stays transparent when rotator settings change");
         {
             KickLockAudioProcessor processor;

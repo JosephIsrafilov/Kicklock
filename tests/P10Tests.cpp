@@ -711,7 +711,7 @@ public:
             expectWithinAbsoluteError (fix.bassDelayMs, 200.0f / 48.0f, 0.8f);
         }
 
-        beginTest ("Perfectly aligned multi-hit loop stays AlreadyGood, not Unstable");
+        beginTest ("Perfectly aligned multi-hit loop stays AlreadyGood with optional apply");
         {
             KickLockAudioProcessor processor;
             processor.enableAllBuses();
@@ -725,7 +725,7 @@ public:
             expect (! fix.unstableRecommendation, fix.message);
             expectEquals ((int) fix.quality, (int) PhaseFixQuality::AlreadyGood);
             expect (! fix.applyAllowed);
-            expect (! fix.optionalApplyAllowed);
+            expect (fix.optionalApplyAllowed);
         }
 
         beginTest ("Conflicting hits are reported Unstable, not silently applied");
