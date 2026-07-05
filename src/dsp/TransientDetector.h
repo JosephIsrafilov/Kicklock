@@ -3,6 +3,24 @@
 #include <algorithm>
 #include <cmath>
 
+// Relative transient detector.
+//
+// The old detector compared a single envelope follower against an absolute
+// threshold and armed a rising-edge flag that only cleared once the envelope
+// fell back below that threshold. On long 808s / dense or noisy material the
+// energy between hits never dropped below the threshold, so the flag stayed
+// latched and every hit after the first was ignored until the transport
+// stopped and the signal hit absolute zero.
+//
+// This version tracks two envelopes:
+//   * a FAST follower that snaps to transient peaks, and
+//   * a SLOW follower that tracks the signal "body" / floor.
+// A hit is a rising edge where the fast envelope pulls meaningfully ahead of
+// the slow one. The slow envelope catches up within tens of ms after a
+// transient, so the edge flag re-arms on its own regardless of the absolute
+// level between hits — no return to silence required. The absolute floors
+// (threshold + minimumEnergyGate) remain only as safeguards against triggering
+// on the microscopic digital noise floor; they no longer drive the edge.
 class TransientDetector
 {
 public:
@@ -15,8 +33,9 @@ public:
 
     void reset() noexcept
     {
-        envelope = 0.0f;
-        wasAboveThreshold = false;
+        fastEnvelope = 0.0f;
+        slowEnvelope = 0.0f;
+        wasTriggering = false;
         holdoffSamplesRemaining = 0;
     }
 
@@ -30,11 +49,31 @@ public:
         minimumEnergyGate = std::max (0.0f, newMinimumEnergy);
     }
 
+    // Sets the FAST follower's attack/release (transient tracking). The slow
+    // "body" follower is derived from these so callers that only tune the fast
+    // envelope still get a sensible relative comparison.
     void setAttackReleaseMs (float attackMs, float releaseMs) noexcept
     {
         attackTimeMs = std::max (0.1f, attackMs);
         releaseTimeMs = std::max (attackTimeMs, releaseMs);
         updateCoefficients();
+    }
+
+    // Optional: tune the slow "body" follower directly. Defaults are derived
+    // from the fast release in setAttackReleaseMs, so this is rarely needed.
+    void setSlowAttackReleaseMs (float attackMs, float releaseMs) noexcept
+    {
+        slowAttackTimeMs = std::max (attackTimeMs, attackMs);
+        slowReleaseTimeMs = std::max (slowAttackTimeMs, releaseMs);
+        slowTimesExplicit = true;
+        updateCoefficients();
+    }
+
+    // How far the fast envelope must exceed the slow envelope (energy ratio)
+    // for a new attack to register. 1.0 = no headroom required.
+    void setTriggerRatio (float newRatio) noexcept
+    {
+        triggerRatio = std::max (1.0f, newRatio);
     }
 
     void setHoldoffMs (float newHoldoffMs) noexcept
@@ -46,16 +85,29 @@ public:
     bool processSample (float kickSample) noexcept
     {
         const float energy = kickSample * kickSample;
-        const float coeff = energy > envelope ? attackCoeff : releaseCoeff;
-        envelope = coeff * envelope + (1.0f - coeff) * energy;
+
+        const float fastCoeff = energy > fastEnvelope ? fastAttackCoeff : fastReleaseCoeff;
+        fastEnvelope = fastCoeff * fastEnvelope + (1.0f - fastCoeff) * energy;
+
+        const float slowCoeff = energy > slowEnvelope ? slowAttackCoeff : slowReleaseCoeff;
+        slowEnvelope = slowCoeff * slowEnvelope + (1.0f - slowCoeff) * energy;
 
         if (holdoffSamplesRemaining > 0)
             --holdoffSamplesRemaining;
 
-        const bool above = envelope >= threshold && envelope >= minimumEnergyGate;
-        const bool detected = above && ! wasAboveThreshold && holdoffSamplesRemaining <= 0;
+        // Safeguard floors: never react to the digital noise floor.
+        const bool aboveFloor = fastEnvelope >= minimumEnergyGate
+                             && fastEnvelope >= threshold;
 
-        wasAboveThreshold = above;
+        // Relative attack: the fast peak follower has pulled ahead of the slow
+        // body follower. This condition falls back to false on its own as the
+        // slow envelope catches up, so it re-arms without needing silence.
+        const bool triggering = aboveFloor
+                             && fastEnvelope > slowEnvelope * triggerRatio;
+
+        const bool detected = triggering && ! wasTriggering && holdoffSamplesRemaining <= 0;
+
+        wasTriggering = triggering;
 
         if (detected)
             holdoffSamplesRemaining = holdoffSamples;
@@ -63,13 +115,29 @@ public:
         return detected;
     }
 
-    float getEnvelope() const noexcept { return envelope; }
+    // Reports the fast (peak) envelope, matching the previous single-envelope
+    // semantics used by any UI/metering callers.
+    float getEnvelope() const noexcept { return fastEnvelope; }
 
 private:
     void updateCoefficients() noexcept
     {
-        attackCoeff = timeMsToCoeff (attackTimeMs);
-        releaseCoeff = timeMsToCoeff (releaseTimeMs);
+        fastAttackCoeff = timeMsToCoeff (attackTimeMs);
+        fastReleaseCoeff = timeMsToCoeff (releaseTimeMs);
+
+        // Derive the slow "body" follower from the fast release unless the
+        // caller pinned it explicitly. A slow attack lets the body lag behind
+        // a fresh transient; a long release keeps the reference steady between
+        // closely spaced hits.
+        if (! slowTimesExplicit)
+        {
+            slowAttackTimeMs = std::max (attackTimeMs, releaseTimeMs * 4.0f);
+            slowReleaseTimeMs = std::max (slowAttackTimeMs, releaseTimeMs * 12.5f);
+        }
+
+        slowAttackCoeff = timeMsToCoeff (slowAttackTimeMs);
+        slowReleaseCoeff = timeMsToCoeff (slowReleaseTimeMs);
+
         updateHoldoffSamples();
     }
 
@@ -89,11 +157,18 @@ private:
     float minimumEnergyGate = 0.0004f;
     float attackTimeMs = 2.0f;
     float releaseTimeMs = 60.0f;
+    float slowAttackTimeMs = 240.0f;
+    float slowReleaseTimeMs = 750.0f;
+    bool slowTimesExplicit = false;
+    float triggerRatio = 3.0f;
     float holdoffMs = 90.0f;
-    float attackCoeff = 0.0f;
-    float releaseCoeff = 0.0f;
-    float envelope = 0.0f;
-    bool wasAboveThreshold = false;
+    float fastAttackCoeff = 0.0f;
+    float fastReleaseCoeff = 0.0f;
+    float slowAttackCoeff = 0.0f;
+    float slowReleaseCoeff = 0.0f;
+    float fastEnvelope = 0.0f;
+    float slowEnvelope = 0.0f;
+    bool wasTriggering = false;
     int holdoffSamples = 1;
     int holdoffSamplesRemaining = 0;
 };

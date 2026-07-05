@@ -1030,6 +1030,10 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     transientDetector.setThreshold (0.004f);
     transientDetector.setMinimumEnergyGate (0.0004f);
     transientDetector.setAttackReleaseMs (2.0f, 60.0f);
+    // Relative detection: fire when the fast peak envelope pulls this many
+    // times ahead of the slow body envelope, so long 808s / noisy tails whose
+    // level never returns to silence still re-arm between hits.
+    transientDetector.setTriggerRatio (3.0f);
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 20.0f, 150.0f);
     transientFlags.assign ((size_t) juce::jmax (samplesPerBlock, 8192), 0);
