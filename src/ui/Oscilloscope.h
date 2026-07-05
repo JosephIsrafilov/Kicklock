@@ -135,5 +135,9 @@ private:
     float dragStartX = 0.0f;
     float dragStartDelayMs = 0.0f;
 
+    float displayScrollMs = 0.0f;
+    bool panGestureActive = false;
+    float panStartScrollMs = 0.0f;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Oscilloscope)
 };

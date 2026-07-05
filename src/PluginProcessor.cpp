@@ -1033,7 +1033,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 20.0f, 150.0f);
     transientFlags.assign ((size_t) juce::jmax (samplesPerBlock, 8192), 0);
-
     // Held-activity trackers for the P3 status. ~500 ms hold so a steady loop
     // never flickers to "no signal" in the gaps between kick transients. The
     // activation floor is low: it only needs to tell "playing" from "silent",

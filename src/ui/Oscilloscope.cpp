@@ -243,7 +243,9 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     }
 
     const int safePreRoll = juce::jlimit (0, n - 1, triggeredPreRollSamples);
-    const float triggerX = bounds.getX() + bounds.getWidth() * (float) safePreRoll / (float) (n - 1);
+    const float totalMsForScroll = samplesToMs (n, sampleRate);
+    const float shiftPixels = totalMsForScroll > 0.0f ? bounds.getWidth() * (displayScrollMs / totalMsForScroll) : 0.0f;
+    const float triggerX = bounds.getX() + bounds.getWidth() * (float) safePreRoll / (float) (n - 1) + shiftPixels;
 
     const float totalMs = samplesToMs (n, sampleRate);
     const float preMs = samplesToMs (safePreRoll, sampleRate);
@@ -272,7 +274,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         juce::Path bassPath, kickPath;
         for (int i = 0; i < samples; ++i)
         {
-            const float x = bounds.getX() + (float) i * xStep;
+            const float x = bounds.getX() + (float) i * xStep + shiftPixels;
             const float bassY = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) i] * gain) * halfHeight;
             const float kickY = midY - juce::jlimit (-1.0f, 1.0f, kick[(size_t) i] * gain) * halfHeight;
 
@@ -628,7 +630,9 @@ void Oscilloscope::drawScopeFooter (juce::Graphics& g,
 
 void Oscilloscope::rebuildVisibleBuffers (int visible)
 {
-    const int firstVisible = historyLength - visible;
+    const int undecimatedScrollSamples = msToSamples(displayScrollMs, sampleRate);
+    const int decimatedScrollSamples = undecimatedScrollSamples / std::max(1, decimationFactor);
+    const int firstVisible = historyLength - visible - decimatedScrollSamples;
 
     for (int i = 0; i < visible; ++i)
     {
@@ -694,38 +698,66 @@ void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)
 
 void Oscilloscope::mouseDown (const juce::MouseEvent& e)
 {
-    if (viewMode != ScopeViewMode::Triggered || delayParameter == nullptr)
-        return;
-
-    dragStartX = e.position.x;
-    dragStartDelayMs = delayParameter->convertFrom0to1 (delayParameter->getValue());
-    delayGestureActive = true;
-    delayParameter->beginChangeGesture();
+    if (viewMode == ScopeViewMode::Triggered && delayParameter != nullptr && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
+    {
+        dragStartX = e.position.x;
+        dragStartDelayMs = delayParameter->convertFrom0to1 (delayParameter->getValue());
+        delayGestureActive = true;
+        delayParameter->beginChangeGesture();
+    }
+    else
+    {
+        panGestureActive = true;
+        dragStartX = e.position.x;
+        panStartScrollMs = displayScrollMs;
+    }
 }
 
 void Oscilloscope::mouseDrag (const juce::MouseEvent& e)
 {
     if (delayGestureActive)
+    {
         setDelayFromDrag (e);
+    }
+    else if (panGestureActive)
+    {
+        const float pixelsMoved = e.position.x - dragStartX;
+        
+        float msPerPixel = 1.0f;
+        if (viewMode == ScopeViewMode::Triggered)
+            msPerPixel = 170.0f / (float) getWidth();
+        else
+        {
+            const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
+            msPerPixel = (float) calculateVisibleWindowMs(visible, sampleRate, decimationFactor) / (float) getWidth();
+        }
+        
+        displayScrollMs = panStartScrollMs - (pixelsMoved * msPerPixel);
+        repaint();
+    }
 }
 
 void Oscilloscope::mouseUp (const juce::MouseEvent&)
 {
-    if (! delayGestureActive || delayParameter == nullptr)
-        return;
-
-    delayParameter->endChangeGesture();
-    delayGestureActive = false;
+    if (delayGestureActive && delayParameter != nullptr)
+    {
+        delayParameter->endChangeGesture();
+        delayGestureActive = false;
+    }
+    panGestureActive = false;
 }
 
-void Oscilloscope::mouseDoubleClick (const juce::MouseEvent&)
+void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    if (viewMode != ScopeViewMode::Triggered || delayParameter == nullptr)
-        return;
+    displayScrollMs = 0.0f;
+    repaint();
 
-    delayParameter->beginChangeGesture();
-    delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (0.0f));
-    delayParameter->endChangeGesture();
+    if (viewMode == ScopeViewMode::Triggered && delayParameter != nullptr && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
+    {
+        delayParameter->beginChangeGesture();
+        delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (0.0f));
+        delayParameter->endChangeGesture();
+    }
 }
 
 void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -734,13 +766,31 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
 
     const float step = 1.0f + juce::jlimit (-0.5f, 0.5f, wheel.deltaY) * 0.6f;
 
-    if (e.mods.isShiftDown())
-        setAmpZoom (ampZoom * step);
-    else
-        setTimeZoom (timeZoom * step);
+    if (std::abs(wheel.deltaY) > 0.0f)
+    {
+        if (e.mods.isShiftDown())
+            setAmpZoom (ampZoom * step);
+        else
+            setTimeZoom (timeZoom * step);
+            
+        if (onZoomChanged != nullptr)
+            onZoomChanged();
+    }
 
-    if (onZoomChanged != nullptr)
-        onZoomChanged();
+    if (std::abs(wheel.deltaX) > 0.0f)
+    {
+        float msPerPixel = 1.0f;
+        if (viewMode == ScopeViewMode::Triggered)
+            msPerPixel = 170.0f / (float) getWidth();
+        else
+        {
+            const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
+            msPerPixel = (float) calculateVisibleWindowMs(visible, sampleRate, decimationFactor) / (float) getWidth();
+        }
+        
+        displayScrollMs -= wheel.deltaX * 100.0f * msPerPixel;
+        repaint();
+    }
 }
 
 void Oscilloscope::resized()
