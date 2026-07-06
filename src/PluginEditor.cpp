@@ -173,7 +173,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent,
                           p.liveBandMatchPercent,
-                          p.latestAppliedBeforePercent),
+                          p.latestAppliedBeforePercent,
+                          p.liveMatchValid),
       splitter ([this] (int h) { bottomPanelHeight = juce::jlimit (100, getHeight() - 100, h); resized(); })
 {
     setLookAndFeel (&lookAndFeel);
@@ -535,6 +536,13 @@ void KickLockAudioProcessorEditor::refreshStatusStrings()
     manualDelayText = "Manual Delay: " + formatSignedDelayMs (delayMs);
     manualDelayOverlay.setText (manualDelayText, juce::dontSendNotification);
 
+    // Sustained strongly-negative low-end correlation almost always means the
+    // bass is anti-phase: say so in words instead of leaving the user staring
+    // at a low percentage. Hysteresis in the helper keeps it from flickering.
+    polarityHintVisible = shouldShowPolarityHint (polarityHintVisible,
+                                                  audioProcessor.liveLowEndMatchPercent.load(),
+                                                  audioProcessor.liveMatchValid.load());
+
     noSidechainOverlay.setVisible (! hasSidechain);
 }
 
@@ -727,6 +735,14 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
     g.setFont (juce::Font (juce::FontOptions (11.0f)));
     g.drawText (bpmText + "   |   " + pdcText, infoRow,
                 juce::Justification::centredLeft);
+
+    if (polarityHintVisible)
+    {
+        g.setColour (amber);
+        g.setFont (juce::Font (juce::FontOptions (11.5f)).boldened());
+        g.drawText ("low end cancelling — try Invert", infoRow,
+                    juce::Justification::centredRight);
+    }
 
     // --- Lower panel backgrounds (geometry set in resized) -----------------
     auto drawPanel = [&g] (juce::Rectangle<int> r)

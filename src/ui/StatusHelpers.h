@@ -136,3 +136,23 @@ inline bool applyFixAvailable (bool hasSidechain, bool fixReady) noexcept
 {
     return hasSidechain && fixReady;
 }
+
+// Polarity-problem hint with hysteresis. A sustained, strongly negative
+// low-end correlation (match well below 50%) almost always means the bass is
+// anti-phase against the kick — the one-click fix is the Invert button, and
+// the UI should say so in words rather than leave a producer staring at a low
+// percentage. Hysteresis (show below 25%, clear above 32%) keeps the hint from
+// flickering while the value hovers around the threshold; the meter feeding it
+// is already EMA-smoothed. `meterValid` gates the hint off during silence.
+inline bool shouldShowPolarityHint (bool currentlyShown,
+                                    float lowEndMatchPercent,
+                                    bool meterValid) noexcept
+{
+    if (! meterValid)
+        return false;
+
+    if (currentlyShown)
+        return lowEndMatchPercent < 32.0f;
+
+    return lowEndMatchPercent < 25.0f;
+}

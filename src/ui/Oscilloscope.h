@@ -217,6 +217,12 @@ private:
     int freeRunTicks = 0;
     static constexpr int freeRunWatchdogTicks = 120;
 
+    // Ticks since the FIFO last delivered samples. Drives the triggered view's
+    // status line ("bass live" vs "input idle — showing last capture") so a
+    // stale display can never be mistaken for a live one.
+    int ticksSinceFifoRead = 1000;
+    static constexpr int idleAfterTicks = 30;   // ~0.5 s at 60 Hz
+
     juce::RangedAudioParameter* delayParameter = nullptr;
 
     // Scope-stream trigger markers published by the processor (see

@@ -200,6 +200,7 @@ private:
     juce::String manualDelayText { "Manual Delay: 0.00 ms" };
     bool hasSidechain = false;
     bool canStartAnalyze = false;
+    bool polarityHintVisible = false;
     AnalysisMaterialStatus latestMaterialStatus = AnalysisMaterialStatus::WaitingForSidechain;
     bool helpOverlayVisible = false;
 

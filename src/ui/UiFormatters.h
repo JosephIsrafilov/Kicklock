@@ -33,3 +33,15 @@ inline juce::String formatSignedDelayMs (float delayMs)
     const juce::String sign = normalised > 0.0f ? "+" : "-";
     return sign + juce::String (std::abs (normalised), 2) + " ms";
 }
+
+// Producer-language verdict for the scope's timing markers. The Δ value is
+// bassPeak - kickPeak in ms, so positive means the bass body lands AFTER the
+// kick. "Δ +5.20 ms" alone is engineer-speak; this says what to do about it.
+inline const char* timingVerdictText (float deltaMs, float inTimeToleranceMs = 0.25f) noexcept
+{
+    if (deltaMs > inTimeToleranceMs)
+        return "bass late";
+    if (deltaMs < -inTimeToleranceMs)
+        return "bass early";
+    return "in time";
+}

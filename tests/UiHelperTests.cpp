@@ -62,6 +62,25 @@ public:
                           4096);
         }
 
+        beginTest ("Timing verdict speaks producer language");
+        {
+            expectEquals (juce::String (timingVerdictText (5.2f)), juce::String ("bass late"));
+            expectEquals (juce::String (timingVerdictText (-3.1f)), juce::String ("bass early"));
+            expectEquals (juce::String (timingVerdictText (0.1f)), juce::String ("in time"));
+            expectEquals (juce::String (timingVerdictText (-0.2f)), juce::String ("in time"));
+        }
+
+        beginTest ("Polarity hint shows on sustained cancellation with hysteresis");
+        {
+            // Comes on below 25%, stays on until above 32%, never during silence.
+            expect (! shouldShowPolarityHint (false, 40.0f, true));
+            expect (! shouldShowPolarityHint (false, 28.0f, true));   // below on-threshold? no (25)
+            expect (shouldShowPolarityHint (false, 20.0f, true));
+            expect (shouldShowPolarityHint (true, 28.0f, true));      // hysteresis holds it on
+            expect (! shouldShowPolarityHint (true, 35.0f, true));    // clears above 32
+            expect (! shouldShowPolarityHint (true, 10.0f, false));   // silence gates it off
+        }
+
         beginTest ("Min/max columns capture every peak and split ranges exactly");
         {
             // 12 samples into 3 columns of 4: each column reports its true
