@@ -351,15 +351,15 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
     pushScopeSettings();
 
-    resizeConstrainer.setSizeLimits (800, 544, 1500, 1020);
+    resizeConstrainer.setSizeLimits (800, 544, 2000, 1360);
     resizeConstrainer.setFixedAspectRatio (1000.0 / 680.0);
     setConstrainer (&resizeConstrainer);
     setResizable (true, true);
 
     const int savedWidth = (int) audioProcessor.apvts.state.getProperty ("editorWidth", 1000);
     const int savedHeight = (int) audioProcessor.apvts.state.getProperty ("editorHeight", 680);
-    setSize (juce::jlimit (800, 1500, savedWidth),
-             juce::jlimit (544, 1020, savedHeight));
+    setSize (juce::jlimit (800, 2000, savedWidth),
+             juce::jlimit (544, 1360, savedHeight));
     startTimerHz (30);
 }
 
@@ -722,7 +722,12 @@ void KickLockAudioProcessorEditor::resized()
     bounds.reduce (14, 12);
 
     // --- Live hero + scope overlays ---------------------------------------
-    const int scopeBlockHeight = juce::jlimit (190, 292, bounds.getHeight() - 318);
+    // Proportional split: the scope takes ~43% of the space below the top bar
+    // and keeps growing with the window (floored so it never collapses, no
+    // upper cap so a larger window yields a genuinely larger scope). The manual
+    // controls below keep their fixed row heights, so very tall windows simply
+    // leave some empty space beneath them.
+    const int scopeBlockHeight = juce::jmax (190, (int) std::round (bounds.getHeight() * 0.43f));
     auto scopeBlock = bounds.removeFromTop (scopeBlockHeight);
     correlationDisplay.setBounds (scopeBlock.removeFromTop (108));
     scopeBlock.removeFromTop (6);
