@@ -16,11 +16,16 @@
 class TransientPunchComponent : public juce::Component
 {
 public:
-    void setValues (float punchDbIn, bool validIn, bool hasReferenceIn, float referenceDbIn,
+    // hasSidechainIn / validIn are reported separately so the placeholder text
+    // can tell "route kick to sidechain" (no sidechain routed at all) apart
+    // from "waiting for kick" (sidechain routed, just no recent hit) instead of
+    // collapsing both into one generic message.
+    void setValues (float punchDbIn, bool validIn, bool hasSidechainIn, bool hasReferenceIn, float referenceDbIn,
                     float kickPeakIn, float sumPeakIn) noexcept
     {
         punchDb = punchDbIn;
         valid = validIn;
+        hasSidechain = hasSidechainIn;
         hasReference = hasReferenceIn;
         referenceDb = referenceDbIn;
         kickPeak = kickPeakIn;
@@ -33,6 +38,7 @@ public:
 private:
     float punchDb = 0.0f;
     bool valid = false;
+    bool hasSidechain = false;
     bool hasReference = false;
     float referenceDb = 0.0f;
     float kickPeak = 0.0f;

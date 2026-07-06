@@ -183,6 +183,48 @@ public:
             expect (! scopeModeUsesDelayDrag (ScopeViewMode::Separate));
         }
 
+        beginTest ("Delay-drag gesture requires Shift even in Triggered mode");
+        {
+            // Root cause of the accidental-Delay bug: Triggered mode used to enter
+            // a delay-drag on ANY ordinary mouseDown, so simply inspecting the
+            // waveform silently moved Delay. The gesture must now require an
+            // explicit Shift modifier, and every other mode must never start it
+            // regardless of modifiers.
+            expect (! scopeWantsDelayDragGesture (ScopeViewMode::Triggered, false));
+            expect (scopeWantsDelayDragGesture (ScopeViewMode::Triggered, true));
+
+            expect (! scopeWantsDelayDragGesture (ScopeViewMode::FreeRun, true));
+            expect (! scopeWantsDelayDragGesture (ScopeViewMode::PhaseDelta, true));
+            expect (! scopeWantsDelayDragGesture (ScopeViewMode::Overlay, true));
+            expect (! scopeWantsDelayDragGesture (ScopeViewMode::Separate, true));
+        }
+
+        beginTest ("Relock enters a visible pending kick-reference state");
+        {
+            const auto state = kickReferenceStateAfterRelock();
+
+            expectEquals ((int) state, (int) KickReferenceState::RelockPending);
+            expect (kickReferenceShouldReplaceOnCapture (state));
+            expectEquals (juce::String (triggeredScopeEmptyText (state)),
+                          juce::String ("WAITING FOR NEW KICK REF"));
+        }
+
+        beginTest ("Next valid triggered capture locks the new kick reference");
+        {
+            expect (kickReferenceShouldReplaceOnCapture (KickReferenceState::NoReference));
+            expect (kickReferenceShouldReplaceOnCapture (KickReferenceState::RelockPending));
+            expect (! kickReferenceShouldReplaceOnCapture (KickReferenceState::Locked));
+
+            expectEquals ((int) kickReferenceStateAfterCapture (KickReferenceState::NoReference),
+                          (int) KickReferenceState::Locked);
+            expectEquals ((int) kickReferenceStateAfterCapture (KickReferenceState::RelockPending),
+                          (int) KickReferenceState::Locked);
+            expectEquals ((int) kickReferenceStateAfterCapture (KickReferenceState::Locked),
+                          (int) KickReferenceState::Locked);
+            expectEquals (juce::String (triggeredScopeEmptyText (KickReferenceState::NoReference)),
+                          juce::String ("WAITING FOR KICK"));
+        }
+
         beginTest ("Triggered rendering is capped to screen-resolution points");
         {
             expectEquals (calculateTriggeredRenderPointCount (0, 800), 0);

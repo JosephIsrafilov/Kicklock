@@ -27,6 +27,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
 
     void setFrozen (bool shouldFreeze) noexcept { frozen = shouldFreeze; }
@@ -74,7 +75,8 @@ public:
     // change hit-to-hit — only the bass trace keeps refreshing on retrigger.
     // Call this to force re-capturing a fresh kick reference on the next hit
     // (e.g. if the kick sample/pattern changed and the old reference is stale).
-    void relockKickReference() noexcept { kickTraceLocked = false; }
+    void relockKickReference() noexcept;
+    KickReferenceState getKickReferenceState() const noexcept { return kickReferenceState; }
 
     // Time zoom: 1x shows the whole history, higher values show only the most
     // recent slice stretched across the width. Amplitude zoom multiplies the
@@ -116,6 +118,11 @@ private:
     void updateInspectionPan (float mouseX) noexcept;
     void endInspectionHold() noexcept;
     float clampDisplayScrollMs (float value) const noexcept;
+
+    // Shared release path for mouseUp/mouseExit so a delay-drag or inspection
+    // hold can never survive past the gesture that started it (e.g. the mouse
+    // leaving the component mid-drag).
+    void cancelActiveGestures() noexcept;
 
     static constexpr int historyLength = 8192;
     static constexpr int scratchSize   = 256;
@@ -160,7 +167,7 @@ private:
     std::array<std::vector<float>, ghostCount> ghostKick;
     int latestTriggeredSequence = 0;
     int triggeredPreRollSamples = 0;
-    bool kickTraceLocked = false;
+    KickReferenceState kickReferenceState = KickReferenceState::NoReference;
     int reservedTriggeredSamples = 0;
     int freeRunTicks = 0;
     static constexpr int freeRunWatchdogTicks = 18;

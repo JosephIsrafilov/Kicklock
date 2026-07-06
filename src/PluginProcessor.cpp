@@ -1234,21 +1234,184 @@ void KickLockAudioProcessor::releaseResources()
 {
 }
 
+bool KickLockAudioProcessor::isSidechainBusActive (const juce::AudioBuffer<float>& sidechainBuffer) const noexcept
+{
+    const auto* sidechainBus = getBus (true, 1);
+    return sidechainBus != nullptr && sidechainBus->isEnabled() && sidechainBuffer.getNumChannels() > 0;
+}
+
+void KickLockAudioProcessor::processObservationCapture (const juce::AudioBuffer<float>& mainBuffer,
+                                                        const juce::AudioBuffer<float>& sidechainBuffer,
+                                                        bool hasSidechain,
+                                                        int numSamples,
+                                                        double& bassEnergySumOut,
+                                                        double& kickEnergySumOut) noexcept
+{
+    bassEnergySumOut = 0.0;
+    kickEnergySumOut = 0.0;
+
+    const int mainCh = mainBuffer.getNumChannels();
+
+    // Capture and meter RAW mono bass/kick before polarity/delay/rotator touch
+    // the audible bass buffer. Skipped without a sidechain. This runs
+    // identically whether the corrective DSP that follows is live or bypassed,
+    // so Analyze capture and the dry multi-band meter never go stale.
+    if (hasSidechain)
+    {
+        const int scCh = sidechainBuffer.getNumChannels();
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float mSum = 0.0f;
+            for (int ch = 0; ch < mainCh; ++ch)
+                mSum += mainBuffer.getSample (ch, i);
+            const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
+            bassEnergySumOut += (double) bassMono * (double) bassMono;
+
+            float sSum = 0.0f;
+            for (int ch = 0; ch < scCh; ++ch)
+                sSum += sidechainBuffer.getSample (ch, i);
+            const float kickMono = scCh > 0 ? sSum / (float) scCh : 0.0f;
+            kickEnergySumOut += (double) kickMono * (double) kickMono;
+
+            const float bassLow = rawBassLowpass.processSample (0, bassMono);
+            const float kickLow = rawKickLowpass.processSample (0, kickMono);
+
+            rawCapture.push (bassLow, kickLow);
+
+            if (autoAlignEngine != nullptr)
+                autoAlignEngine->pushSample (bassLow, kickLow);
+
+            dryMultiBandMeter.pushSample (bassLow, kickLow);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float mSum = 0.0f;
+            for (int ch = 0; ch < mainCh; ++ch)
+                mSum += mainBuffer.getSample (ch, i);
+
+            const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
+            bassEnergySumOut += (double) bassMono * (double) bassMono;
+        }
+    }
+}
+
+void KickLockAudioProcessor::updateActivityAndSignalState (bool hasSidechain,
+                                                            double bassEnergySum,
+                                                            double kickEnergySum,
+                                                            int numSamples) noexcept
+{
+    const double safeCount = (double) juce::jmax (1, numSamples);
+    const float blockBassRms = (float) std::sqrt (bassEnergySum / safeCount);
+    const float blockKickRms = hasSidechain ? (float) std::sqrt (kickEnergySum / safeCount) : 0.0f;
+    bassSignalRms.store (blockBassRms);
+    kickSignalRms.store (blockKickRms);
+
+    // Feed the held-activity trackers so status reflects recent hits, not just
+    // this instant. Without a sidechain the kick can never be "active".
+    bassActivity.pushBlock (blockBassRms, numSamples);
+    if (hasSidechain)
+        kickActivity.pushBlock (blockKickRms, numSamples);
+    else
+        kickActivity.pushBlock (0.0f, numSamples);
+
+    kickActiveHeld.store (kickActivity.isActive());
+    bassActiveHeld.store (bassActivity.isActive());
+
+    // "Usable" material: both signals cleared a floor loud enough for a phase
+    // read within the hold window. Lets status tell "present but far too quiet"
+    // (SIGNAL TOO LOW) apart from a genuinely playing loop, without flickering
+    // between kick transients.
+    constexpr float usableFloorRms = 8.0e-3f;
+    analysisSignalUsable.store (hasSidechain
+                                && kickActivity.isUsable (usableFloorRms)
+                                && bassActivity.isUsable (usableFloorRms));
+
+    // "Enough material" for a meaningful analysis window: the raw capture has
+    // accumulated at least ~0.5 s of samples AND both signals have been active
+    // recently. Display-only; Apply Fix gates on the analysis result, not this.
+    const int capturedSamples = rawCapture.getFilledSamples();
+    const int minMaterialSamples = (int) (getSampleRate() * 0.5);
+    analysisMaterialReady.store (hasSidechain
+                                 && capturedSamples >= minMaterialSamples
+                                 && kickActivity.isActive()
+                                 && bassActivity.isActive());
+}
+
+void KickLockAudioProcessor::pushMetersScopeAndTransientState (float mainMono, float sidechainMonoRaw) noexcept
+{
+    processedMeterSidechainDelay.pushSample (0, sidechainMonoRaw);
+    const float meteredSidechainMono =
+        processedMeterSidechainDelay.popSample (0, (float) getLatencySamples());
+    const bool transientDetected = transientDetector.processSample (meteredSidechainMono);
+
+    const float processedBassLow = processedBassLowpass.processSample (0, mainMono);
+    const float alignedKickLow = processedKickLowpass.processSample (0, meteredSidechainMono);
+    processedMultiBandMeter.pushSample (processedBassLow, alignedKickLow);
+    hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
+    transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetected);
+
+    constexpr float alpha = 0.005f;
+    correlationProductLpf += alpha * ((mainMono * meteredSidechainMono) - correlationProductLpf);
+    correlationMainEnergyLpf += alpha * ((mainMono * mainMono) - correlationMainEnergyLpf);
+    correlationSideEnergyLpf += alpha * ((meteredSidechainMono * meteredSidechainMono) - correlationSideEnergyLpf);
+
+    constexpr float noiseFloorEnergy = 1.0e-8f; // -80 dBFS squared
+    const auto denominator = std::sqrt (correlationMainEnergyLpf * correlationSideEnergyLpf);
+    const float signedCorrelation = (correlationMainEnergyLpf > noiseFloorEnergy
+                                     && correlationSideEnergyLpf > noiseFloorEnergy
+                                     && denominator > 1.0e-12f)
+        ? juce::jlimit (-1.0f, 1.0f, correlationProductLpf / denominator)
+        : 0.0f;
+    realtimeCorrelation.store (std::isfinite (signedCorrelation) ? signedCorrelation : 0.0f);
+
+    // Decimate the scope feed only: the meter still sees every sample,
+    // but the UI keeps a slower, longer history for the musical grid.
+    if (++scopeDecimationCounter >= scopeDecimationFactor)
+    {
+        scopeDecimationCounter = 0;
+        scopeFifo.pushSample (mainMono, meteredSidechainMono);
+    }
+}
+
 void KickLockAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
 
     auto mainBuffer = getBusBuffer (buffer, true, 0);
+    auto sidechainBuffer = getBusBuffer (buffer, true, 1);
+
+    // Bypass must not kill diagnostic observation: whenever the host still
+    // routes a sidechain, keep the same capture/metering/transient/Kick-Punch
+    // path alive that processBlock() runs, even though the corrective DSP
+    // below is skipped (a fixed-delay passthrough only, to preserve PDC).
+    const bool hasSidechain = isSidechainBusActive (sidechainBuffer);
+    sidechainReferenceAvailable.store (hasSidechain);
+
+    const int numSamples = mainBuffer.getNumSamples();
+    double bassEnergySum = 0.0;
+    double kickEnergySum = 0.0;
+
+    processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples,
+                               bassEnergySum, kickEnergySum);
+    updateActivityAndSignalState (hasSidechain, bassEnergySum, kickEnergySum, numSamples);
+
     const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
-    const auto numSamples = mainBuffer.getNumSamples();
     const auto fixedDelay = (float) getLatencySamples();
+    const int sidechainChannels = sidechainBuffer.getNumChannels();
 
     for (int i = 0; i < numSamples; ++i)
     {
+        float mainSum = 0.0f;
         for (int ch = 0; ch < numChannels; ++ch)
         {
             bypassDelay.pushSample (ch, mainBuffer.getSample (ch, i));
-            mainBuffer.setSample (ch, i, bypassDelay.popSample (ch, fixedDelay));
+            const float out = bypassDelay.popSample (ch, fixedDelay);
+            mainBuffer.setSample (ch, i, out);
+            mainSum += out;
         }
 
         for (int ch = numChannels; ch < 2; ++ch)
@@ -1256,7 +1419,22 @@ void KickLockAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buf
             bypassDelay.pushSample (ch, 0.0f);
             (void) bypassDelay.popSample (ch, fixedDelay);
         }
+
+        if (hasSidechain)
+        {
+            const float mainMono = numChannels > 0 ? mainSum / (float) numChannels : 0.0f;
+
+            float sidechainSum = 0.0f;
+            for (int ch = 0; ch < sidechainChannels; ++ch)
+                sidechainSum += sidechainBuffer.getSample (ch, i);
+            const float sidechainMono = sidechainChannels > 0 ? sidechainSum / (float) sidechainChannels : 0.0f;
+
+            pushMetersScopeAndTransientState (mainMono, sidechainMono);
+        }
     }
+
+    if (! hasSidechain)
+        realtimeCorrelation.store (0.0f);
 
     for (auto channel = getTotalNumInputChannels(); channel < getTotalNumOutputChannels(); ++channel)
         buffer.clear (channel, 0, buffer.getNumSamples());
@@ -1328,8 +1506,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     auto mainBuffer = getBusBuffer (buffer, true, 0);
     auto sidechainBuffer = getBusBuffer (buffer, true, 1);
 
-    const auto* sidechainBus = getBus (true, 1);
-    const bool hasSidechain = sidechainBus != nullptr && sidechainBus->isEnabled() && sidechainBuffer.getNumChannels() > 0;
+    const bool hasSidechain = isSidechainBusActive (sidechainBuffer);
     sidechainReferenceAvailable.store (hasSidechain);
 
     const int numSamples = mainBuffer.getNumSamples();
@@ -1359,97 +1536,22 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     processedBassLowpass.setCutoffFrequency (coreParams.crossoverHz);
     processedKickLowpass.setCutoffFrequency (coreParams.crossoverHz);
 
-    // Capture and meter RAW mono bass/kick before polarity/delay/rotator touch
-    // the audible bass buffer. Skipped without a sidechain.
-    if (hasSidechain)
-    {
-        const int mainCh = mainBuffer.getNumChannels();
-        const int scCh   = sidechainBuffer.getNumChannels();
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            float mSum = 0.0f;
-            for (int ch = 0; ch < mainCh; ++ch)
-                mSum += mainBuffer.getSample (ch, i);
-            const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
-            bassEnergySum += (double) bassMono * (double) bassMono;
-
-            float sSum = 0.0f;
-            for (int ch = 0; ch < scCh; ++ch)
-                sSum += sidechainBuffer.getSample (ch, i);
-            const float kickMono = scCh > 0 ? sSum / (float) scCh : 0.0f;
-            kickEnergySum += (double) kickMono * (double) kickMono;
-
-            const float bassLow = rawBassLowpass.processSample (0, bassMono);
-            const float kickLow = rawKickLowpass.processSample (0, kickMono);
-
-            rawCapture.push (bassLow, kickLow);
-
-            if (autoAlignEngine != nullptr)
-                autoAlignEngine->pushSample (bassLow, kickLow);
-
-            dryMultiBandMeter.pushSample (bassLow, kickLow);
-        }
-    }
-    else
-    {
-        const int mainCh = mainBuffer.getNumChannels();
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            float mSum = 0.0f;
-            for (int ch = 0; ch < mainCh; ++ch)
-                mSum += mainBuffer.getSample (ch, i);
-
-            const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
-            bassEnergySum += (double) bassMono * (double) bassMono;
-        }
-    }
-
-    const double safeCount = (double) juce::jmax (1, numSamples);
-    const float blockBassRms = (float) std::sqrt (bassEnergySum / safeCount);
-    const float blockKickRms = hasSidechain ? (float) std::sqrt (kickEnergySum / safeCount) : 0.0f;
-    bassSignalRms.store (blockBassRms);
-    kickSignalRms.store (blockKickRms);
-
-    // Feed the held-activity trackers so status reflects recent hits, not just
-    // this instant. Without a sidechain the kick can never be "active".
-    bassActivity.pushBlock (blockBassRms, numSamples);
-    if (hasSidechain)
-        kickActivity.pushBlock (blockKickRms, numSamples);
-    else
-        kickActivity.pushBlock (0.0f, numSamples);
-
-    kickActiveHeld.store (kickActivity.isActive());
-    bassActiveHeld.store (bassActivity.isActive());
-
-    // "Usable" material: both signals cleared a floor loud enough for a phase
-    // read within the hold window. Lets status tell "present but far too quiet"
-    // (SIGNAL TOO LOW) apart from a genuinely playing loop, without flickering
-    // between kick transients.
-    constexpr float usableFloorRms = 8.0e-3f;
-    analysisSignalUsable.store (hasSidechain
-                                && kickActivity.isUsable (usableFloorRms)
-                                && bassActivity.isUsable (usableFloorRms));
-
-    // "Enough material" for a meaningful analysis window: the raw capture has
-    // accumulated at least ~0.5 s of samples AND both signals have been active
-    // recently. Display-only; Apply Fix gates on the analysis result, not this.
-    const int capturedSamples = rawCapture.getFilledSamples();
-    const int minMaterialSamples = (int) (getSampleRate() * 0.5);
-    analysisMaterialReady.store (hasSidechain
-                                 && capturedSamples >= minMaterialSamples
-                                 && kickActivity.isActive()
-                                 && bassActivity.isActive());
+    // Shared observation path: raw capture, dry meter, held-activity trackers.
+    // Identical to what processBlockBypassed() runs, so bypassing the
+    // corrective DSP below never starves Analyze or the status readouts.
+    processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples,
+                               bassEnergySum, kickEnergySum);
+    updateActivityAndSignalState (hasSidechain, bassEnergySum, kickEnergySum, numSamples);
 
     const bool neutral = isBassProcessingNeutral();
     const bool processingNeeded = ! neutral;
 
     multibandCore.process (mainBuffer, sidechainBuffer, coreParams, numSamples);
 
-    // Feed the correlation meter and scope fifo with mono-summed
-    // main/sidechain values. Skipped entirely when there's no sidechain,
-    // since a zero-sidechain signal would be meaningless for both.
+    // Shared observation path: transient detector, HitCaptureBuffer, Kick
+    // Punch meter, processed multi-band meter, realtime correlation, and the
+    // (decimated) scope fifo. Skipped entirely when there's no sidechain,
+    // since a zero-sidechain signal would be meaningless for all of them.
     if (hasSidechain)
     {
         const int mainChannels = mainBuffer.getNumChannels();
@@ -1466,38 +1568,8 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             for (int ch = 0; ch < sidechainChannels; ++ch)
                 sidechainSum += sidechainBuffer.getSample (ch, i);
             const float sidechainMono = sidechainChannels > 0 ? sidechainSum / (float) sidechainChannels : 0.0f;
-            processedMeterSidechainDelay.pushSample (0, sidechainMono);
-            const float meteredSidechainMono =
-                processedMeterSidechainDelay.popSample (0, (float) getLatencySamples());
-            const bool transientDetected = transientDetector.processSample (meteredSidechainMono);
 
-            const float processedBassLow = processedBassLowpass.processSample (0, mainMono);
-            const float alignedKickLow = processedKickLowpass.processSample (0, meteredSidechainMono);
-            processedMultiBandMeter.pushSample (processedBassLow, alignedKickLow);
-            hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
-            transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetected);
-
-            constexpr float alpha = 0.005f;
-            correlationProductLpf += alpha * ((mainMono * meteredSidechainMono) - correlationProductLpf);
-            correlationMainEnergyLpf += alpha * ((mainMono * mainMono) - correlationMainEnergyLpf);
-            correlationSideEnergyLpf += alpha * ((meteredSidechainMono * meteredSidechainMono) - correlationSideEnergyLpf);
-
-            constexpr float noiseFloorEnergy = 1.0e-8f; // -80 dBFS squared
-            const auto denominator = std::sqrt (correlationMainEnergyLpf * correlationSideEnergyLpf);
-            const float signedCorrelation = (correlationMainEnergyLpf > noiseFloorEnergy
-                                             && correlationSideEnergyLpf > noiseFloorEnergy
-                                             && denominator > 1.0e-12f)
-                ? juce::jlimit (-1.0f, 1.0f, correlationProductLpf / denominator)
-                : 0.0f;
-            realtimeCorrelation.store (std::isfinite (signedCorrelation) ? signedCorrelation : 0.0f);
-
-            // Decimate the scope feed only: the meter still sees every sample,
-            // but the UI keeps a slower, longer history for the musical grid.
-            if (++scopeDecimationCounter >= scopeDecimationFactor)
-            {
-                scopeDecimationCounter = 0;
-                scopeFifo.pushSample (mainMono, meteredSidechainMono);
-            }
+            pushMetersScopeAndTransientState (mainMono, sidechainMono);
         }
     }
     else

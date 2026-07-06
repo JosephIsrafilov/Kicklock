@@ -43,6 +43,82 @@ public:
             expectFixedLatencyOutput (buffer, processor.getLatencySamples(), 2, 4096);
         }
 
+        beginTest ("Kick Punch stays valid through neutral processing");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+            expect (processor.isBassProcessingNeutral());
+
+            feedKickBassHits (processor, 2048, /*bypassed*/ false);
+
+            expect (processor.hasSidechainReference());
+            expect (processor.isTransientPunchValid(), "Kick Punch should be valid after repeated hits with neutral processing");
+        }
+
+        beginTest ("Kick Punch remains valid and updating through the bypass path");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            // Bypass must not kill diagnostic observation: as long as the host
+            // still routes a sidechain, Kick Punch keeps reading real hits.
+            feedKickBassHits (processor, 2048, /*bypassed*/ true);
+
+            expect (processor.hasSidechainReference());
+            expect (processor.isTransientPunchValid(), "Kick Punch should stay valid through processBlockBypassed while sidechain is present");
+
+            const float latencyBypassed = (float) processor.getLatencySamples();
+
+            // Bypass must not disturb the reported PDC/latency.
+            KickLockAudioProcessor reference;
+            reference.enableAllBuses();
+            reference.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            reference.prepareToPlay (kSampleRate, 2048);
+            expectWithinAbsoluteError (latencyBypassed, (float) reference.getLatencySamples(), 1.0e-6f);
+        }
+
+        beginTest ("Kick Punch reports unavailable with no sidechain routed");
+        {
+            KickLockAudioProcessor processor;
+            processor.disableNonMainBuses(); // simulate a host that never routes the sidechain bus
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             2048);
+            juce::MidiBuffer midi;
+            fillBass (buffer, 2048);
+            processor.processBlock (buffer, midi);
+
+            expect (! processor.hasSidechainReference());
+            expect (! processor.isTransientPunchValid());
+        }
+
+        beginTest ("Kick Punch times out only after the intended no-kick window");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            feedKickBassHits (processor, 2048, /*bypassed*/ false);
+            expect (processor.isTransientPunchValid());
+
+            // Feed sidechain-present silence for just under the 1.5 s timeout:
+            // Kick Punch should still be reporting the last reading.
+            feedSilenceWithSidechain (processor, 2048, (int) (kSampleRate * 1.2));
+            expect (processor.isTransientPunchValid(), "Kick Punch should not have timed out yet");
+
+            // Cross the 1.5 s no-kick timeout: Kick Punch must now go invalid.
+            feedSilenceWithSidechain (processor, 2048, (int) (kSampleRate * 0.6));
+            expect (! processor.isTransientPunchValid(), "Kick Punch should time out after ~1.5 s with no new kick");
+        }
+
         beginTest ("Analyze recommend-only does not change parameters");
         {
             KickLockAudioProcessor processor;
@@ -490,6 +566,78 @@ public:
             expectLessThan (fix.bassDelayMs, 3.8f);
         }
 
+        beginTest ("Repeated Analyze calls over the same captured loop stay stable");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 }, { false, false, false, false }, 2048);
+
+            const auto first = processor.analyzeFix();
+            expectGreaterThan (first.contributingHits, 1);
+            expect (! first.unstableRecommendation, first.message);
+
+            for (int i = 0; i < 20; ++i)
+            {
+                const auto next = processor.analyzeFix();
+                expectWithinAbsoluteError (next.bassDelayMs, first.bassDelayMs, 1.0e-4f);
+                expect (next.bassPolarityInvert == first.bassPolarityInvert);
+                expectEquals ((int) next.quality, (int) first.quality);
+                expectEquals (next.contributingHits, first.contributingHits);
+            }
+        }
+
+        beginTest ("Stable loop recommendation survives shifted capture offsets");
+        {
+            PhaseFixResult baseline;
+
+            for (int offset : { 1500, 1637, 1909 })
+            {
+                KickLockAudioProcessor processor;
+                processor.enableAllBuses();
+                processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+                processor.prepareToPlay (kSampleRate, 2048);
+
+                feedHitSeriesWithStartOffset (processor,
+                                              { 0, 0, 0, 0 },
+                                              { 160, 160, 160, 160 },
+                                              { false, false, false, false },
+                                              2048,
+                                              offset);
+
+                const auto fix = processor.analyzeFix();
+                expectGreaterThan (fix.contributingHits, 1);
+                expect (! fix.unstableRecommendation, fix.message);
+
+                if (offset == 1500)
+                    baseline = fix;
+                else
+                {
+                    expectWithinAbsoluteError (fix.bassDelayMs, baseline.bassDelayMs, 0.25f);
+                    expect (fix.bassPolarityInvert == baseline.bassPolarityInvert);
+                    expectEquals ((int) fix.quality, (int) baseline.quality);
+                }
+            }
+        }
+
+        beginTest ("Long noisy 808 tail is bounded to musical hits");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
+
+            feedLongTailHitSeries (processor, 2048);
+
+            const auto fix = processor.analyzeFix();
+            expectGreaterOrEqual (fix.contributingHits, 2);
+            expectLessOrEqual (fix.contributingHits, 4);
+            expect (! fix.unstableRecommendation, fix.message);
+            expectWithinAbsoluteError (fix.bassDelayMs, 160.0f / 48.0f, 0.8f);
+        }
+
         beginTest ("Multi-hit unstable analysis rejects conflicting hits");
         {
             KickLockAudioProcessor processor;
@@ -838,18 +986,99 @@ private:
         }
     }
 
+    // Feeds several kick+reinforcing-bass transients through the processor, via
+    // either processBlock() or processBlockBypassed(), so tests can check that
+    // diagnostic metering (Kick Punch) keeps updating regardless of which path
+    // the host drives.
+    static void feedKickBassHits (KickLockAudioProcessor& processor, int blockSize, bool bypassed)
+    {
+        const int hitCount = 6;
+        const int hitSpacing = 8000;
+        const int eventLength = 1024;
+        const int startOffset = 500;
+        const int totalSamples = startOffset + hitCount * hitSpacing + eventLength;
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int sample = start + i;
+                float bass = 0.0f;
+                float kick = 0.0f;
+
+                for (int hit = 0; hit < hitCount; ++hit)
+                {
+                    const int idx = sample - (startOffset + hit * hitSpacing);
+                    if (idx >= 0 && idx < eventLength)
+                    {
+                        const double t = (double) idx / kSampleRate;
+                        const float env = (float) std::exp (-40.0 * t);
+                        const float v = env * (float) std::sin (kTwoPi * 60.0 * t);
+                        kick += v;
+                        bass += v; // reinforcing bass, matches the kick low end
+                    }
+                }
+
+                buffer.setSample (0, i, bass);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, bass);
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, kick);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, kick);
+            }
+
+            juce::MidiBuffer midi;
+            if (bypassed)
+                processor.processBlockBypassed (buffer, midi);
+            else
+                processor.processBlock (buffer, midi);
+        }
+    }
+
+    // Feeds numSamples of true silence (bass AND kick) through the sidechain-
+    // enabled processor via processBlock(), so Kick Punch's no-kick timeout can
+    // be exercised deterministically.
+    static void feedSilenceWithSidechain (KickLockAudioProcessor& processor, int blockSize, int numSamples)
+    {
+        for (int start = 0; start < numSamples; start += blockSize)
+        {
+            const int n = std::min (blockSize, numSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             n);
+            buffer.clear();
+            fillKickSidechain (buffer, n, 1'000'000); // offset far beyond the block: pure silence, sidechain still "present"
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+        }
+    }
+
     static void feedHitSeries (KickLockAudioProcessor& processor,
                                const std::vector<int>& bassDelays,
                                const std::vector<int>& kickDelays,
                                const std::vector<bool>& invertBass,
                                int blockSize)
     {
+        feedHitSeriesWithStartOffset (processor, bassDelays, kickDelays, invertBass, blockSize, 1500);
+    }
+
+    static void feedHitSeriesWithStartOffset (KickLockAudioProcessor& processor,
+                                              const std::vector<int>& bassDelays,
+                                              const std::vector<int>& kickDelays,
+                                              const std::vector<bool>& invertBass,
+                                              int blockSize,
+                                              int startOffset)
+    {
         const int hitCount = std::min ({ (int) bassDelays.size(),
                                          (int) kickDelays.size(),
                                          (int) invertBass.size() });
         const int hitSpacing = 12000;
         const int eventLength = 5000;
-        const int startOffset = 1500;
         const int totalSamples = startOffset + hitCount * hitSpacing + eventLength;
 
         for (int start = 0; start < totalSamples; start += blockSize)
@@ -885,6 +1114,69 @@ private:
                         kick += env * (float) std::sin (kTwoPi * 70.0 * (double) kickIndex / kSampleRate);
                     }
                 }
+
+                buffer.setSample (0, i, bass);
+                if (buffer.getNumChannels() > 1)
+                    buffer.setSample (1, i, bass);
+                if (buffer.getNumChannels() > 2)
+                    buffer.setSample (2, i, kick);
+                if (buffer.getNumChannels() > 3)
+                    buffer.setSample (3, i, kick);
+            }
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+        }
+    }
+
+    static void feedLongTailHitSeries (KickLockAudioProcessor& processor, int blockSize)
+    {
+        const int hitCount = 4;
+        const int hitSpacing = 16000;
+        const int eventLength = 15000;
+        const int startOffset = 1500;
+        const int kickDelay = 160;
+        const int totalSamples = startOffset + hitCount * hitSpacing + eventLength;
+        juce::Random rng (0x808);
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int sample = start + i;
+                float bass = 0.0f;
+                float kick = 0.0f;
+
+                for (int hit = 0; hit < hitCount; ++hit)
+                {
+                    const int base = startOffset + hit * hitSpacing;
+                    const int bassIndex = sample - base;
+                    const int kickIndex = sample - (base + kickDelay);
+
+                    if (bassIndex >= 0 && bassIndex < eventLength)
+                    {
+                        const double t = (double) bassIndex / kSampleRate;
+                        const float env = (float) std::exp (-5.0 * t);
+                        bass += env * (float) std::sin (kTwoPi * 52.0 * t);
+                    }
+
+                    if (kickIndex >= 0 && kickIndex < eventLength)
+                    {
+                        const double t = (double) kickIndex / kSampleRate;
+                        const float env = (float) std::exp (-5.0 * t);
+                        kick += env * (float) std::sin (kTwoPi * 52.0 * t);
+                    }
+                }
+
+                const float noise = 0.012f * (float) (rng.nextDouble() * 2.0 - 1.0);
+                bass += noise;
+                kick += 0.5f * noise;
 
                 buffer.setSample (0, i, bass);
                 if (buffer.getNumChannels() > 1)

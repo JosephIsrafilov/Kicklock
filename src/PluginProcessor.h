@@ -40,6 +40,11 @@ public:
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     bool isBassProcessingNeutral() const noexcept;
+    // True whenever a sidechain bus is present, enabled, and has channels —
+    // independent of whether processBlock() or processBlockBypassed() is the
+    // one calling it, so the "sidechain routed" UI state never depends on
+    // host bypass state.
+    bool isSidechainBusActive (const juce::AudioBuffer<float>& sidechainBuffer) const noexcept;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override;
@@ -251,6 +256,40 @@ private:
     PhaseFixResult computeAndPublishFix (const std::vector<float>& bass,
                                          const std::vector<float>& kick,
                                          int numSamples);
+
+    // Shared observation path (used by both processBlock() and
+    // processBlockBypassed()) so diagnostic metering — Analyze capture, the
+    // held-activity trackers, the transient detector, HitCaptureBuffer, the
+    // Kick Punch meter, and the scope feed — keeps working whenever a
+    // sidechain is routed, even while the corrective DSP itself is bypassed or
+    // neutral. Neither allocates, locks, or throws; both are audio-thread-safe.
+    //
+    // Captures raw (pre-processing) mono bass/kick, low-passed, into rawCapture
+    // / the auto-align engine / the dry multi-band meter, and accumulates the
+    // block's bass/kick energy for the RMS-based activity trackers.
+    void processObservationCapture (const juce::AudioBuffer<float>& mainBuffer,
+                                    const juce::AudioBuffer<float>& sidechainBuffer,
+                                    bool hasSidechain,
+                                    int numSamples,
+                                    double& bassEnergySumOut,
+                                    double& kickEnergySumOut) noexcept;
+
+    // Publishes block-level RMS and the musically-held kick/bass activity and
+    // analysis-readiness flags from the energies processObservationCapture()
+    // accumulated.
+    void updateActivityAndSignalState (bool hasSidechain,
+                                       double bassEnergySum,
+                                       double kickEnergySum,
+                                       int numSamples) noexcept;
+
+    // Per-sample: aligns the sidechain to the current latency, runs the
+    // transient detector, feeds HitCaptureBuffer and the Kick Punch meter, the
+    // processed multi-band meter, the realtime correlation LPFs, and the
+    // (decimated) scope fifo. `mainMono` is whatever the main bus currently
+    // sounds like (post-correction in processBlock, post-fixed-delay-only in
+    // processBlockBypassed); `sidechainMonoRaw` is the raw, not-yet-latency-
+    // aligned sidechain mono sample.
+    void pushMetersScopeAndTransientState (float mainMono, float sidechainMonoRaw) noexcept;
     ParameterSnapshot captureCurrentParameterSnapshot() const;
     void restoreParameterSnapshot (const ParameterSnapshot&);
     float readParameterValue (const char* id, float fallback) const;

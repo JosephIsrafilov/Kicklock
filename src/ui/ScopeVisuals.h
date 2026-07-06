@@ -29,6 +29,13 @@ enum class PhaseRelation
     Silent
 };
 
+enum class KickReferenceState
+{
+    NoReference,
+    Locked,
+    RelockPending
+};
+
 struct ScopePeakMarkers
 {
     int bassPeakIndex = -1;
@@ -203,12 +210,19 @@ inline bool scopeModeAppliesVisualOffset (ScopeViewMode mode) noexcept
     return mode != ScopeViewMode::FreeRun;
 }
 
-// Only the triggered view maps a plain horizontal drag to the Delay parameter.
-// Every scrolling view uses drag to inspect/pan the captured history instead,
-// so a click-drag never silently changes audio in those modes.
+// Only the triggered view maps a horizontal drag to the Delay parameter, and
+// even then only as an explicit modifier gesture (Shift + drag). A plain
+// click/hold/drag always pauses the display and scrubs the waveform instead,
+// so a user inspecting the scope in Triggered mode can never silently move
+// Delay by accident. Every scrolling view ignores this entirely.
 inline bool scopeModeUsesDelayDrag (ScopeViewMode mode) noexcept
 {
     return mode == ScopeViewMode::Triggered;
+}
+
+inline bool scopeWantsDelayDragGesture (ScopeViewMode mode, bool shiftHeld) noexcept
+{
+    return scopeModeUsesDelayDrag (mode) && shiftHeld;
 }
 
 inline const char* scopeModeCaption (ScopeViewMode mode) noexcept
@@ -223,6 +237,27 @@ inline const char* scopeModeCaption (ScopeViewMode mode) noexcept
     }
 
     return "";
+}
+
+inline KickReferenceState kickReferenceStateAfterRelock() noexcept
+{
+    return KickReferenceState::RelockPending;
+}
+
+inline bool kickReferenceShouldReplaceOnCapture (KickReferenceState state) noexcept
+{
+    return state != KickReferenceState::Locked;
+}
+
+inline KickReferenceState kickReferenceStateAfterCapture (KickReferenceState state) noexcept
+{
+    return kickReferenceShouldReplaceOnCapture (state) ? KickReferenceState::Locked : state;
+}
+
+inline const char* triggeredScopeEmptyText (KickReferenceState state) noexcept
+{
+    return state == KickReferenceState::RelockPending ? "WAITING FOR NEW KICK REF"
+                                                      : "WAITING FOR KICK";
 }
 
 // Deterministic pan: the displayed scroll is always derived from the

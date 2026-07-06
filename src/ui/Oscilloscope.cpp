@@ -121,11 +121,14 @@ void Oscilloscope::timerCallback()
 
     if (viewMode == ScopeViewMode::Triggered)
     {
-        if (! isDisplayFrozen())
+        const bool relockPending = kickReferenceState == KickReferenceState::RelockPending;
+        const bool allowTriggeredRefresh = ! isDisplayFrozen() || relockPending;
+
+        if (allowTriggeredRefresh)
         {
             if (refreshTriggeredSnapshot())
                 freeRunTicks = 0;
-            else if (++freeRunTicks >= freeRunWatchdogTicks)
+            else if (! relockPending && ++freeRunTicks >= freeRunWatchdogTicks)
                 buildFreeRunTriggeredSnapshot();
 
             updateTriggeredAutoGain();
@@ -248,8 +251,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     {
         g.setColour (labelColour);
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-        g.drawText ("WAITING FOR KICK",
-                    bounds.withSizeKeepingCentre (180.0f, 18.0f).toNearestInt(),
+        g.drawText (triggeredScopeEmptyText (kickReferenceState),
+                    bounds.withSizeKeepingCentre (220.0f, 18.0f).toNearestInt(),
                     juce::Justification::centred);
         return;
     }
@@ -778,7 +781,23 @@ void Oscilloscope::reserveTriggeredBuffers()
 
     // Window length changed size (timebase/decimation changed) — the locked
     // kick reference no longer matches, so let the next hit re-establish it.
-    kickTraceLocked = false;
+    kickReferenceState = KickReferenceState::NoReference;
+}
+
+void Oscilloscope::relockKickReference() noexcept
+{
+    kickReferenceState = kickReferenceStateAfterRelock();
+    latestTriggeredSequence = hitCapture.getSequence();
+
+    triggeredBass.clear();
+    triggeredKick.clear();
+    for (auto& buffer : ghostBass)
+        buffer.clear();
+    for (auto& buffer : ghostKick)
+        buffer.clear();
+
+    freeRunTicks = 0;
+    repaint();
 }
 
 bool Oscilloscope::refreshTriggeredSnapshot()
@@ -797,6 +816,8 @@ bool Oscilloscope::refreshTriggeredSnapshot()
     if (copiedSequence == latestTriggeredSequence)
         return false;
 
+    const bool replaceKickReference = kickReferenceShouldReplaceOnCapture (kickReferenceState);
+
     if (! triggeredBass.empty())
     {
         for (int i = ghostCount - 1; i > 0; --i)
@@ -807,7 +828,7 @@ bool Oscilloscope::refreshTriggeredSnapshot()
 
         ghostBass[0].swap (triggeredBass);
 
-        if (! kickTraceLocked)
+        if (replaceKickReference)
             ghostKick[0].swap (triggeredKick);
     }
 
@@ -819,10 +840,10 @@ bool Oscilloscope::refreshTriggeredSnapshot()
     // retrigger. Without this, both traces got replaced on every hit, which
     // reads as the whole scope "running" at the kick's tempo instead of
     // showing bass settling against a fixed reference.
-    if (! kickTraceLocked)
+    if (replaceKickReference)
     {
         triggeredKick.swap (triggeredScratchKick);
-        kickTraceLocked = true;
+        kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
     }
 
     triggeredPreRollSamples = hitCapture.getPreRollSamples();
@@ -857,7 +878,7 @@ void Oscilloscope::buildFreeRunTriggeredSnapshot()
     // Free-run is a raw scrolling fallback, not a real trigger-aligned
     // capture — once real triggering resumes, treat the next hit as a fresh
     // reference rather than keeping whatever was on screen during free-run.
-    kickTraceLocked = false;
+    kickReferenceState = KickReferenceState::NoReference;
     repaint();
 }
 
@@ -879,7 +900,11 @@ void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)
     if (delayParameter == nullptr)
         return;
 
-    const float deltaMs = scopeDragPixelsToDelayDeltaMs (e.position.x - dragStartX, e.mods.isShiftDown());
+    // Shift is now the gesture that starts a delay-drag at all (it must be held
+    // for mouseDown to have entered this gesture in the first place), so it can
+    // no longer double as a separate "fine steps" modifier — use coarse
+    // sensitivity throughout the drag.
+    const float deltaMs = scopeDragPixelsToDelayDeltaMs (e.position.x - dragStartX, false);
     const float nextValue = juce::jlimit (-20.0f, 20.0f, dragStartDelayMs + deltaMs);
     delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (nextValue));
 }
@@ -930,8 +955,12 @@ void Oscilloscope::endInspectionHold() noexcept
 
 void Oscilloscope::mouseDown (const juce::MouseEvent& e)
 {
-    if (scopeModeUsesDelayDrag (viewMode) && delayParameter != nullptr
-        && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
+    // Delay-drag is an explicit modifier gesture (Shift + drag) in Triggered
+    // mode only. A plain click/hold/drag ALWAYS pauses the display and scrubs
+    // the waveform instead, in every mode including Triggered, so inspecting
+    // the scope can never silently move Delay.
+    if (scopeWantsDelayDragGesture (viewMode, e.mods.isShiftDown()) && delayParameter != nullptr
+        && ! e.mods.isRightButtonDown() && ! e.mods.isCommandDown())
     {
         dragStartX = e.position.x;
         dragStartDelayMs = delayParameter->convertFrom0to1 (delayParameter->getValue());
@@ -940,7 +969,6 @@ void Oscilloscope::mouseDown (const juce::MouseEvent& e)
     }
     else
     {
-        // Non-triggered modes: click-hold pauses the display and starts panning.
         beginInspectionHold (e.position.x);
     }
 }
@@ -954,6 +982,20 @@ void Oscilloscope::mouseDrag (const juce::MouseEvent& e)
 }
 
 void Oscilloscope::mouseUp (const juce::MouseEvent&)
+{
+    cancelActiveGestures();
+}
+
+void Oscilloscope::mouseExit (const juce::MouseEvent&)
+{
+    // The mouse leaving mid-drag must not leave delayGestureActive latched —
+    // otherwise a later mouseDrag delivered without a fresh mouseDown (e.g. the
+    // pointer re-entering while still held from outside) could keep nudging
+    // Delay from what looks like ordinary movement.
+    cancelActiveGestures();
+}
+
+void Oscilloscope::cancelActiveGestures() noexcept
 {
     if (delayGestureActive && delayParameter != nullptr)
     {

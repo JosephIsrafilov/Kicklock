@@ -36,7 +36,11 @@ void TransientPunchComponent::paint (juce::Graphics& g)
     g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
     g.drawText ("KICK PUNCH", titleRow, juce::Justification::centredLeft);
 
-    // Neutral placeholder when there's no recent kick to measure.
+    // Two distinct placeholders: no sidechain routed at all (nothing to
+    // measure, ever) versus a sidechain that just hasn't seen a recent kick
+    // (the meter will resume the moment one arrives). Collapsing these into
+    // one generic "waiting" message was what made the meter read as broken
+    // when it was actually just accurately reporting no signal.
     if (! valid)
     {
         auto value = inner.removeFromTop (30);
@@ -46,7 +50,8 @@ void TransientPunchComponent::paint (juce::Graphics& g)
 
         g.setColour (mutedText.withAlpha (0.8f));
         g.setFont (juce::Font (juce::FontOptions (12.0f)));
-        g.drawText ("Waiting for kick", inner.removeFromTop (16), juce::Justification::centred);
+        g.drawText (hasSidechain ? "Waiting for kick" : "Route kick to sidechain",
+                    inner.removeFromTop (16), juce::Justification::centred);
         return;
     }
 
@@ -184,10 +189,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     freezeButton.onClick = [this] { oscilloscope.setFrozen (freezeButton.getToggleState()); oscilloscope.repaint(); };
     addAndMakeVisible (freezeButton);
 
-    relockKickButton.setButtonText ("Relock");
+    relockKickButton.setButtonText ("Re-lock");
     relockKickButton.setColour (juce::TextButton::buttonColourId, panel);
     relockKickButton.setColour (juce::TextButton::textColourOffId, text);
-    relockKickButton.setTooltip ("Re-captures a fresh kick reference for the triggered scope (e.g. after swapping the kick sample).");
+    relockKickButton.setTooltip ("Waits for the next kick transient and stores it as the triggered-scope reference.");
     relockKickButton.onClick = [this] { oscilloscope.relockKickReference(); oscilloscope.repaint(); };
     addAndMakeVisible (relockKickButton);
 
@@ -250,10 +255,9 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     // --- Centre scope + live match ----------------------------------------
     addAndMakeVisible (oscilloscope);
-    oscilloscope.setTooltip ("Triggered mode: drag left/right to nudge Delay (Shift = fine steps, double-click resets Delay). "
-                             "Free-run / Phase Delta / Overlay / Separate: click-hold to pause the display and drag to scrub "
-                             "earlier/later through the captured waveform; release to resume live. "
-                             "Wheel = time zoom, Shift+wheel = amplitude zoom.");
+    oscilloscope.setTooltip ("Click-hold and drag to pause the display and scrub through the captured waveform; "
+                             "release to resume live. In Triggered mode, hold Shift while dragging to adjust Delay "
+                             "instead (double-click resets Delay). Wheel = time zoom, Shift+wheel = amplitude zoom.");
     addAndMakeVisible (correlationDisplay);
     correlationDisplay.setTooltip ("Live match. Click Details to collapse or expand the detailed meters.");
 
@@ -629,9 +633,11 @@ void KickLockAudioProcessorEditor::timerCallback()
                                audioProcessor.isTempoAvailable());
     pushScopeSettings();
 
-    const bool punchValid = audioProcessor.hasSidechainReference() && audioProcessor.isTransientPunchValid();
+    const bool hasSidechainForPunch = audioProcessor.hasSidechainReference();
+    const bool punchValid = hasSidechainForPunch && audioProcessor.isTransientPunchValid();
     transientPunch.setValues (audioProcessor.getTransientPunchDb(),
                               punchValid,
+                              hasSidechainForPunch,
                               audioProcessor.isTransientPunchReferenceSet(),
                               audioProcessor.getTransientPunchReferenceDb(),
                               punchValid ? audioProcessor.getTransientKickPeak() : 0.0f,
