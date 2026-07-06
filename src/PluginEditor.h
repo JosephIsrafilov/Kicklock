@@ -72,6 +72,7 @@ private:
     juce::ComboBox gridCombo;
     juce::ComboBox viewCombo;
     juce::TextButton freezeButton;
+    juce::TextButton relockKickButton;
     juce::TextButton analyzeButton;
     juce::TextButton applyFixButton;
     juce::TextButton revertButton;

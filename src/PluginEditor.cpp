@@ -145,6 +145,13 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     freezeButton.onClick = [this] { oscilloscope.setFrozen (freezeButton.getToggleState()); oscilloscope.repaint(); };
     addAndMakeVisible (freezeButton);
 
+    relockKickButton.setButtonText ("Relock");
+    relockKickButton.setColour (juce::TextButton::buttonColourId, panel);
+    relockKickButton.setColour (juce::TextButton::textColourOffId, text);
+    relockKickButton.setTooltip ("Re-captures a fresh kick reference for the triggered scope (e.g. after swapping the kick sample).");
+    relockKickButton.onClick = [this] { oscilloscope.relockKickReference(); oscilloscope.repaint(); };
+    addAndMakeVisible (relockKickButton);
+
     analyzeButton.setButtonText ("Auto-Align");
     analyzeButton.setColour (juce::TextButton::buttonColourId, teal);
     analyzeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
@@ -695,6 +702,8 @@ void KickLockAudioProcessorEditor::resized()
     viewCombo.setBounds (controls.removeFromLeft (96).reduced (0, 3));
     controls.removeFromLeft (5);
     freezeButton.setBounds (controls.removeFromLeft (56).reduced (0, 2));
+    controls.removeFromLeft (6);
+    relockKickButton.setBounds (controls.removeFromLeft (56).reduced (0, 2));
     controls.removeFromLeft (8);
     compareAButton.setBounds (controls.removeFromLeft (30).reduced (0, 2));
     controls.removeFromLeft (4);
@@ -702,7 +711,7 @@ void KickLockAudioProcessorEditor::resized()
     controls.removeFromLeft (4);
     compareCopyButton.setBounds (controls.removeFromLeft (48).reduced (0, 2));
     controls.removeFromLeft (10);
-    analyzeButton.setBounds (controls.removeFromLeft (170).reduced (0, 2));
+    analyzeButton.setBounds (controls.removeFromLeft (108).reduced (0, 2));
     controls.removeFromLeft (6);
     applyFixButton.setBounds (controls.removeFromLeft (82).reduced (0, 2));
     controls.removeFromLeft (6);
