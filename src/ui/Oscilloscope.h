@@ -70,6 +70,18 @@ public:
     void setTimebase (double newSampleRate, int newDecimationFactor) noexcept;
     void setDelayParameter (juce::RangedAudioParameter* parameter) noexcept { delayParameter = parameter; }
 
+    // Wires the processor's scope-stream trigger markers (decimated samples
+    // since the last kick transient + a trigger sequence counter) so Triggered
+    // mode can draw the LIVE bass aligned to the frozen kick reference — a
+    // ReVision-style progressive sweep that redraws on every hit instead of
+    // only when a completed capture window is published.
+    void setLiveTriggerCounters (const std::atomic<int>* samplesSinceTrigger,
+                                 const std::atomic<int>* triggerCount) noexcept
+    {
+        liveSamplesSinceTrigger = samplesSinceTrigger;
+        liveTriggerCount = triggerCount;
+    }
+
     // The kick's captured window is locked to the first hit after each
     // (re)lock point and held static, since its shape doesn't meaningfully
     // change hit-to-hit — only the bass trace keeps refreshing on retrigger.
@@ -115,7 +127,8 @@ private:
     void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawHoldIndicator (juce::Graphics&, juce::Rectangle<float>) const;
-    void rebuildVisibleBuffers (int visible, bool applyVisualOffset = true);
+    void rebuildVisibleBuffers (int visible, bool applyVisualOffset = true,
+                                bool computeSmoothedEnvelope = true);
     bool refreshTriggeredSnapshot();
     void reserveTriggeredBuffers();
     void buildFreeRunTriggeredSnapshot();
@@ -205,6 +218,12 @@ private:
     static constexpr int freeRunWatchdogTicks = 120;
 
     juce::RangedAudioParameter* delayParameter = nullptr;
+
+    // Scope-stream trigger markers published by the processor (see
+    // setLiveTriggerCounters). Null until the editor wires them.
+    const std::atomic<int>* liveSamplesSinceTrigger = nullptr;
+    const std::atomic<int>* liveTriggerCount = nullptr;
+
     bool delayGestureActive = false;
     float dragStartX = 0.0f;
     float dragStartDelayMs = 0.0f;

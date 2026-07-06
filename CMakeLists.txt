@@ -9,7 +9,12 @@ endif()
 
 project(KickLock VERSION 0.1.0)
 
-set(CMAKE_GENERATOR_PLATFORM x64)
+# Only meaningful for Visual Studio generators; setting it under Makefiles/
+# Ninja (Linux CI) makes every sub-configure — including JUCE's FetchContent
+# population — fail with "generator platform not supported".
+if(MSVC)
+    set(CMAKE_GENERATOR_PLATFORM x64)
+endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
 set(CMAKE_CXX_STANDARD 20)

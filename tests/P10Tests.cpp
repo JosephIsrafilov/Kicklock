@@ -517,6 +517,27 @@ public:
                     "stale material should eventually disarm Analyze");
         }
 
+        beginTest ("Scope trigger markers follow detected kicks");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            expectEquals (processor.scopeTriggerCount.load(), 0);
+
+            // ~1.2 s of a kick every 400 ms should register several triggers,
+            // and the since-trigger counter (in decimated scope samples) must
+            // point back at most one kick period.
+            feedLoop (processor, 512, 1.2, 0.5f, 0.3f);
+
+            expectGreaterThan (processor.scopeTriggerCount.load(), 1);
+
+            const int decimation = processor.getScopeDecimationFactor();
+            const int maxLagDecimated = (int) (kSampleRate * 0.45) / juce::jmax (1, decimation);
+            expectLessThan (processor.scopeSamplesSinceTrigger.load(), maxLagDecimated + 1);
+        }
+
         beginTest ("Quiet short kick ticks are detected at large host buffers");
         {
             KickLockAudioProcessor processor;
