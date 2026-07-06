@@ -144,6 +144,40 @@ void Oscilloscope::timerCallback()
     {
         repaint();
     }
+
+    // Glide the live zoom values toward the wheel targets (~80 ms settle at
+    // 60 Hz) so zooming animates instead of stepping per wheel notch. While a
+    // held/scrolled view is gliding, compensate the scroll so the time under
+    // the cursor stays fixed; a live view keeps its right ("now") edge anchored.
+    if (std::abs (targetTimeZoom - timeZoom) > 1.0e-3f || std::abs (targetAmpZoom - ampZoom) > 1.0e-3f)
+    {
+        const int oldVisible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
+                                                             timeZoom, gridDivision, tempoAvailable, bpm);
+
+        timeZoom += 0.35f * (targetTimeZoom - timeZoom);
+        ampZoom  += 0.35f * (targetAmpZoom  - ampZoom);
+        if (std::abs (targetTimeZoom - timeZoom) <= 1.0e-3f) timeZoom = targetTimeZoom;
+        if (std::abs (targetAmpZoom  - ampZoom)  <= 1.0e-3f) ampZoom  = targetAmpZoom;
+
+        if (viewMode != ScopeViewMode::Triggered)
+        {
+            if (isDisplayFrozen() || displayScrollMs > 0.01f)
+            {
+                const int newVisible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
+                                                                     timeZoom, gridDivision, tempoAvailable, bpm);
+                const float oldMs = (float) calculateVisibleWindowMs (oldVisible, sampleRate, decimationFactor);
+                const float newMs = (float) calculateVisibleWindowMs (newVisible, sampleRate, decimationFactor);
+                displayScrollMs = clampDisplayScrollMs (scopeAnchoredZoomScrollMs (displayScrollMs, oldMs, newMs,
+                                                                                   zoomAnchorFraction));
+            }
+            else
+            {
+                displayScrollMs = clampDisplayScrollMs (displayScrollMs);
+            }
+        }
+
+        repaint();
+    }
 }
 
 void Oscilloscope::paint (juce::Graphics& g)
@@ -273,10 +307,17 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     const float preMs = samplesToMs (safePreRoll - first, rate);
     const float postMs = samplesToMs (last - safePreRoll, rate);
 
+    // Zoom-adaptive gridline spacing: a fixed step clutters when zoomed out and
+    // starves when zoomed deep; pick the step from the visible span instead.
+    const float windowMs = juce::jmax (0.1f, preMs + postMs);
+    const float gridStepMs = chooseMajorStepMs (windowMs);
+
     g.setColour (gridMinor);
-    for (float ms = -200.0f; ms <= 300.0f; ms += 10.0f)
+    for (float ms = -std::ceil (preMs / gridStepMs) * gridStepMs;
+         ms <= postMs + 0.001f;
+         ms += gridStepMs)
     {
-        const float x = triggerX + bounds.getWidth() * (ms / juce::jmax (1.0f, preMs + postMs));
+        const float x = triggerX + bounds.getWidth() * (ms / windowMs);
         if (x >= bounds.getX() && x <= bounds.getRight())
             g.drawVerticalLine ((int) std::round (x), bounds.getY(), bounds.getBottom());
     }
@@ -316,7 +357,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     };
 
     for (int gi = ghostCount - 1; gi >= 0; --gi)
-        drawGhostBass (ghostBass[(size_t) gi], 0.06f * (float) (ghostCount - gi));
+        drawGhostBass (ghostBass[(size_t) gi], 0.09f * (float) (ghostCount - gi));
 
     auto drawPair = [&] (const std::vector<float>& bass,
                          const std::vector<float>& kick,
@@ -367,16 +408,39 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         kickFill.lineTo (lastX, midY);
         kickFill.closeSubPath();
 
-        g.setColour (kickColour.withAlpha (alpha * 0.14f));
-        g.fillPath (kickFill);
+        // Vertical gradient fills — strongest at the waveform extremes, fading
+        // to near-transparent at the midline — give the traces depth without
+        // washing out the grid the way flat alpha fills do. Three stops keep
+        // the lobes below the midline as visible as those above it.
+        {
+            juce::ColourGradient kickGrad (kickColour.withAlpha (alpha * 0.30f), 0.0f, bounds.getY(),
+                                           kickColour.withAlpha (alpha * 0.30f), 0.0f, bounds.getBottom(),
+                                           false);
+            kickGrad.addColour (0.5, kickColour.withAlpha (alpha * 0.03f));
+            g.setGradientFill (kickGrad);
+            g.fillPath (kickFill);
+        }
+
         g.setColour (kickColour.withAlpha (alpha));
-        g.strokePath (kickPath, juce::PathStrokeType (1.25f, juce::PathStrokeType::curved,
+        g.strokePath (kickPath, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
 
-        g.setColour (bassColour.withAlpha (juce::jmin (1.0f, alpha + 0.04f) * 0.18f));
-        g.fillPath (bassFill);
-        g.setColour (bassColour.withAlpha (juce::jmin (1.0f, alpha + 0.04f)));
-        g.strokePath (bassPath, juce::PathStrokeType (1.45f, juce::PathStrokeType::curved,
+        const float bassAlpha = juce::jmin (1.0f, alpha + 0.04f);
+        {
+            juce::ColourGradient bassGrad (bassColour.withAlpha (bassAlpha * 0.34f), 0.0f, bounds.getY(),
+                                           bassColour.withAlpha (bassAlpha * 0.34f), 0.0f, bounds.getBottom(),
+                                           false);
+            bassGrad.addColour (0.5, bassColour.withAlpha (bassAlpha * 0.04f));
+            g.setGradientFill (bassGrad);
+            g.fillPath (bassFill);
+        }
+
+        // Soft glow under the primary bass stroke lifts it off the background.
+        g.setColour (bassColour.withAlpha (bassAlpha * 0.16f));
+        g.strokePath (bassPath, juce::PathStrokeType (4.5f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+        g.setColour (bassColour.withAlpha (bassAlpha));
+        g.strokePath (bassPath, juce::PathStrokeType (2.2f, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
     };
 
@@ -541,10 +605,23 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
                                     float gain,
                                     float midY)
 {
-    juce::Path bassPath, kickPath, bassFill, kickFill;
-
     const float xStep = bounds.getWidth() / (float) (visible - 1);
     const float halfHeight = bounds.getHeight() * 0.46f;
+
+    // Heavily zoomed out, render min/max envelope bands (the midline fills
+    // would be visual mud at that density anyway); zoomed in, keep the filled
+    // polyline aesthetic.
+    if (scopeShouldRenderMinMaxBand (visible, (int) bounds.getWidth()))
+    {
+        strokeMinMaxBand (g, bounds, visibleSideBuffer.data(), visible, gain,
+                          midY, halfHeight, kickColour.withAlpha (0.92f), 1.6f);
+        strokeMinMaxBand (g, bounds, visibleMainBuffer.data(), visible, gain,
+                          midY, halfHeight, bassColour.withAlpha (0.96f), 2.0f);
+        drawWaveLegend (g, bounds);
+        return;
+    }
+
+    juce::Path bassPath, kickPath, bassFill, kickFill;
 
     auto buildPaths = [&] (const std::array<float, historyLength>& source,
                            juce::Path& stroke, juce::Path& fill)
@@ -604,9 +681,20 @@ void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
     const float xStep = bounds.getWidth() / (float) (visible - 1);
     const float halfHeight = bounds.getHeight() * 0.46f;
 
+    // Zoomed out (several samples per pixel), point-sampled polylines alias
+    // and "boil" as the history scrolls; render stable min/max envelope bands
+    // instead. Zoomed in, a polyline is smoother-looking and cheaper.
+    const bool useBand = scopeShouldRenderMinMaxBand (visible, (int) bounds.getWidth());
+
     auto strokeTrace = [&] (const std::array<float, historyLength>& source,
                             juce::Colour colour, float width)
     {
+        if (useBand)
+        {
+            strokeMinMaxBand (g, bounds, source.data(), visible, gain, midY, halfHeight, colour, width);
+            return;
+        }
+
         juce::Path path;
         for (int i = 0; i < visible; ++i)
         {
@@ -625,9 +713,9 @@ void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
                                                   juce::PathStrokeType::rounded));
     };
 
-    strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.1f);
+    strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.6f);
 
-    strokeTrace (visibleMainBuffer, bassColour.withAlpha (0.92f), 1.35f);
+    strokeTrace (visibleMainBuffer, bassColour.withAlpha (0.92f), 2.0f);
 
     // Live-edge indicator: the right edge is "now". A faint playhead line plus a
     // small LIVE tag make the newest material obvious and reinforce that this is
@@ -654,12 +742,28 @@ void Oscilloscope::drawSeparateMode (juce::Graphics& g,
     const float laneHalfHeight = bounds.getHeight() * 0.22f;
     const float bassCentreY = bounds.getY() + bounds.getHeight() * 0.25f;
     const float kickCentreY = bounds.getY() + bounds.getHeight() * 0.75f;
+    const bool useBand = scopeShouldRenderMinMaxBand (visible, (int) bounds.getWidth());
 
     auto drawLane = [&] (const std::array<float, historyLength>& source,
                          float centreY,
                          juce::Colour colour,
                          const juce::String& label)
     {
+        if (useBand)
+        {
+            strokeMinMaxBand (g, bounds, source.data(), visible, gain,
+                              centreY, laneHalfHeight, colour.withAlpha (0.95f), 1.35f);
+
+            g.setColour (colour.withAlpha (0.8f));
+            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+            g.drawText (label,
+                        juce::Rectangle<int> ((int) bounds.getX(),
+                                              (int) (centreY - laneHalfHeight - 14.0f),
+                                              48, 12),
+                        juce::Justification::centredLeft);
+            return;
+        }
+
         juce::Path stroke;
         juce::Path fill;
 
@@ -724,6 +828,58 @@ void Oscilloscope::drawWaveLegend (juce::Graphics& g, juce::Rectangle<float> bou
 
     drawItem (legend.removeFromLeft (52.0f), bassColour, "BASS");
     drawItem (legend, kickColour, "KICK");
+}
+
+void Oscilloscope::strokeMinMaxBand (juce::Graphics& g, juce::Rectangle<float> bounds,
+                                     const float* source, int visible, float gain,
+                                     float centreY, float halfHeight,
+                                     juce::Colour colour, float strokeWidth)
+{
+    const int numColumns = juce::jlimit (2, historyLength, (int) std::ceil (bounds.getWidth()));
+    buildMinMaxColumns (source, 0, visible, numColumns,
+                        columnMinScratch.data(), columnMaxScratch.data());
+
+    const float columnW = bounds.getWidth() / (float) numColumns;
+
+    juce::Path band;
+    band.preallocateSpace (numColumns * 6 + 8);
+
+    // Forward pass along the column maxima, back along the minima, closed —
+    // the filled band IS the trace body, with a stroked outline for crispness.
+    // A minimum band thickness keeps a silent/flat signal visible as a line.
+    for (int c = 0; c < numColumns; ++c)
+    {
+        const float x = bounds.getX() + ((float) c + 0.5f) * columnW;
+        float yTop = centreY - juce::jlimit (-1.0f, 1.0f, columnMaxScratch[(size_t) c] * gain) * halfHeight;
+        float yBot = centreY - juce::jlimit (-1.0f, 1.0f, columnMinScratch[(size_t) c] * gain) * halfHeight;
+
+        if (yBot - yTop < 1.2f)
+        {
+            const float mid = 0.5f * (yTop + yBot);
+            yTop = mid - 0.6f;
+            yBot = mid + 0.6f;
+        }
+
+        columnMinScratch[(size_t) c] = yBot;   // reuse as screen-space storage
+        if (c == 0)
+            band.startNewSubPath (x, yTop);
+        else
+            band.lineTo (x, yTop);
+    }
+
+    for (int c = numColumns - 1; c >= 0; --c)
+    {
+        const float x = bounds.getX() + ((float) c + 0.5f) * columnW;
+        band.lineTo (x, columnMinScratch[(size_t) c]);
+    }
+
+    band.closeSubPath();
+
+    g.setColour (colour.withMultipliedAlpha (0.55f));
+    g.fillPath (band);
+    g.setColour (colour);
+    g.strokePath (band, juce::PathStrokeType (strokeWidth * 0.6f, juce::PathStrokeType::curved,
+                                              juce::PathStrokeType::rounded));
 }
 
 void Oscilloscope::drawTransientMarkers (juce::Graphics& g,
@@ -1076,28 +1232,47 @@ void Oscilloscope::cancelActiveGestures() noexcept
 void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
 {
     juce::ignoreUnused (e);
+
+    // Universal scope convention: double-click returns to the default view.
+    // The zoom glides back via the timer animation rather than snapping.
     displayScrollMs = 0.0f;
+    targetTimeZoom = 1.0f;
+    targetAmpZoom = 1.0f;
+
+    if (onZoomChanged != nullptr)
+        onZoomChanged();
+
     repaint();
 }
 
 void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
-    juce::ignoreUnused (e);
+    // Some Windows drivers translate Shift+scroll into a horizontal wheel
+    // event (deltaX only), which would make Shift+wheel amplitude zoom go
+    // dead — fall back to deltaX as the zoom delta in that case.
+    const bool shiftWheelAsHorizontal = e.mods.isShiftDown() && wheel.deltaY == 0.0f;
+    const float zoomDelta = wheel.deltaY != 0.0f ? wheel.deltaY
+                          : (shiftWheelAsHorizontal ? -wheel.deltaX : 0.0f);
 
-    const float step = 1.0f + juce::jlimit (-0.5f, 0.5f, wheel.deltaY) * 0.6f;
-
-    if (std::abs (wheel.deltaY) > 0.0f)
+    if (std::abs (zoomDelta) > 0.0f)
     {
+        // Adjust the TARGET zoom; the timer glides the live value toward it.
+        // Remember where the cursor sat so a held/scrolled view zooms around
+        // that point instead of the right edge.
+        const float step = 1.0f + juce::jlimit (-0.5f, 0.5f, zoomDelta) * 0.6f;
+        zoomAnchorFraction = juce::jlimit (0.0f, 1.0f,
+                                           e.position.x / (float) juce::jmax (1, getWidth()));
+
         if (e.mods.isShiftDown())
-            setAmpZoom (ampZoom * step);
+            targetAmpZoom = juce::jlimit (1.0f, 8.0f, targetAmpZoom * step);
         else
-            setTimeZoom (timeZoom * step);
-            
+            targetTimeZoom = juce::jlimit (1.0f, 16.0f, targetTimeZoom * step);
+
         if (onZoomChanged != nullptr)
             onZoomChanged();
     }
 
-    if (std::abs (wheel.deltaX) > 0.0f)
+    if (std::abs (wheel.deltaX) > 0.0f && ! shiftWheelAsHorizontal)
     {
         if (viewMode == ScopeViewMode::Triggered)
             return;

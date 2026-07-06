@@ -75,6 +75,16 @@ inline AnalysisMaterialStatus classifyAnalysisMaterialStatus (bool hasSidechain,
     if (! hasSidechain)
         return AnalysisMaterialStatus::WaitingForSidechain;
 
+    // Banked material trumps momentary activity: once enough raw capture
+    // exists, Analyze is always possible — the engine re-validates the window
+    // itself, and refusing the click just because this instant falls in a gap
+    // between kicks (or right after the transport stopped) was the last way
+    // the button could stick on "waiting for kick" with analyzable audio
+    // sitting in the buffer. The processor bounds staleness on its side by
+    // holding `enoughMaterial` for a grace window after activity lapses.
+    if (enoughMaterial)
+        return AnalysisMaterialStatus::ReadyToAnalyze;
+
     if (! kickActive)
         return AnalysisMaterialStatus::WaitingForKick;
 
@@ -87,8 +97,7 @@ inline AnalysisMaterialStatus classifyAnalysisMaterialStatus (bool hasSidechain,
     if (! materialUsable)
         return AnalysisMaterialStatus::SignalTooLow;
 
-    return enoughMaterial ? AnalysisMaterialStatus::ReadyToAnalyze
-                          : AnalysisMaterialStatus::CapturingMaterial;
+    return AnalysisMaterialStatus::CapturingMaterial;
 }
 
 // True for any state where the sidechain is connected and both kick and bass

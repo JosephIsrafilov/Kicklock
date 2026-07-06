@@ -493,6 +493,11 @@ public:
 
     ~AutoAlignEngine() override
     {
+        // Invalidate the liveness token FIRST: a result lambda already queued
+        // on the message loop would otherwise dereference the owner processor
+        // after this destructor chain (which runs on that same message thread)
+        // has finished tearing it down.
+        alive->store (false);
         signalThreadShouldExit();
         notify();
         stopThread (2000);
@@ -566,9 +571,14 @@ public:
             const auto result = analyzeCapturedBuffers();
             state.store (State::Idle, std::memory_order_release);
 
-            juce::MessageManager::callAsync ([this, result]
+            // The async lambda may fire after the processor (and this engine)
+            // is destroyed — the destructor runs on the same message thread the
+            // lambda is queued on, so `this` alone would dangle. The shared
+            // liveness token outlives the engine and gates the dereference.
+            juce::MessageManager::callAsync ([this, result, aliveToken = alive]
             {
-                applyResultToParameters (result);
+                if (aliveToken->load())
+                    applyResultToParameters (result);
             });
         }
     }
@@ -668,6 +678,10 @@ private:
     }
 
     KickLockAudioProcessor& owner;
+
+    // Liveness token shared with any pending message-thread result lambdas;
+    // flipped false in the destructor so a late lambda never touches `owner`.
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
     double sampleRate = 44100.0;
     int captureSamples = 1;
     int maxLagSamples = 1;
@@ -978,10 +992,12 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // half-time / sparse pattern), which is what made the Analyze button read
     // "waiting for kick" and never enable. 1.5 s covers 4-on-floor down to
     // ~40 BPM while still going inactive quickly once the transport stops. The
-    // activation floor is low: it only needs to tell "playing" from "silent",
+    // activation floor (-60 dBFS) is deliberately low: it only needs to tell
+    // "playing" from "silent" — the digital noise floor sits far below it —
     // not judge phase-read quality (that is materialUsable below).
-    kickActivity.prepare (sampleRate, 1500.0f, 3.0e-3f);
-    bassActivity.prepare (sampleRate, 1500.0f, 3.0e-3f);
+    kickActivity.prepare (sampleRate, 1500.0f, 1.0e-3f);
+    bassActivity.prepare (sampleRate, 1500.0f, 1.0e-3f);
+    materialReadyHoldSamples = 0;
     kickActiveHeld.store (false);
     bassActiveHeld.store (false);
     analysisSignalUsable.store (false);
@@ -1039,11 +1055,9 @@ void KickLockAudioProcessor::processObservationCapture (const juce::AudioBuffer<
                                                         const juce::AudioBuffer<float>& sidechainBuffer,
                                                         bool hasSidechain,
                                                         int numSamples,
-                                                        double& bassEnergySumOut,
-                                                        double& kickEnergySumOut) noexcept
+                                                        BlockObservationStats& statsOut) noexcept
 {
-    bassEnergySumOut = 0.0;
-    kickEnergySumOut = 0.0;
+    statsOut = {};
 
     const int mainCh = mainBuffer.getNumChannels();
 
@@ -1061,13 +1075,15 @@ void KickLockAudioProcessor::processObservationCapture (const juce::AudioBuffer<
             for (int ch = 0; ch < mainCh; ++ch)
                 mSum += mainBuffer.getSample (ch, i);
             const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
-            bassEnergySumOut += (double) bassMono * (double) bassMono;
+            statsOut.bassEnergySum += (double) bassMono * (double) bassMono;
+            statsOut.bassPeak = juce::jmax (statsOut.bassPeak, std::abs (bassMono));
 
             float sSum = 0.0f;
             for (int ch = 0; ch < scCh; ++ch)
                 sSum += sidechainBuffer.getSample (ch, i);
             const float kickMono = scCh > 0 ? sSum / (float) scCh : 0.0f;
-            kickEnergySumOut += (double) kickMono * (double) kickMono;
+            statsOut.kickEnergySum += (double) kickMono * (double) kickMono;
+            statsOut.kickPeak = juce::jmax (statsOut.kickPeak, std::abs (kickMono));
 
             const float bassLow = rawBassLowpass.processSample (0, bassMono);
             const float kickLow = rawKickLowpass.processSample (0, kickMono);
@@ -1089,29 +1105,34 @@ void KickLockAudioProcessor::processObservationCapture (const juce::AudioBuffer<
                 mSum += mainBuffer.getSample (ch, i);
 
             const float bassMono = mainCh > 0 ? mSum / (float) mainCh : 0.0f;
-            bassEnergySumOut += (double) bassMono * (double) bassMono;
+            statsOut.bassEnergySum += (double) bassMono * (double) bassMono;
+            statsOut.bassPeak = juce::jmax (statsOut.bassPeak, std::abs (bassMono));
         }
     }
 }
 
 void KickLockAudioProcessor::updateActivityAndSignalState (bool hasSidechain,
-                                                            double bassEnergySum,
-                                                            double kickEnergySum,
+                                                            const BlockObservationStats& stats,
                                                             int numSamples) noexcept
 {
     const double safeCount = (double) juce::jmax (1, numSamples);
-    const float blockBassRms = (float) std::sqrt (bassEnergySum / safeCount);
-    const float blockKickRms = hasSidechain ? (float) std::sqrt (kickEnergySum / safeCount) : 0.0f;
+    const float blockBassRms = (float) std::sqrt (stats.bassEnergySum / safeCount);
+    const float blockKickRms = hasSidechain ? (float) std::sqrt (stats.kickEnergySum / safeCount) : 0.0f;
     bassSignalRms.store (blockBassRms);
     kickSignalRms.store (blockKickRms);
 
+    // Activity level = max(block RMS, block peak * 0.25). Block RMS of a short
+    // kick tick dilutes with the host buffer size (~10 dB from 512 to 4096
+    // samples), so RMS alone made detection buffer-size-dependent; the scaled
+    // peak term restores it. The 0.25 factor keeps a lone full-scale click from
+    // reading louder than a sustained tone of the same audibility.
+    const float bassLevel = juce::jmax (blockBassRms, stats.bassPeak * 0.25f);
+    const float kickLevel = hasSidechain ? juce::jmax (blockKickRms, stats.kickPeak * 0.25f) : 0.0f;
+
     // Feed the held-activity trackers so status reflects recent hits, not just
     // this instant. Without a sidechain the kick can never be "active".
-    bassActivity.pushBlock (blockBassRms, numSamples);
-    if (hasSidechain)
-        kickActivity.pushBlock (blockKickRms, numSamples);
-    else
-        kickActivity.pushBlock (0.0f, numSamples);
+    bassActivity.pushBlock (bassLevel, numSamples);
+    kickActivity.pushBlock (kickLevel, numSamples);
 
     kickActiveHeld.store (kickActivity.isActive());
     bassActiveHeld.store (bassActivity.isActive());
@@ -1119,21 +1140,34 @@ void KickLockAudioProcessor::updateActivityAndSignalState (bool hasSidechain,
     // "Usable" material: both signals cleared a floor loud enough for a phase
     // read within the hold window. Lets status tell "present but far too quiet"
     // (SIGNAL TOO LOW) apart from a genuinely playing loop, without flickering
-    // between kick transients.
-    constexpr float usableFloorRms = 8.0e-3f;
+    // between kick transients. -48 dBFS: the offline engine's own presence
+    // floor is 1.5e-3 RMS, so gating the UI much stricter than the engine it
+    // gates just refused material the analysis handles fine.
+    constexpr float usableFloorRms = 4.0e-3f;
     analysisSignalUsable.store (hasSidechain
                                 && kickActivity.isUsable (usableFloorRms)
                                 && bassActivity.isUsable (usableFloorRms));
 
     // "Enough material" for a meaningful analysis window: the raw capture has
-    // accumulated at least ~0.5 s of samples AND both signals have been active
-    // recently. Display-only; Apply Fix gates on the analysis result, not this.
+    // accumulated at least ~0.5 s of samples AND both signals were active
+    // recently. "Recently" includes a ~30 s grace window after the activity
+    // holds lapse, so stopping the transport doesn't instantly disarm Analyze
+    // on audio that is still sitting in the capture ring — while hours-old
+    // material still eventually reads stale. Display-only; Apply Fix gates on
+    // the analysis result, not this.
     const int capturedSamples = rawCapture.getFilledSamples();
     const int minMaterialSamples = (int) (getSampleRate() * 0.5);
-    analysisMaterialReady.store (hasSidechain
-                                 && capturedSamples >= minMaterialSamples
-                                 && kickActivity.isActive()
-                                 && bassActivity.isActive());
+    const bool readyNow = hasSidechain
+                       && capturedSamples >= minMaterialSamples
+                       && kickActivity.isActive()
+                       && bassActivity.isActive();
+
+    if (readyNow)
+        materialReadyHoldSamples = (int) (getSampleRate() * 30.0);
+    else
+        materialReadyHoldSamples = juce::jmax (0, materialReadyHoldSamples - juce::jmax (0, numSamples));
+
+    analysisMaterialReady.store (hasSidechain && (readyNow || materialReadyHoldSamples > 0));
 }
 
 void KickLockAudioProcessor::pushMetersScopeAndTransientState (float mainMono, float sidechainMonoRaw) noexcept
@@ -1173,8 +1207,7 @@ void KickLockAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buf
     sidechainReferenceAvailable.store (hasSidechain);
 
     const int numSamples = mainBuffer.getNumSamples();
-    double bassEnergySum = 0.0;
-    double kickEnergySum = 0.0;
+    BlockObservationStats observationStats;
 
     // Track the crossover cutoff here too: processObservationCapture() low-passes
     // the raw bass/kick it hands to the Analyze capture with rawBassLowpass /
@@ -1185,9 +1218,8 @@ void KickLockAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buf
     rawBassLowpass.setCutoffFrequency (crossoverHz);
     rawKickLowpass.setCutoffFrequency (crossoverHz);
 
-    processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples,
-                               bassEnergySum, kickEnergySum);
-    updateActivityAndSignalState (hasSidechain, bassEnergySum, kickEnergySum, numSamples);
+    processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples, observationStats);
+    updateActivityAndSignalState (hasSidechain, observationStats, numSamples);
 
     const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
     const auto fixedDelay = (float) getLatencySamples();
@@ -1300,8 +1332,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     sidechainReferenceAvailable.store (hasSidechain);
 
     const int numSamples = mainBuffer.getNumSamples();
-    double bassEnergySum = 0.0;
-    double kickEnergySum = 0.0;
+    BlockObservationStats observationStats;
 
     const float delayMs = getEffectiveDelayMs();
     const bool polarityInvert = getEffectivePolarityInvert();
@@ -1334,9 +1365,8 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // Shared observation path: raw capture, dry meter, held-activity trackers.
     // Identical to what processBlockBypassed() runs, so bypassing the
     // corrective DSP below never starves Analyze or the status readouts.
-    processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples,
-                               bassEnergySum, kickEnergySum);
-    updateActivityAndSignalState (hasSidechain, bassEnergySum, kickEnergySum, numSamples);
+    processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples, observationStats);
+    updateActivityAndSignalState (hasSidechain, observationStats, numSamples);
 
     const bool neutral = isBassProcessingNeutral();
     const bool processingNeeded = ! neutral;
@@ -1938,21 +1968,35 @@ bool KickLockAudioProcessor::applyLatestFix()
                                                                    ? delayInterpParam->load()
                                                                    : 0.0f);
 
-        const auto verified = PhaseFixEngine::scoreSettings (bassWindow.data(),
-                                                             kickWindow.data(),
-                                                             (int) bassWindow.size(),
-                                                             getSampleRate(),
-                                                             settings,
-                                                             PhaseFixEngine::absoluteManualMaxDelayMs);
+        // Verify on the analysis pool, not the message thread: scoring renders
+        // the whole analyzed window through the delay + rotator and can take
+        // tens of milliseconds — enough to visibly hitch the UI on click. The
+        // windows are moved into shared_ptrs because ThreadPool jobs must be
+        // copyable. Same publish-under-resultMutex pattern as the analyze job;
+        // the editor picks the verification numbers up on its poll timer.
+        auto verifyBass = std::make_shared<std::vector<float>> (std::move (bassWindow));
+        auto verifyKick = std::make_shared<std::vector<float>> (std::move (kickWindow));
+        const double verifySampleRate = getSampleRate();
 
-        PhaseFixEngine::applyVerification (fix, verified.matchPercent);
+        analysisThreadPool.addJob ([this, verifyBass, verifyKick, settings, verifySampleRate]
+        {
+            juce::ScopedNoDenormals noDenormals;
 
-        const std::lock_guard<std::mutex> lock (resultMutex);
-        // Only write verification back if the stored result is still the one we
-        // applied (a racing re-analyze would have replaced it — leave that one).
-        PhaseFixEngine::applyVerification (latestFixResult, verified.matchPercent);
-        latestVerifiedAfterPercent.store (latestFixResult.verifiedAfterMatchPercent);
-        latestVerificationDeltaPercent.store (latestFixResult.verificationDeltaPercent);
+            const auto verified = PhaseFixEngine::scoreSettings (verifyBass->data(),
+                                                                 verifyKick->data(),
+                                                                 (int) verifyBass->size(),
+                                                                 verifySampleRate,
+                                                                 settings,
+                                                                 PhaseFixEngine::absoluteManualMaxDelayMs);
+
+            const std::lock_guard<std::mutex> lock (resultMutex);
+            // Note: if a re-analyze raced us, this stamps verification onto the
+            // newer result — same (accepted) behaviour as the old synchronous
+            // path, which also wrote to whatever latestFixResult held by then.
+            PhaseFixEngine::applyVerification (latestFixResult, verified.matchPercent);
+            latestVerifiedAfterPercent.store (latestFixResult.verifiedAfterMatchPercent);
+            latestVerificationDeltaPercent.store (latestFixResult.verificationDeltaPercent);
+        });
     }
 
     return true;

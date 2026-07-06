@@ -542,7 +542,17 @@ public:
             expect (PhaseFixEngine::canApply (predicted), predicted.message);
             expect (processor.applyLatestFix());
 
-            const auto verified = processor.getLatestFixResult();
+            // Verification runs on the analysis pool (so the UI click never
+            // hitches); poll for it to land like the editor's timer does.
+            PhaseFixResult verified;
+            for (int attempt = 0; attempt < 500; ++attempt)
+            {
+                verified = processor.getLatestFixResult();
+                if (verified.verifiedAfterMatchPercent >= 0.0f)
+                    break;
+                juce::Thread::sleep (10);
+            }
+
             expectGreaterThan (verified.verifiedAfterMatchPercent, 0.0f);
             expectLessThan (verified.verificationDeltaPercent, 10.0f);
         }

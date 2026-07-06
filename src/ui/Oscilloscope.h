@@ -80,9 +80,12 @@ public:
 
     // Time zoom: 1x shows the whole history, higher values show only the most
     // recent slice stretched across the width. Amplitude zoom multiplies the
-    // auto-gain. Both are clamped to sane ranges.
-    void setTimeZoom (float z) noexcept { timeZoom = juce::jlimit (1.0f, 16.0f, z); repaint(); }
-    void setAmpZoom  (float z) noexcept { ampZoom  = juce::jlimit (1.0f, 8.0f,  z); repaint(); }
+    // auto-gain. Both are clamped to sane ranges. Wheel input adjusts the
+    // TARGET values and the timer glides the live values toward them, so
+    // zooming feels animated rather than stepped; these direct setters snap
+    // both so programmatic calls take effect immediately.
+    void setTimeZoom (float z) noexcept { timeZoom = targetTimeZoom = juce::jlimit (1.0f, 16.0f, z); repaint(); }
+    void setAmpZoom  (float z) noexcept { ampZoom  = targetAmpZoom  = juce::jlimit (1.0f, 8.0f,  z); repaint(); }
     float getTimeZoom() const noexcept  { return timeZoom; }
     float getAmpZoom()  const noexcept  { return ampZoom; }
 
@@ -100,6 +103,15 @@ private:
     void drawFreeRunMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
     void drawSeparateMode (juce::Graphics&, juce::Rectangle<float>, int, float);
     void drawWaveLegend (juce::Graphics&, juce::Rectangle<float>) const;
+
+    // Per-pixel-column min/max envelope band for a zoomed-out trace: fills the
+    // band between the column minima and maxima and strokes its outline, so
+    // heavily-decimated views render stable peak envelopes instead of the
+    // shimmering point-sampled polylines. Uses the column scratch arrays.
+    void strokeMinMaxBand (juce::Graphics&, juce::Rectangle<float> bounds,
+                           const float* source, int visible, float gain,
+                           float centreY, float halfHeight,
+                           juce::Colour colour, float strokeWidth);
     void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawHoldIndicator (juce::Graphics&, juce::Rectangle<float>) const;
@@ -138,8 +150,15 @@ private:
     bool  frozen               = false;   // manual Freeze button
     bool  interactionHoldActive = false;  // temporary mouse-hold inspection
     float displayGain = 1.0f;   // smoothed auto-gain applied to both traces
-    float timeZoom    = 1.0f;   // horizontal zoom (1..16)
-    float ampZoom     = 1.0f;   // vertical zoom (1..8)
+    float timeZoom    = 1.0f;   // horizontal zoom (1..16), glides toward target
+    float ampZoom     = 1.0f;   // vertical zoom (1..8), glides toward target
+    float targetTimeZoom = 1.0f;
+    float targetAmpZoom  = 1.0f;
+
+    // Horizontal fraction (0 = left, 1 = right) of the last wheel event, used
+    // to keep the time under the cursor fixed while zooming a held/scrolled
+    // view. A live view stays anchored to the right ("now") edge instead.
+    float zoomAnchorFraction = 1.0f;
     ScopeViewMode viewMode = ScopeViewMode::Triggered;
     GridDivision gridDivision = GridDivision::Milliseconds;
     int visualOffsetSamples = 0;
@@ -157,6 +176,11 @@ private:
     // content instead of broadband sample jitter.
     std::array<float, historyLength> smoothedMainBuffer {};
     std::array<float, historyLength> smoothedSideBuffer {};
+
+    // Scratch for the per-pixel-column min/max envelope rendering (one entry
+    // per pixel column; historyLength safely exceeds any plausible width).
+    std::array<float, historyLength> columnMinScratch {};
+    std::array<float, historyLength> columnMaxScratch {};
 
     static constexpr int ghostCount = 3;
     std::vector<float> triggeredBass;

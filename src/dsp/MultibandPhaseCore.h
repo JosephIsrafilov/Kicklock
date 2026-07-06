@@ -164,7 +164,16 @@ private:
         {
             for (auto& stage : channel)
             {
-                stage.coefficients = new juce::dsp::IIR::Coefficients<float> (1.0f, 0.0f, 1.0f, 0.0f);
+                // SECOND-order identity (b = [1,0,0], a = [1,0,0]), not first-order:
+                // updateAllpassCoefficients() later assigns a biquad makeAllPass set
+                // on the audio thread. If the initial coefficients were first-order,
+                // that assignment would grow the coefficient array AND change the
+                // filter order (resizing the state buffer) — both heap allocations
+                // on the audio thread the first time the phase filter engages.
+                // Matching the order here means every later update is a same-size
+                // element copy and the state buffer never reallocates.
+                stage.coefficients = new juce::dsp::IIR::Coefficients<float> (1.0f, 0.0f, 0.0f,
+                                                                              1.0f, 0.0f, 0.0f);
                 stage.prepare ({ sampleRate, 1, 1 });
             }
         }
@@ -211,7 +220,12 @@ private:
         
         if (currentCrossoverEnabled)
         {
-            crossover.setCrossoverFrequency (crossoverHz);
+            // setCrossoverFrequency recomputes both LR filters' coefficients on
+            // every call, so only push it when the (smoothed) value has actually
+            // moved — otherwise this burns trig math on every chunk forever.
+            if (std::abs (crossoverHz - crossover.getCrossoverFrequency()) > 0.01f)
+                crossover.setCrossoverFrequency (crossoverHz);
+
             crossover.split (inputBuffer, lowBuffer, highBuffer, n);
         }
         else
