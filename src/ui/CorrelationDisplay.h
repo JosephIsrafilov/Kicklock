@@ -18,11 +18,13 @@ public:
                         std::atomic<float>& lowEndPercentToRead,
                         std::atomic<float>& broadbandPercentToRead,
                         std::array<std::atomic<float>, PhaseBands::numBands>& bandPercentsToRead,
-                        std::atomic<float>& appliedBeforePercentToRead)
+                        std::atomic<float>& appliedBeforePercentToRead,
+                        std::atomic<bool>& matchValidToRead)
         : weightedPercentRef (weightedPercentToRead),
           lowEndPercentRef (lowEndPercentToRead),
           broadbandPercentRef (broadbandPercentToRead),
-          appliedBeforePercentRef (appliedBeforePercentToRead)
+          appliedBeforePercentRef (appliedBeforePercentToRead),
+          matchValidRef (matchValidToRead)
     {
         for (int i = 0; i < PhaseBands::numBands; ++i)
             bandRefs[(size_t) i] = &bandPercentsToRead[(size_t) i];
@@ -53,6 +55,22 @@ public:
         g.setColour (juce::Colour (0xff97a5b2));
         g.setFont (juce::Font (juce::FontOptions (10.5f)).boldened());
         g.drawText ("LIVE MATCH", top.removeFromTop (12.0f).toNearestInt(), juce::Justification::centred);
+
+        // While nothing meaningful is playing, every internal reading is a
+        // neutral 50% — printing that reads as "half aligned", which is a lie.
+        // Show an explicit no-signal state instead.
+        if (! displayValid)
+        {
+            g.setColour (juce::Colour (0xff97a5b2));
+            g.setFont (juce::Font (juce::FontOptions (drawDetails ? 42.0f : 48.0f)).boldened());
+            g.drawText ("--", top.removeFromTop (drawDetails ? 30.0f : 48.0f).toNearestInt(),
+                        juce::Justification::centred);
+            g.setFont (juce::Font (juce::FontOptions (11.0f)));
+            g.drawText ("no signal — play kick + bass",
+                        top.toNearestInt(), juce::Justification::centred);
+            detailsToggleBounds = {};   // nothing to expand while silent
+            return;
+        }
 
         g.setColour (accent);
         g.setFont (juce::Font (juce::FontOptions (drawDetails ? 42.0f : 48.0f)).boldened());
@@ -160,6 +178,15 @@ private:
 
     void timerCallback() override
     {
+        // Short hold on the valid flag so the display doesn't flicker between
+        // "no signal" and a number in the gaps between kick hits (the meter's
+        // energy gate is EMA-smoothed but can dip on very sparse material).
+        if (matchValidRef.load())
+            validHoldTicks = 15;    // ~0.5 s at 30 Hz
+        else if (validHoldTicks > 0)
+            --validHoldTicks;
+        displayValid = validHoldTicks > 0;
+
         const float target = weightedPercentRef.load();
         const float lowTarget = lowEndPercentRef.load();
         const float broadbandTarget = broadbandPercentRef.load();
@@ -183,6 +210,9 @@ private:
     std::atomic<float>& lowEndPercentRef;
     std::atomic<float>& broadbandPercentRef;
     std::atomic<float>& appliedBeforePercentRef;
+    std::atomic<bool>& matchValidRef;
+    bool displayValid = false;
+    int validHoldTicks = 0;
     std::array<std::atomic<float>*, PhaseBands::numBands> bandRefs {};
 
     float displayWeightedPercent = 50.0f;

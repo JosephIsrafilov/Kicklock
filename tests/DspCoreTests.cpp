@@ -1274,3 +1274,44 @@ private:
 };
 
 static PitchTrackerTests pitchTrackerTestsInstance;
+
+//==============================================================================
+// Live-match validity: the meter must report "no signal" over silence instead
+// of a misleading neutral 50%, and recover once material plays.
+class LiveMatchValidityTests : public juce::UnitTest
+{
+public:
+    LiveMatchValidityTests() : juce::UnitTest ("LiveMatchValidity", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Meter reports no signal over silence, signal while playing");
+        {
+            RealtimeMultiBandMeter meter;
+            const int window = (int) (kSampleRate * 0.25);
+            meter.prepare (kSampleRate, window);
+
+            expect (! meter.hasSignal(), "fresh meter must not claim signal");
+
+            // Aligned 60 Hz pair at a healthy level.
+            const int play = (int) (kSampleRate * 0.5);
+            for (int i = 0; i < play; ++i)
+            {
+                const float v = 0.3f * (float) std::sin (kTwoPi * 60.0 * (double) i / kSampleRate);
+                meter.pushSample (v, v);
+            }
+
+            expect (meter.hasSignal(), "playing material must register");
+            expectGreaterThan (meter.getWeightedMatchPercent(), 80.0f);
+
+            // Long silence: the EMA'd band energies decay below the gate.
+            const int silent = (int) (kSampleRate * 3.0);
+            for (int i = 0; i < silent; ++i)
+                meter.pushSample (0.0f, 0.0f);
+
+            expect (! meter.hasSignal(), "sustained silence must clear the signal flag");
+        }
+    }
+};
+
+static LiveMatchValidityTests liveMatchValidityTestsInstance;

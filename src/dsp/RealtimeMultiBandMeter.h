@@ -125,6 +125,24 @@ public:
         return blend (0, numBands, /*useDecisionWeight*/ false);
     }
 
+    // True while any band carries enough joint energy for the correlation to
+    // mean anything. When this is false every getter returns a neutral 50% —
+    // and a UI printing "50%" over silence reads as "half aligned", which is
+    // misleading; it should show "no signal" instead.
+    bool hasSignal() const noexcept
+    {
+        double totalEnergy = 0.0;
+
+        for (const auto& band : bands)
+        {
+            double corr = 0.0, energy = 0.0;
+            if (bandCorrelation (band, corr, &energy))
+                totalEnergy += energy;
+        }
+
+        return totalEnergy > energyGateFloor;
+    }
+
 private:
     static constexpr int numBands = PhaseBands::numBands;
     static constexpr double butterworthQ = 0.70710678;

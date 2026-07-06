@@ -1,4 +1,5 @@
 #include "Oscilloscope.h"
+#include "UiFormatters.h"
 
 namespace
 {
@@ -117,6 +118,19 @@ void Oscilloscope::timerCallback()
                 writeIndex = (writeIndex + 1) % historyLength;
             }
         }
+    }
+
+    // Track whether the input stream is alive; the triggered status line uses
+    // this to say "bass live" vs "input idle — showing last capture" so stale
+    // data can never be mistaken for a live view.
+    if (anyRead)
+        ticksSinceFifoRead = 0;
+    else if (ticksSinceFifoRead < 1000)
+    {
+        // One repaint exactly when the stream is declared idle, so the status
+        // line flips to "input idle" without a per-tick repaint while stopped.
+        if (++ticksSinceFifoRead == idleAfterTicks && viewMode == ScopeViewMode::Triggered)
+            repaint();
     }
 
     const bool relockPending = kickReferenceState == KickReferenceState::RelockPending;
@@ -531,9 +545,88 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         }
     }
 
+    // Phase agreement strip: an always-visible cancellation read-out along the
+    // bottom of the plot — green where the (envelope-smoothed) kick and bass
+    // low ends push the same way, red where they fight. This is the "can I see
+    // the cancellation?" answer in the HERO view, not just the Phase Delta
+    // mode. Smoothed envelopes (same tested classifier Phase Delta uses) keep
+    // it stable instead of flickering on broadband zero crossings; runs of
+    // equal colour merge into single rects so it costs a handful of fills.
+    {
+        const int stripSpan = juce::jmin (visible, n - first);
+        if (stripSpan > 1)
+        {
+            // Sample the visible slice down to pixel-column resolution FIRST,
+            // then envelope-smooth the columns: the triggered window can exceed
+            // the historyLength-sized scratch buffers at high sample rates
+            // (e.g. 170 ms @ 96 kHz = 16,320 samples), and the strip only needs
+            // per-column values anyway — O(columns), not O(window).
+            const int columns = juce::jlimit (2, historyLength, (int) std::ceil (bounds.getWidth()));
+            for (int c = 0; c < columns; ++c)
+            {
+                const int k = (int) ((long long) c * (stripSpan - 1) / (columns - 1));
+                columnMinScratch[(size_t) c] = triggeredBass[(size_t) (first + k)];
+                columnMaxScratch[(size_t) c] = triggeredKick[(size_t) (first + k)];
+            }
+
+            const double columnRate = rate * (double) columns / (double) stripSpan;
+            smoothScopeEnvelope (columnMinScratch.data(), smoothedMainBuffer.data(), columns, columnRate);
+            smoothScopeEnvelope (columnMaxScratch.data(), smoothedSideBuffer.data(), columns, columnRate);
+
+            const float stripY = bounds.getBottom() - 22.0f;
+            const float stripH = 6.0f;
+
+            auto colourFor = [] (PhaseRelation r) -> juce::Colour
+            {
+                if (r == PhaseRelation::Constructive) return constructive;
+                if (r == PhaseRelation::Destructive)  return destructive;
+                return {};
+            };
+
+            int runStart = 0;
+            auto runRelation = classifyPhaseRelation (smoothedMainBuffer[0], smoothedSideBuffer[0]);
+
+            auto flushRun = [&] (int endColumn)
+            {
+                const auto colour = colourFor (runRelation);
+                if (! colour.isTransparent())
+                {
+                    const float x0 = bounds.getX() + bounds.getWidth() * (float) runStart / (float) columns;
+                    const float x1 = bounds.getX() + bounds.getWidth() * (float) endColumn / (float) columns;
+                    g.setColour (colour.withAlpha (0.55f));
+                    g.fillRect (juce::Rectangle<float> (x0, stripY, juce::jmax (1.0f, x1 - x0), stripH));
+                }
+            };
+
+            for (int c = 1; c < columns; ++c)
+            {
+                const auto relation = classifyPhaseRelation (smoothedMainBuffer[(size_t) c],
+                                                             smoothedSideBuffer[(size_t) c]);
+                if (relation != runRelation)
+                {
+                    flushRun (c);
+                    runStart = c;
+                    runRelation = relation;
+                }
+            }
+            flushRun (columns);
+
+            g.setColour (labelColour.withAlpha (0.8f));
+            g.setFont (juce::Font (juce::FontOptions (9.0f)).boldened());
+            g.drawText ("PHASE", juce::Rectangle<int> ((int) bounds.getX(), (int) (stripY - 11.0f), 40, 10),
+                        juce::Justification::centredLeft);
+            g.setColour (constructive.withAlpha (0.9f));
+            g.drawText ("add", juce::Rectangle<int> ((int) bounds.getX() + 42, (int) (stripY - 11.0f), 26, 10),
+                        juce::Justification::centredLeft);
+            g.setColour (destructive.withAlpha (0.9f));
+            g.drawText ("cancel", juce::Rectangle<int> ((int) bounds.getX() + 70, (int) (stripY - 11.0f), 40, 10),
+                        juce::Justification::centredLeft);
+        }
+    }
+
     // ReVision-style transient markers: triangles at the kick/bass envelope
-    // peaks plus a Δ ms readout, computed over the visible slice of the
-    // triggered snapshot at its own sample rate.
+    // peaks plus a timing verdict in producer language ("bass late"), computed
+    // over the visible slice of the triggered snapshot at its own sample rate.
     {
         const int markerSpan = juce::jmin (visible, n - first);
         const auto markers = findEnvelopePeakMarkers (triggeredBass.data() + first,
@@ -556,22 +649,37 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
             g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
             const juce::String deltaLabel = juce::String::fromUTF8 ("\xCE\x94 ")
                                           + (markers.deltaMs >= 0.0f ? "+" : "")
-                                          + juce::String (markers.deltaMs, 2) + " ms";
+                                          + juce::String (markers.deltaMs, 2) + " ms · "
+                                          + timingVerdictText (markers.deltaMs);
             g.drawText (deltaLabel,
-                        juce::Rectangle<int> ((int) (bounds.getCentreX() - 60.0f),
-                                              (int) (bounds.getBottom() - 30.0f),
-                                              120, 14),
+                        juce::Rectangle<int> ((int) (bounds.getCentreX() - 95.0f),
+                                              (int) (bounds.getBottom() - 36.0f),
+                                              190, 14),
                         juce::Justification::centred);
         }
     }
 
-    // Pre-first-kick fallback (raw scrolling input): say so, instead of
-    // letting it read as a broken triggered display.
-    if (kickReferenceState == KickReferenceState::NoReference)
+    // Always-on status line: the user must never have to guess what the
+    // triggered view is showing. Covers every reference state plus whether
+    // the input stream is currently alive.
     {
+        const bool receiving = ticksSinceFifoRead < idleAfterTicks;
+        juce::String status;
+
+        if (kickReferenceState == KickReferenceState::NoReference)
+            status = "waiting for kick — showing live input";
+        else if (kickReferenceState == KickReferenceState::RelockPending)
+            status = "re-lock armed — waiting for next kick";
+        else if (frozen)
+            status = "kick locked · display frozen";
+        else if (! receiving)
+            status = "kick locked · input idle — showing last capture";
+        else
+            status = juce::String::fromUTF8 ("kick locked · bass live");
+
         g.setColour (labelColour.withAlpha (0.9f));
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
-        g.drawText ("waiting for kick — showing live input",
+        g.drawText (status,
                     juce::Rectangle<int> ((int) bounds.getX(), (int) (bounds.getY() + 2.0f),
                                           (int) bounds.getWidth(), 14),
                     juce::Justification::centred);
@@ -1060,11 +1168,12 @@ void Oscilloscope::drawTransientMarkers (juce::Graphics& g,
     g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
     const juce::String deltaLabel = juce::String::fromUTF8 ("\xCE\x94 ")
                                   + (markers.deltaMs >= 0.0f ? "+" : "")
-                                  + juce::String (markers.deltaMs, 2) + " ms";
+                                  + juce::String (markers.deltaMs, 2) + " ms · "
+                                  + timingVerdictText (markers.deltaMs);
     g.drawText (deltaLabel,
-                juce::Rectangle<int> ((int) (bounds.getRight() - 92.0f),
+                juce::Rectangle<int> ((int) (bounds.getRight() - 172.0f),
                                       (int) (bounds.getY() + 4.0f),
-                                      84, 14),
+                                      164, 14),
                 juce::Justification::centredRight);
 }
 

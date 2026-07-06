@@ -77,6 +77,10 @@ public:
 
     // Live multi-band phase-match read-outs (P5/P8), updated per block from the
     // realtime meter over the currently-monitored (dry or processed) low end.
+    // liveMatchValid is false while the meter has nothing meaningful to
+    // measure (no sidechain or silence), so the UI can show "no signal"
+    // instead of a misleading neutral 50%.
+    std::atomic<bool> liveMatchValid { false };
     std::atomic<float> liveMultiBandMatchPercent { 50.0f };  // low-end-weighted overall
     std::atomic<float> liveLowEndMatchPercent { 50.0f };     // SUB + LOW only
     std::atomic<float> liveBroadbandMatchPercent { 50.0f };  // even 20 Hz-500 Hz blend

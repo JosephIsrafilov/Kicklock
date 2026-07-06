@@ -1054,6 +1054,7 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
         bandMatch.store (50.0f);
     latestAppliedBeforePercent.store (-1.0f);
     realtimeCorrelation.store (0.0f);
+    liveMatchValid.store (false);
     uiSmoothingInitialized.store (false, std::memory_order_relaxed);
 
     lastInterpChoice = 0;
@@ -1278,6 +1279,9 @@ void KickLockAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buf
     processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples, observationStats);
     updateActivityAndSignalState (hasSidechain, observationStats, numSamples);
 
+    // Under bypass the dry relationship is what the user hears.
+    liveMatchValid.store (hasSidechain && dryMultiBandMeter.hasSignal());
+
     const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
     const auto fixedDelay = (float) getLatencySamples();
     const int sidechainChannels = sidechainBuffer.getNumChannels();
@@ -1483,6 +1487,8 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     // user is hearing: the processed meter when the bass path is doing anything,
     // otherwise the dry meter.
     const auto& activeMeter = processingNeeded ? processedMultiBandMeter : dryMultiBandMeter;
+
+    liveMatchValid.store (hasSidechain && activeMeter.hasSignal());
 
     const float dryMatch = hasSidechain ? dryMultiBandMeter.getWeightedMatchPercent() : 50.0f;
     const float processedMatch = hasSidechain ? processedMultiBandMeter.getWeightedMatchPercent() : 50.0f;
