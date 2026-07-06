@@ -302,7 +302,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                             "Negative values advance bass using plugin delay compensation.");
     addAndMakeVisible (delaySlider);
 
-    polarityInvertButton.setButtonText ("Invert Polarity");
+    polarityInvertButton.setButtonText ("Invert");
     polarityInvertButton.setTooltip ("Flips the bass polarity by 180 degrees. "
                                      "Useful when kick and bass cancel each other.");
     addAndMakeVisible (polarityInvertButton);
@@ -328,10 +328,12 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     visualOffsetSlider.setNumDecimalPlacesToDisplay (0);
     visualOffsetSlider.setTooltip ("Display-only sample shift applied to the bass wave on the scope so you can align phases visually. Does not affect the sound.");
     configureControlLabel (visualOffsetLabel, "Visual Shift");
+    addAndMakeVisible (visualOffsetSlider);
 
     crossoverEnableButton.setButtonText ("Enable");
     crossoverEnableButton.setTooltip ("Toggles the crossover. When disabled, the entire signal passes through the delay and polarity invert.");
     configureControlLabel (crossoverEnableLabel, "Crossover");
+    addAndMakeVisible (crossoverEnableButton);
 
     configureRotary (crossoverSlider);
     crossoverSlider.setTextValueSuffix (" Hz");
@@ -825,7 +827,7 @@ void KickLockAudioProcessorEditor::resized()
     manualHeader.setBounds (manualArea.removeFromTop (20));
     manualArea.removeFromTop (2);
 
-    auto row1 = manualArea.removeFromTop (64);
+    auto row1 = manualArea.removeFromTop (84);
     const int knobW = juce::jlimit (74, 98, (manualArea.getWidth() - 32) / 5);
 
     auto delayCell = row1.removeFromLeft (knobW);
@@ -854,7 +856,7 @@ void KickLockAudioProcessorEditor::resized()
 
     manualArea.removeFromTop (2);
     auto row2 = manualArea.removeFromTop (38);
-    auto polCell = row2.removeFromLeft (knobW * 2);
+    auto polCell = row2.removeFromLeft (knobW);
     polarityLabel.setBounds (polCell.removeFromTop (14));
     polarityInvertButton.setBounds (polCell.removeFromTop (24));
 
@@ -864,7 +866,7 @@ void KickLockAudioProcessorEditor::resized()
     crossoverEnableButton.setBounds (crossEnCell.removeFromTop (24));
 
     row2.removeFromLeft (8);
-    auto phCell = row2.removeFromLeft (knobW * 2);
+    auto phCell = row2.removeFromLeft (knobW * 2 + 8);
     phaseFilterLabel.setBounds (phCell.removeFromTop (14));
     phaseFilterButton.setBounds (phCell.removeFromTop (24));
 

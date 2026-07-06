@@ -129,14 +129,13 @@ void Oscilloscope::timerCallback()
         {
             if (refreshTriggeredSnapshot())
                 freeRunTicks = 0;
-            else if (viewMode == ScopeViewMode::Triggered && ! relockPending && ++freeRunTicks >= freeRunWatchdogTicks)
+            else if (viewMode == ScopeViewMode::Triggered && ++freeRunTicks >= freeRunWatchdogTicks)
                 buildFreeRunTriggeredSnapshot();
 
-            if (viewMode == ScopeViewMode::Triggered)
-                updateTriggeredAutoGain();
+            updateTriggeredAutoGain();
         }
     }
-    
+
     if (viewMode != ScopeViewMode::Triggered && anyRead && ! isDisplayFrozen())
     {
         repaint();
@@ -286,11 +285,13 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         if (samples <= 1)
             return;
 
-        juce::Path bassPath, kickPath;
+        juce::Path bassPath, kickPath, bassFill, kickFill;
         const int pointCount = calculateTriggeredRenderPointCount (samples, (int) std::ceil (bounds.getWidth()));
         const float sampleXStep = bounds.getWidth() / (float) (samples - 1);
         bassPath.preallocateSpace (pointCount * 3);
         kickPath.preallocateSpace (pointCount * 3);
+        bassFill.preallocateSpace (pointCount * 3);
+        kickFill.preallocateSpace (pointCount * 3);
 
         for (int point = 0; point < pointCount; ++point)
         {
@@ -303,17 +304,34 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
             {
                 bassPath.startNewSubPath (x, bassY);
                 kickPath.startNewSubPath (x, kickY);
+                bassFill.startNewSubPath (x, midY);
+                bassFill.lineTo (x, bassY);
+                kickFill.startNewSubPath (x, midY);
+                kickFill.lineTo (x, kickY);
             }
             else
             {
                 bassPath.lineTo (x, bassY);
                 kickPath.lineTo (x, kickY);
+                bassFill.lineTo (x, bassY);
+                kickFill.lineTo (x, kickY);
             }
         }
+        
+        const float lastX = bounds.getX() + (float) (samples - 1) * sampleXStep;
+        bassFill.lineTo (lastX, midY);
+        bassFill.closeSubPath();
+        kickFill.lineTo (lastX, midY);
+        kickFill.closeSubPath();
 
+        g.setColour (kickColour.withAlpha (alpha * 0.14f));
+        g.fillPath (kickFill);
         g.setColour (kickColour.withAlpha (alpha));
         g.strokePath (kickPath, juce::PathStrokeType (1.25f, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
+                                                      
+        g.setColour (bassColour.withAlpha (juce::jmin (1.0f, alpha + 0.04f) * 0.18f));
+        g.fillPath (bassFill);
         g.setColour (bassColour.withAlpha (juce::jmin (1.0f, alpha + 0.04f)));
         g.strokePath (bassPath, juce::PathStrokeType (1.45f, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
@@ -564,41 +582,7 @@ void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
                                                   juce::PathStrokeType::rounded));
     };
 
-    if (! triggeredKick.empty())
-    {
-        const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
-        const float triggerX = bounds.getX() + bounds.getWidth() * 0.25f;
-        const int safePreRoll = juce::jlimit (0, (int) triggeredKick.size() - 1, triggeredPreRollSamples);
-
-        juce::Path kickPath;
-        bool first = true;
-        for (size_t i = 0; i < triggeredKick.size(); ++i)
-        {
-            const int offsetSamples = (int) i - safePreRoll;
-            const float x = triggerX + (float) offsetSamples * sampleXStep;
-            
-            if (x >= bounds.getX() && x <= bounds.getRight())
-            {
-                const float v = juce::jlimit (-1.0f, 1.0f, triggeredKick[i] * gain);
-                const float y = midY - v * halfHeight;
-                if (first)
-                {
-                    kickPath.startNewSubPath (x, y);
-                    first = false;
-                }
-                else
-                {
-                    kickPath.lineTo (x, y);
-                }
-            }
-        }
-        g.setColour (kickColour.withAlpha (0.85f));
-        g.strokePath (kickPath, juce::PathStrokeType (1.1f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    }
-    else
-    {
-        strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.1f);
-    }
+    strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.1f);
 
     strokeTrace (visibleMainBuffer, bassColour.withAlpha (0.92f), 1.35f);
 
@@ -817,8 +801,6 @@ void Oscilloscope::reserveTriggeredBuffers()
 
     reservedTriggeredSamples = required;
 
-    // Window length changed size (timebase/decimation changed) — the locked
-    // kick reference no longer matches, so let the next hit re-establish it.
     kickReferenceState = KickReferenceState::NoReference;
 }
 
@@ -834,7 +816,6 @@ void Oscilloscope::relockKickReference() noexcept
     for (auto& buffer : ghostKick)
         buffer.clear();
 
-    freeRunTicks = 0;
     repaint();
 }
 
@@ -872,12 +853,6 @@ bool Oscilloscope::refreshTriggeredSnapshot()
 
     triggeredBass.swap (triggeredScratchBass);
 
-    // Kick shape is stationary hit-to-hit (same one-shot at a fixed offset
-    // from the trigger point) — lock it to the first captured window so it
-    // holds still on screen and only the bass trace visibly moves each
-    // retrigger. Without this, both traces got replaced on every hit, which
-    // reads as the whole scope "running" at the kick's tempo instead of
-    // showing bass settling against a fixed reference.
     if (replaceKickReference)
     {
         triggeredKick.swap (triggeredScratchKick);
