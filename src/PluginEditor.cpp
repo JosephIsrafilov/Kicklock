@@ -19,6 +19,12 @@ namespace
     const auto amber      = juce::Colour (0xfff59e0b);
 
     constexpr int kTopBarHeight = 62;
+    constexpr int kDefaultEditorWidth = 1180;
+    constexpr int kDefaultEditorHeight = 820;
+    constexpr int kMinEditorWidth = 900;
+    constexpr int kMinEditorHeight = 600;
+    constexpr int kMaxEditorWidth = 2800;
+    constexpr int kMaxEditorHeight = 1900;
 }
 
 void TransientPunchComponent::paint (juce::Graphics& g)
@@ -167,7 +173,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent,
                           p.liveBandMatchPercent,
-                          p.latestAppliedBeforePercent)
+                          p.latestAppliedBeforePercent),
+      splitter ([this] (int h) { bottomPanelHeight = juce::jlimit (100, getHeight() - 100, h); resized(); })
 {
     setLookAndFeel (&lookAndFeel);
     sidechainStatusColour = mutedText;
@@ -319,8 +326,12 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureRotary (visualOffsetSlider);
     visualOffsetSlider.setTextValueSuffix (" smp");
     visualOffsetSlider.setNumDecimalPlacesToDisplay (0);
-    visualOffsetSlider.setTooltip ("Moves only the waveform display. This does not affect audio.");
-    addAndMakeVisible (visualOffsetSlider);
+    visualOffsetSlider.setTooltip ("Display-only sample shift applied to the bass wave on the scope so you can align phases visually. Does not affect the sound.");
+    configureControlLabel (visualOffsetLabel, "Visual Shift");
+
+    crossoverEnableButton.setButtonText ("Enable");
+    crossoverEnableButton.setTooltip ("Toggles the crossover. When disabled, the entire signal passes through the delay and polarity invert.");
+    configureControlLabel (crossoverEnableLabel, "Crossover");
 
     configureRotary (crossoverSlider);
     crossoverSlider.setTextValueSuffix (" Hz");
@@ -386,6 +397,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     phaseFreqAttachment    = std::make_unique<SliderAttachment> (apvts, "allpass_freq", phaseFreqSlider);
     phaseQAttachment       = std::make_unique<SliderAttachment> (apvts, "rotatorQ", phaseQSlider);
     visualOffsetAttachment = std::make_unique<SliderAttachment> (apvts, "visualOffsetSamples", visualOffsetSlider);
+    crossoverEnableAttachment = std::make_unique<ButtonAttachment> (apvts, "crossover_enable", crossoverEnableButton);
     crossoverAttachment    = std::make_unique<SliderAttachment> (apvts, "crossover_freq", crossoverSlider);
     gridAttachment         = std::make_unique<ComboAttachment> (apvts, "gridDivision", gridCombo);
     viewAttachment         = std::make_unique<ComboAttachment> (apvts, "scopeViewMode", viewCombo);
@@ -397,15 +409,19 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
     pushScopeSettings();
 
-    resizeConstrainer.setSizeLimits (800, 544, 2000, 1360);
-    resizeConstrainer.setFixedAspectRatio (1000.0 / 680.0);
+    resizeConstrainer.setSizeLimits (kMinEditorWidth, kMinEditorHeight,
+                                     kMaxEditorWidth, kMaxEditorHeight);
     setConstrainer (&resizeConstrainer);
     setResizable (true, true);
 
-    const int savedWidth = (int) audioProcessor.apvts.state.getProperty ("editorWidth", 1000);
-    const int savedHeight = (int) audioProcessor.apvts.state.getProperty ("editorHeight", 680);
-    setSize (juce::jlimit (800, 2000, savedWidth),
-             juce::jlimit (544, 1360, savedHeight));
+    addAndMakeVisible (splitter);
+
+    const int savedWidth = (int) audioProcessor.apvts.state.getProperty ("editorWidth", kDefaultEditorWidth);
+    const int savedHeight = (int) audioProcessor.apvts.state.getProperty ("editorHeight", kDefaultEditorHeight);
+    bottomPanelHeight = (int) audioProcessor.apvts.state.getProperty ("bottomPanelHeight", 252);
+
+    setSize (juce::jlimit (kMinEditorWidth, kMaxEditorWidth, juce::jmax (savedWidth, kDefaultEditorWidth)),
+             juce::jlimit (kMinEditorHeight, kMaxEditorHeight, juce::jmax (savedHeight, kDefaultEditorHeight)));
     startTimerHz (30);
 }
 
@@ -772,12 +788,12 @@ void KickLockAudioProcessorEditor::resized()
     bounds.reduce (14, 12);
 
     // --- Live hero + scope overlays ---------------------------------------
-    // Proportional split: the scope takes ~43% of the space below the top bar
-    // and keeps growing with the window (floored so it never collapses, no
-    // upper cap so a larger window yields a genuinely larger scope). The manual
-    // controls below keep their fixed row heights, so very tall windows simply
-    // leave some empty space beneath them.
-    const int scopeBlockHeight = juce::jmax (190, (int) std::round (bounds.getHeight() * 0.43f));
+    splitter.setBottomHeightBase (bottomPanelHeight);
+    
+    constexpr int scopeLowerGap = 10;
+    bottomPanelHeight = juce::jlimit (100, bounds.getHeight() - 150, bottomPanelHeight);
+    const int scopeBlockHeight = bounds.getHeight() - bottomPanelHeight - scopeLowerGap;
+    
     auto scopeBlock = bounds.removeFromTop (scopeBlockHeight);
     correlationDisplay.setBounds (scopeBlock.removeFromTop (108));
     scopeBlock.removeFromTop (6);
@@ -790,7 +806,9 @@ void KickLockAudioProcessorEditor::resized()
     suggestedOverlay.setBounds (markerRow.removeFromLeft (markerRow.getWidth() / 2).reduced (6, 0));
     manualDelayOverlay.setBounds (markerRow.reduced (6, 0));
 
-    bounds.removeFromTop (10);
+    bounds.removeFromTop (2);
+    splitter.setBounds (bounds.removeFromTop (6));
+    bounds.removeFromTop (2);
 
     // --- Lower area: manual controls (left) + analyzer/live (right) -------
     auto lower = bounds;
@@ -805,9 +823,9 @@ void KickLockAudioProcessorEditor::resized()
 
     // Manual alignment panel.
     manualHeader.setBounds (manualArea.removeFromTop (20));
-    manualArea.removeFromTop (4);
+    manualArea.removeFromTop (2);
 
-    auto row1 = manualArea.removeFromTop (88);
+    auto row1 = manualArea.removeFromTop (64);
     const int knobW = juce::jlimit (74, 98, (manualArea.getWidth() - 32) / 5);
 
     auto delayCell = row1.removeFromLeft (knobW);
@@ -834,18 +852,23 @@ void KickLockAudioProcessorEditor::resized()
     visualOffsetLabel.setBounds (visualCell.removeFromTop (14));
     visualOffsetSlider.setBounds (visualCell);
 
-    manualArea.removeFromTop (4);
-    auto row2 = manualArea.removeFromTop (42);
-    auto polCell = row2.removeFromLeft (knobW * 2 + 8);
+    manualArea.removeFromTop (2);
+    auto row2 = manualArea.removeFromTop (38);
+    auto polCell = row2.removeFromLeft (knobW * 2);
     polarityLabel.setBounds (polCell.removeFromTop (14));
     polarityInvertButton.setBounds (polCell.removeFromTop (24));
+
+    row2.removeFromLeft (8);
+    auto crossEnCell = row2.removeFromLeft (knobW);
+    crossoverEnableLabel.setBounds (crossEnCell.removeFromTop (14));
+    crossoverEnableButton.setBounds (crossEnCell.removeFromTop (24));
 
     row2.removeFromLeft (8);
     auto phCell = row2.removeFromLeft (knobW * 2);
     phaseFilterLabel.setBounds (phCell.removeFromTop (14));
     phaseFilterButton.setBounds (phCell.removeFromTop (24));
 
-    manualArea.removeFromTop (4);
+    manualArea.removeFromTop (2);
     advancedHeader.setBounds (manualArea.removeFromTop (16));
     manualArea.removeFromTop (2);
     auto advRow = manualArea.removeFromTop (34);
@@ -858,13 +881,14 @@ void KickLockAudioProcessorEditor::resized()
     phaseStagesCombo.setBounds (stagesCell.removeFromTop (22).reduced (0, 1));
 
     // Right column: kick-punch meter, its reference button, then analyzer.
-    transientPunch.setBounds (right.removeFromTop (166));
-    right.removeFromTop (6);
-    setRefButton.setBounds (right.removeFromTop (26).reduced (0, 2));
-    right.removeFromTop (8);
+    transientPunch.setBounds (right.removeFromTop (84));
+    right.removeFromTop (4);
+    setRefButton.setBounds (right.removeFromTop (22).reduced (0, 1));
+    right.removeFromTop (4);
     analyzerTitle.setBounds (right.removeFromTop (20));
     analyzerBody.setBounds (right);
 
     audioProcessor.apvts.state.setProperty ("editorWidth", getWidth(), nullptr);
     audioProcessor.apvts.state.setProperty ("editorHeight", getHeight(), nullptr);
+    audioProcessor.apvts.state.setProperty ("bottomPanelHeight", bottomPanelHeight, nullptr);
 }

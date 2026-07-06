@@ -119,22 +119,25 @@ void Oscilloscope::timerCallback()
         }
     }
 
-    if (viewMode == ScopeViewMode::Triggered)
+    const bool relockPending = kickReferenceState == KickReferenceState::RelockPending;
+
+    if (viewMode == ScopeViewMode::Triggered || relockPending)
     {
-        const bool relockPending = kickReferenceState == KickReferenceState::RelockPending;
         const bool allowTriggeredRefresh = ! isDisplayFrozen() || relockPending;
 
         if (allowTriggeredRefresh)
         {
             if (refreshTriggeredSnapshot())
                 freeRunTicks = 0;
-            else if (! relockPending && ++freeRunTicks >= freeRunWatchdogTicks)
+            else if (viewMode == ScopeViewMode::Triggered && ! relockPending && ++freeRunTicks >= freeRunWatchdogTicks)
                 buildFreeRunTriggeredSnapshot();
 
-            updateTriggeredAutoGain();
+            if (viewMode == ScopeViewMode::Triggered)
+                updateTriggeredAutoGain();
         }
     }
-    else if (anyRead && ! isDisplayFrozen())
+    
+    if (viewMode != ScopeViewMode::Triggered && anyRead && ! isDisplayFrozen())
     {
         repaint();
     }
@@ -561,7 +564,42 @@ void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
                                                   juce::PathStrokeType::rounded));
     };
 
-    strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.1f);
+    if (! triggeredKick.empty())
+    {
+        const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
+        const float triggerX = bounds.getX() + bounds.getWidth() * 0.25f;
+        const int safePreRoll = juce::jlimit (0, (int) triggeredKick.size() - 1, triggeredPreRollSamples);
+
+        juce::Path kickPath;
+        bool first = true;
+        for (size_t i = 0; i < triggeredKick.size(); ++i)
+        {
+            const int offsetSamples = (int) i - safePreRoll;
+            const float x = triggerX + (float) offsetSamples * sampleXStep;
+            
+            if (x >= bounds.getX() && x <= bounds.getRight())
+            {
+                const float v = juce::jlimit (-1.0f, 1.0f, triggeredKick[i] * gain);
+                const float y = midY - v * halfHeight;
+                if (first)
+                {
+                    kickPath.startNewSubPath (x, y);
+                    first = false;
+                }
+                else
+                {
+                    kickPath.lineTo (x, y);
+                }
+            }
+        }
+        g.setColour (kickColour.withAlpha (0.85f));
+        g.strokePath (kickPath, juce::PathStrokeType (1.1f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+    else
+    {
+        strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.1f);
+    }
+
     strokeTrace (visibleMainBuffer, bassColour.withAlpha (0.92f), 1.35f);
 
     // Live-edge indicator: the right edge is "now". A faint playhead line plus a
@@ -1009,16 +1047,9 @@ void Oscilloscope::cancelActiveGestures() noexcept
 
 void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
 {
+    juce::ignoreUnused (e);
     displayScrollMs = 0.0f;
     repaint();
-
-    if (scopeModeUsesDelayDrag (viewMode) && delayParameter != nullptr
-        && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
-    {
-        delayParameter->beginChangeGesture();
-        delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (0.0f));
-        delayParameter->endChangeGesture();
-    }
 }
 
 void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)

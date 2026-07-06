@@ -75,12 +75,11 @@ public:
                 finalizeWindow();
         }
 
-        // Age the last valid reading; drop validity once no kick has been seen
-        // for the timeout window so the UI can fall back to a placeholder.
+        // Age the last valid reading; previously this dropped validity after 1.5s.
+        // The user requested the reading to stay constantly without disappearing.
         if (samplesSinceValidHit < validityTimeoutSamples)
         {
-            if (++samplesSinceValidHit >= validityTimeoutSamples)
-                publishedValid.store (false, std::memory_order_relaxed);
+            ++samplesSinceValidHit;
         }
     }
 

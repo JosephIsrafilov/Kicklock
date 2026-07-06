@@ -1041,6 +1041,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "crossover_enable", 1 },
+        "Crossover Enable",
+        true));
+
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "delay_ms", 1 },
         "Delay",
@@ -1523,6 +1528,11 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                                        : 0);
 
     MultibandPhaseCore::Params coreParams;
+    
+    const auto* crossoverEnableParam = apvts.getParameter ("crossover_enable");
+    const bool crossoverEnable = crossoverEnableParam != nullptr ? crossoverEnableParam->getValue() > 0.5f : true;
+    
+    coreParams.crossoverEnabled = crossoverEnable;
     coreParams.crossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
     coreParams.userDelayMs = delayMs;
     coreParams.polarityInvert = polarityInvert;

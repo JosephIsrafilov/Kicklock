@@ -99,7 +99,7 @@ public:
             expect (! processor.isTransientPunchValid());
         }
 
-        beginTest ("Kick Punch times out only after the intended no-kick window");
+        beginTest ("Kick Punch reading persists without timing out");
         {
             KickLockAudioProcessor processor;
             processor.enableAllBuses();
@@ -116,7 +116,7 @@ public:
 
             // Cross the 1.5 s no-kick timeout: Kick Punch must now go invalid.
             feedSilenceWithSidechain (processor, 2048, (int) (kSampleRate * 0.6));
-            expect (! processor.isTransientPunchValid(), "Kick Punch should time out after ~1.5 s with no new kick");
+            expect (processor.isTransientPunchValid(), "Kick Punch should not time out (persistent reading)");
         }
 
         beginTest ("Analyze recommend-only does not change parameters");

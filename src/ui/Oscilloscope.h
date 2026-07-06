@@ -170,7 +170,7 @@ private:
     KickReferenceState kickReferenceState = KickReferenceState::NoReference;
     int reservedTriggeredSamples = 0;
     int freeRunTicks = 0;
-    static constexpr int freeRunWatchdogTicks = 18;
+    static constexpr int freeRunWatchdogTicks = 120;
 
     juce::RangedAudioParameter* delayParameter = nullptr;
     bool delayGestureActive = false;

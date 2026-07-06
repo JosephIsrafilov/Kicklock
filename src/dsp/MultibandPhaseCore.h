@@ -11,6 +11,7 @@ class MultibandPhaseCore
 public:
     struct Params
     {
+        bool crossoverEnabled = true;
         float crossoverHz = 150.0f;
         float userDelayMs = 0.0f;
         bool polarityInvert = false;
@@ -88,6 +89,7 @@ public:
     {
         juce::ignoreUnused (sidechain);
 
+        currentCrossoverEnabled = params.crossoverEnabled;
         smoothedCrossover.setTargetValue (juce::jlimit (40.0f, 500.0f, params.crossoverHz));
 
         const float targetDelayOffset = juce::jlimit (-(float) reportedLatency, (float) reportedLatency,
@@ -154,6 +156,8 @@ public:
     }
 
 private:
+    bool currentCrossoverEnabled = true;
+
     void initialiseAllpassFilters()
     {
         for (auto& channel : allpassFilters)
@@ -204,8 +208,20 @@ private:
         const float crossoverHz = smoothedCrossover.getNextValue();
         if (smoothedCrossover.isSmoothing())
             smoothedCrossover.skip (n - 1);
-        crossover.setCrossoverFrequency (crossoverHz);
-        crossover.split (inputBuffer, lowBuffer, highBuffer, n);
+        
+        if (currentCrossoverEnabled)
+        {
+            crossover.setCrossoverFrequency (crossoverHz);
+            crossover.split (inputBuffer, lowBuffer, highBuffer, n);
+        }
+        else
+        {
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                lowBuffer.copyFrom (ch, 0, inputBuffer, ch, 0, n);
+                highBuffer.clear (ch, 0, n);
+            }
+        }
 
         for (int i = 0; i < n; ++i)
         {

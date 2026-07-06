@@ -45,6 +45,42 @@ private:
     float sumPeak = 0.0f;
 };
 
+class HorizontalSplitter : public juce::Component
+{
+public:
+    HorizontalSplitter (std::function<void(int)> onDragCallback)
+        : onDrag (std::move (onDragCallback))
+    {
+        setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+    }
+
+    void mouseDown (const juce::MouseEvent&) override { dragStartHeight = currentBottomHeight; }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        const int deltaY = e.getDistanceFromDragStartY();
+        // Negative deltaY means moving UP, which should INCREASE the bottom panel height
+        onDrag (dragStartHeight - deltaY);
+    }
+
+    void setBottomHeightBase (int height) { currentBottomHeight = height; }
+
+    void paint (juce::Graphics& g) override
+    {
+        // Simple drag handle visual
+        g.setColour (juce::Colour (0xff32363e));
+        g.fillAll();
+        g.setColour (juce::Colours::white.withAlpha (0.15f));
+        const float midY = (float) getHeight() / 2.0f;
+        g.drawHorizontalLine ((int) midY - 1, (float) getWidth() / 2.0f - 15.0f, (float) getWidth() / 2.0f + 15.0f);
+        g.drawHorizontalLine ((int) midY + 1, (float) getWidth() / 2.0f - 15.0f, (float) getWidth() / 2.0f + 15.0f);
+    }
+
+private:
+    std::function<void(int)> onDrag;
+    int dragStartHeight = 0;
+    int currentBottomHeight = 0;
+};
+
 // Full visual + manual phase-alignment editor. The oscilloscope is the visual
 // centre; a top status bar reports sidechain/BPM/PDC state and hosts the grid,
 // view, Analyze and Apply Fix controls; a MANUAL ALIGNMENT section drives the
@@ -115,6 +151,7 @@ private:
     juce::Slider phaseFreqSlider;
     juce::Slider phaseQSlider;
     juce::Slider visualOffsetSlider;
+    juce::ToggleButton crossoverEnableButton;
     juce::Slider crossoverSlider;
 
     juce::Label delayLabel;
@@ -123,6 +160,7 @@ private:
     juce::Label phaseFreqLabel;
     juce::Label phaseQLabel;
     juce::Label visualOffsetLabel;
+    juce::Label crossoverEnableLabel;
     juce::Label crossoverLabel;
 
     // --- Advanced ----------------------------------------------------------
@@ -142,6 +180,7 @@ private:
     std::unique_ptr<SliderAttachment> phaseFreqAttachment;
     std::unique_ptr<SliderAttachment> phaseQAttachment;
     std::unique_ptr<SliderAttachment> visualOffsetAttachment;
+    std::unique_ptr<ButtonAttachment> crossoverEnableAttachment;
     std::unique_ptr<SliderAttachment> crossoverAttachment;
     std::unique_ptr<ComboAttachment>  gridAttachment;
     std::unique_ptr<ComboAttachment>  viewAttachment;
@@ -172,6 +211,9 @@ private:
     juce::Rectangle<int> manualPanelBounds;
     juce::Rectangle<int> analyzerPanelBounds;
     juce::ComponentBoundsConstrainer resizeConstrainer;
+    
+    int bottomPanelHeight = 252;
+    HorizontalSplitter splitter;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KickLockAudioProcessorEditor)
 };
