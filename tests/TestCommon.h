@@ -24,6 +24,7 @@
 #include "HitConsensus.h"
 #include "LinkwitzRileyCrossover.h"
 #include "MultibandPhaseCore.h"
+#include "TransientPunchMeter.h"
 #include "AnalyzeState.h"
 #include "PhaseBands.h"
 #include "PluginProcessor.h"

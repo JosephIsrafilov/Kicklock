@@ -21,6 +21,7 @@
 #include "dsp/SignalActivityTracker.h"
 #include "dsp/PhaseFixEngine.h"
 #include "dsp/MultibandPhaseCore.h"
+#include "dsp/TransientPunchMeter.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
 
@@ -117,6 +118,23 @@ public:
     float getKickSignalRms() const noexcept;
     const HitCaptureBuffer& getTriggeredHitCapture() const noexcept { return hitCapture; }
 
+    // Kick-punch transient integrity meter. Reads live from the processed
+    // bass/kick low end so it moves the instant Delay/Polarity/Phase Filter
+    // change. The reference feature stores a snapshot for before/after A/B.
+    float getTransientPunchDb() const noexcept { return transientPunchMeter.getPunchDb(); }
+    bool isTransientPunchValid() const noexcept { return transientPunchMeter.isValid(); }
+    void setTransientPunchReference() noexcept
+    {
+        transientPunchReferenceDb.store (transientPunchMeter.getPunchDb(), std::memory_order_release);
+        transientPunchReferenceSet.store (true, std::memory_order_release);
+    }
+    void clearTransientPunchReference() noexcept
+    {
+        transientPunchReferenceSet.store (false, std::memory_order_release);
+    }
+    bool isTransientPunchReferenceSet() const noexcept { return transientPunchReferenceSet.load (std::memory_order_acquire); }
+    float getTransientPunchReferenceDb() const noexcept { return transientPunchReferenceDb.load (std::memory_order_acquire); }
+
     // Musically-aware activity flags for P3 status. These hold "active" for a
     // window after the last transient/level crossing, so a normal beat does not
     // flicker to SIGNAL TOO LOW in the gaps between kicks. Read on the UI thread.
@@ -179,6 +197,9 @@ private:
     std::atomic<uint32_t> allpassFreqLegacyChange { 0 };
 
     MultibandPhaseCore multibandCore;
+    TransientPunchMeter transientPunchMeter;
+    std::atomic<float> transientPunchReferenceDb { 0.0f };
+    std::atomic<bool> transientPunchReferenceSet { false };
     std::unique_ptr<AutoAlignEngine> autoAlignEngine;
 
     // Live phase-match meters (P5). Multi-band across 20 Hz-500 Hz, low-end

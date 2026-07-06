@@ -8,23 +8,30 @@
 #include "ui/StatusHelpers.h"
 #include "dsp/AnalyzeState.h"
 
-class TransientHealthComponent : public juce::Component
+// Kick-punch transient integrity readout. Shows the signed PUNCH dB (how much
+// the bass reinforces or cancels the kick's low end), a one-line verdict, a
+// diverging bar centred on the kick-alone baseline, and — once a reference is
+// captured — the delta against it. Falls back to a neutral placeholder when the
+// meter has no recent kick to measure.
+class TransientPunchComponent : public juce::Component
 {
 public:
-    void setValues (float pre, float post, float health) noexcept
+    void setValues (float punchDbIn, bool validIn, bool hasReferenceIn, float referenceDbIn) noexcept
     {
-        prePeak = juce::jlimit (0.0f, 1.0f, pre);
-        postPeak = juce::jlimit (0.0f, 1.0f, post);
-        healthDb = health;
+        punchDb = punchDbIn;
+        valid = validIn;
+        hasReference = hasReferenceIn;
+        referenceDb = referenceDbIn;
         repaint();
     }
 
     void paint (juce::Graphics&) override;
 
 private:
-    float prePeak = 0.0f;
-    float postPeak = 0.0f;
-    float healthDb = 0.0f;
+    float punchDb = 0.0f;
+    bool valid = false;
+    bool hasReference = false;
+    float referenceDb = 0.0f;
 };
 
 // Full visual + manual phase-alignment editor. The oscilloscope is the visual
@@ -85,7 +92,8 @@ private:
     // --- Analyzer explanation panel ---------------------------------------
     juce::Label analyzerTitle;
     juce::Label analyzerBody;
-    TransientHealthComponent transientHealth;
+    TransientPunchComponent transientPunch;
+    juce::TextButton setRefButton;
 
     // --- Manual alignment --------------------------------------------------
     juce::Label manualHeader;

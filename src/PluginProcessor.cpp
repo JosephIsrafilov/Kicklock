@@ -1175,6 +1175,9 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     transientDetector.setTriggerRatio (3.0f);
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 20.0f, 150.0f);
+    transientPunchMeter.prepare (sampleRate);
+    transientPunchReferenceDb.store (0.0f, std::memory_order_release);
+    transientPunchReferenceSet.store (false, std::memory_order_release);
     // Held-activity trackers for the P3 status. ~500 ms hold so a steady loop
     // never flickers to "no signal" in the gaps between kick transients. The
     // activation floor is low: it only needs to tell "playing" from "silent",
@@ -1472,6 +1475,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const float alignedKickLow = processedKickLowpass.processSample (0, meteredSidechainMono);
             processedMultiBandMeter.pushSample (processedBassLow, alignedKickLow);
             hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
+            transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetected);
 
             constexpr float alpha = 0.005f;
             correlationProductLpf += alpha * ((mainMono * meteredSidechainMono) - correlationProductLpf);

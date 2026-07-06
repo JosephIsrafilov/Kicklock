@@ -202,6 +202,58 @@ public:
             core.process (main, kick, params, 512);
             expectEquals (core.reportLatencySamples(), (int) std::ceil (kSampleRate * 0.020));
         }
+
+        beginTest ("Kick-punch meter reads positive when bass reinforces the kick");
+        {
+            TransientPunchMeter meter;
+            meter.prepare (kSampleRate);
+
+            // Reinforcing: bass low end sums constructively with the kick low end.
+            for (int hit = 0; hit < 8; ++hit)
+            {
+                for (int i = 0; i < 1024; ++i)
+                {
+                    const double t = (double) i / kSampleRate;
+                    const float kick = (float) (0.5 * std::sin (kTwoPi * 60.0 * t) * std::exp (-t * 40.0));
+                    meter.pushSample (kick, kick, i == 0);
+                }
+            }
+
+            expect (meter.isValid());
+            expectGreaterThan (meter.getPunchDb(), 0.5f);
+        }
+
+        beginTest ("Kick-punch meter reads negative when bass cancels the kick");
+        {
+            TransientPunchMeter meter;
+            meter.prepare (kSampleRate);
+
+            // Cancelling: an inverted, slightly smaller bass pulls the sum below
+            // the kick-alone peak.
+            for (int hit = 0; hit < 8; ++hit)
+            {
+                for (int i = 0; i < 1024; ++i)
+                {
+                    const double t = (double) i / kSampleRate;
+                    const float kick = (float) (0.5 * std::sin (kTwoPi * 60.0 * t) * std::exp (-t * 40.0));
+                    meter.pushSample (kick, -0.8f * kick, i == 0);
+                }
+            }
+
+            expect (meter.isValid());
+            expectLessThan (meter.getPunchDb(), 0.0f);
+        }
+
+        beginTest ("Kick-punch meter stays invalid under silence");
+        {
+            TransientPunchMeter meter;
+            meter.prepare (kSampleRate);
+
+            for (int i = 0; i < (int) (kSampleRate * 2.0); ++i)
+                meter.pushSample (0.0f, 0.0f, false);
+
+            expect (! meter.isValid());
+        }
     }
 };
 

@@ -21,7 +21,7 @@ namespace
     constexpr int kTopBarHeight = 62;
 }
 
-void TransientHealthComponent::paint (juce::Graphics& g)
+void TransientPunchComponent::paint (juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat();
     g.setColour (juce::Colour (0xff101418));
@@ -29,32 +29,91 @@ void TransientHealthComponent::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xff2b3540));
     g.drawRoundedRectangle (bounds, 6.0f, 1.0f);
 
-    auto inner = getLocalBounds().reduced (8, 6);
-    auto title = inner.removeFromTop (16);
+    auto inner = getLocalBounds().reduced (10, 8);
+
+    auto titleRow = inner.removeFromTop (16);
     g.setColour (mutedText);
     g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-    g.drawText ("TRANSIENT HEALTH", title, juce::Justification::centredLeft);
+    g.drawText ("KICK PUNCH", titleRow, juce::Justification::centredLeft);
 
-    auto readout = title.removeFromRight (70);
-    g.setColour (healthDb >= 0.0f ? green : red);
-    g.drawText ((healthDb >= 0.0f ? "+" : "") + juce::String (healthDb, 1) + " dB",
-                readout, juce::Justification::centredRight);
+    // Neutral placeholder when there's no recent kick to measure.
+    if (! valid)
+    {
+        auto value = inner.removeFromTop (30);
+        g.setColour (mutedText);
+        g.setFont (juce::Font (juce::FontOptions (26.0f)).boldened());
+        g.drawText ("--", value, juce::Justification::centred);
 
-    auto bars = inner.removeFromTop (20).toFloat();
-    const float minDb = -48.0f;
-    auto toScale = [minDb](float linearPeak) {
-        if (linearPeak <= 1.0e-5f) return 0.0f;
-        float db = 20.0f * std::log10(linearPeak);
-        return juce::jlimit(0.0f, 1.0f, (db - minDb) / -minDb);
-    };
+        g.setColour (mutedText.withAlpha (0.8f));
+        g.setFont (juce::Font (juce::FontOptions (12.0f)));
+        g.drawText ("Waiting for kick", inner.removeFromTop (16), juce::Justification::centred);
+        return;
+    }
 
-    const float preW = bars.getWidth() * toScale(prePeak);
-    const float postW = bars.getWidth() * toScale(postPeak);
+    constexpr float neutralZone = 0.3f;
+    const bool reinforcing = punchDb > neutralZone;
+    const bool cancelling = punchDb < -neutralZone;
+    const auto valueColour = cancelling ? red : (reinforcing ? green : mutedText);
 
-    g.setColour (orange.withAlpha (0.22f));
-    g.fillRoundedRectangle (bars.withWidth (preW), 3.0f);
-    g.setColour (teal.withAlpha (0.85f));
-    g.fillRoundedRectangle (bars.withWidth (postW).reduced (0.0f, 4.0f), 3.0f);
+    auto value = inner.removeFromTop (32);
+    g.setColour (valueColour);
+    g.setFont (juce::Font (juce::FontOptions (26.0f)).boldened());
+    g.drawText ((punchDb >= 0.0f ? "+" : "") + juce::String (punchDb, 1) + " dB",
+                value, juce::Justification::centred);
+
+    g.setColour (mutedText);
+    g.setFont (juce::Font (juce::FontOptions (12.0f)));
+    const juce::String verdict = reinforcing ? "Bass reinforces kick"
+                               : cancelling  ? "Bass cancels kick"
+                                             : "Neutral";
+    g.drawText (verdict, inner.removeFromTop (16), juce::Justification::centred);
+
+    inner.removeFromTop (6);
+
+    // Diverging bar centred on the kick-alone baseline: right/green when the
+    // bass reinforces, left/red when it cancels. Range is clamped to +/-12 dB.
+    auto barArea = inner.removeFromTop (12).toFloat();
+    const float centreX = barArea.getCentreX();
+    g.setColour (border);
+    g.fillRoundedRectangle (barArea, 3.0f);
+
+    constexpr float barRangeDb = 12.0f;
+    const float frac = juce::jlimit (-1.0f, 1.0f, punchDb / barRangeDb);
+    const float halfW = barArea.getWidth() * 0.5f;
+    if (frac >= 0.0f)
+    {
+        juce::Rectangle<float> fill (centreX, barArea.getY(), halfW * frac, barArea.getHeight());
+        g.setColour (green.withAlpha (0.85f));
+        g.fillRoundedRectangle (fill, 3.0f);
+    }
+    else
+    {
+        const float w = halfW * -frac;
+        juce::Rectangle<float> fill (centreX - w, barArea.getY(), w, barArea.getHeight());
+        g.setColour (red.withAlpha (0.85f));
+        g.fillRoundedRectangle (fill, 3.0f);
+    }
+
+    // Centre tick.
+    g.setColour (mutedText.withAlpha (0.9f));
+    g.fillRect (juce::Rectangle<float> (centreX - 0.5f, barArea.getY() - 2.0f, 1.0f, barArea.getHeight() + 4.0f));
+
+    inner.removeFromTop (6);
+    auto refRow = inner.removeFromTop (16);
+    if (hasReference)
+    {
+        const float delta = punchDb - referenceDb;
+        g.setColour (delta >= 0.0f ? green : red);
+        g.setFont (juce::Font (juce::FontOptions (11.5f)).boldened());
+        g.drawText ("Δ vs ref: " + juce::String (delta >= 0.0f ? "+" : "") + juce::String (delta, 1) + " dB",
+                    refRow, juce::Justification::centred);
+    }
+    else
+    {
+        g.setColour (mutedText.withAlpha (0.7f));
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.drawText ("tap Set Ref to compare", refRow, juce::Justification::centred);
+    }
 }
 
 KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcessor& p)
@@ -249,7 +308,22 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                           "recommend a delay, polarity and phase setting and "
                           "explain what it found.", juce::dontSendNotification);
     addAndMakeVisible (analyzerBody);
-    addAndMakeVisible (transientHealth);
+    addAndMakeVisible (transientPunch);
+
+    setRefButton.setButtonText ("Set Ref");
+    setRefButton.setColour (juce::TextButton::buttonColourId, panel);
+    setRefButton.setColour (juce::TextButton::textColourOffId, text);
+    setRefButton.setTooltip ("Stores the current kick-punch reading as a reference, then shows the live delta against it.");
+    setRefButton.onClick = [this]
+    {
+        if (audioProcessor.isTransientPunchReferenceSet())
+            audioProcessor.clearTransientPunchReference();
+        else
+            audioProcessor.setTransientPunchReference();
+
+        setRefButton.setButtonText (audioProcessor.isTransientPunchReferenceSet() ? "Clear Ref" : "Set Ref");
+    };
+    addAndMakeVisible (setRefButton);
 
     // --- Parameter attachments --------------------------------------------
     auto& apvts = audioProcessor.apvts;
@@ -506,6 +580,13 @@ void KickLockAudioProcessorEditor::timerCallback()
                                audioProcessor.isTempoAvailable());
     pushScopeSettings();
 
+    const bool punchValid = audioProcessor.hasSidechainReference() && audioProcessor.isTransientPunchValid();
+    transientPunch.setValues (audioProcessor.getTransientPunchDb(),
+                              punchValid,
+                              audioProcessor.isTransientPunchReferenceSet(),
+                              audioProcessor.getTransientPunchReferenceDb());
+    setRefButton.setButtonText (audioProcessor.isTransientPunchReferenceSet() ? "Clear Ref" : "Set Ref");
+
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
     refreshCompareButtons();
@@ -712,8 +793,10 @@ void KickLockAudioProcessorEditor::resized()
     phaseStagesLabel.setBounds (stagesCell.removeFromTop (12));
     phaseStagesCombo.setBounds (stagesCell.removeFromTop (22).reduced (0, 1));
 
-    // Right column: analyzer explanation.
-    transientHealth.setBounds (right.removeFromTop (54));
+    // Right column: kick-punch meter, its reference button, then analyzer.
+    transientPunch.setBounds (right.removeFromTop (118));
+    right.removeFromTop (6);
+    setRefButton.setBounds (right.removeFromTop (26).reduced (0, 2));
     right.removeFromTop (8);
     analyzerTitle.setBounds (right.removeFromTop (20));
     analyzerBody.setBounds (right);
