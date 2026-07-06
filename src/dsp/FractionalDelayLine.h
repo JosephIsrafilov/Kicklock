@@ -71,6 +71,9 @@ public:
         if (interpolationType == InterpolationType::Linear)
             return x0 + frac * (x1 - x0);
 
+        if (frac <= 1.0e-4f)
+            return x0;
+
         // First-order allpass fractional interpolator:
         // eta = (1 - frac) / (1 + frac) derived from matching the allpass
         // filter's group delay at DC to the desired fractional delay.

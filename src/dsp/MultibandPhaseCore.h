@@ -98,6 +98,14 @@ public:
         lastEqFreq = -1.0f;
         lastEqQ = -1.0f;
         lastEqBoost = -1.0f;
+        delayStateInitialised = false;
+        delayCrossfadeActive = false;
+        delayCrossfadePosition = 0;
+        delayCrossfadeSamples = juce::jmax (1, (int) std::round (sampleRate * delayCrossfadeMs / 1000.0));
+        pendingStages = activeStages;
+        stageSwitchPending = false;
+        desiredAllpassWet = 0.0f;
+        allpassCoeffUpdateCountdown = 0;
     }
 
     int reportLatencySamples() const noexcept { return reportedLatency; }
@@ -109,12 +117,33 @@ public:
                   int n)
     {
         smoothedCrossover.setTargetValue (juce::jlimit (40.0f, 500.0f, params.crossoverHz));
-        smoothedDelay.setTargetValue (juce::jlimit (-(float) reportedLatency, (float) reportedLatency,
-                                                   (float) (params.userDelayMs * sampleRate / 1000.0)));
+
+        const float targetDelayOffset = juce::jlimit (-(float) reportedLatency, (float) reportedLatency,
+                                                      (float) (params.userDelayMs * sampleRate / 1000.0));
+        if (! delayStateInitialised)
+        {
+            smoothedDelay.setCurrentAndTargetValue (targetDelayOffset);
+            delayStateInitialised = true;
+        }
+        else if (! delayCrossfadeActive
+                 && std::abs (targetDelayOffset - smoothedDelay.getCurrentValue()) >= (float) (sampleRate * 0.001))
+        {
+            delayCrossfadeActive = true;
+            delayCrossfadeFrom = smoothedDelay.getCurrentValue();
+            delayCrossfadeTo = targetDelayOffset;
+            delayCrossfadePosition = 0;
+            delayCrossfadeSamples = juce::jmax (1, (int) std::round (sampleRate * delayCrossfadeMs / 1000.0));
+            smoothedDelay.setCurrentAndTargetValue (targetDelayOffset);
+        }
+        else if (! delayCrossfadeActive)
+        {
+            smoothedDelay.setTargetValue (targetDelayOffset);
+        }
+
         smoothedPolarity.setTargetValue (params.polarityInvert ? -1.0f : 1.0f);
         smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 500.0f, params.allpassFreqHz));
         smoothedAllpassQ.setTargetValue (juce::jlimit (0.1f, 10.0f, params.allpassQ));
-        smoothedAllpassWet.setTargetValue (params.allpassEnabled ? 1.0f : 0.0f);
+        desiredAllpassWet = params.allpassEnabled ? 1.0f : 0.0f;
         smoothedDynEqFreq.setTargetValue (juce::jlimit (1000.0f, 8000.0f, params.dynEqFreqHz));
         smoothedDynEqQ.setTargetValue (juce::jlimit (0.5f, 12.0f, params.dynEqQ));
         smoothedDynEqBoost.setTargetValue (juce::jlimit (0.0f, 18.0f, params.dynEqMaxBoostDb));
@@ -122,14 +151,31 @@ public:
         envelope.setWindow (params.dynEqAttackMs, params.dynEqHoldMs, params.dynEqReleaseMs);
         envelope.setTriggerRatio (params.dynEqTriggerRatio);
 
-        if (juce::jlimit (2, 4, params.allpassStages) != activeStages)
+        const int requestedStages = juce::jlimit (2, 4, params.allpassStages);
+        if (requestedStages != activeStages && (! stageSwitchPending || requestedStages != pendingStages))
         {
-            activeStages = juce::jlimit (2, 4, params.allpassStages);
-            for (auto& channel : allpassFilters)
-                for (auto& stage : channel)
-                    stage.reset();
-            lastAllpassFreq = -1.0f;
-            lastAllpassQ = -1.0f;
+            pendingStages = requestedStages;
+            if (smoothedAllpassWet.getCurrentValue() <= 1.0e-4f && desiredAllpassWet <= 1.0e-4f)
+                applyPendingStageCount();
+            else
+                stageSwitchPending = true;
+        }
+
+        if (stageSwitchPending)
+        {
+            if (smoothedAllpassWet.getCurrentValue() <= 1.0e-4f && ! smoothedAllpassWet.isSmoothing())
+            {
+                applyPendingStageCount();
+                smoothedAllpassWet.setTargetValue (desiredAllpassWet);
+            }
+            else
+            {
+                smoothedAllpassWet.setTargetValue (0.0f);
+            }
+        }
+        else
+        {
+            smoothedAllpassWet.setTargetValue (desiredAllpassWet);
         }
 
         int offset = 0;
@@ -189,6 +235,18 @@ private:
         }
     }
 
+    void applyPendingStageCount()
+    {
+        activeStages = juce::jlimit (2, 4, pendingStages);
+        for (auto& channel : allpassFilters)
+            for (auto& stage : channel)
+                stage.reset();
+        lastAllpassFreq = -1.0f;
+        lastAllpassQ = -1.0f;
+        allpassCoeffUpdateCountdown = 0;
+        stageSwitchPending = false;
+    }
+
     void processChunk (juce::AudioBuffer<float>& main,
                        const juce::AudioBuffer<float>& sidechain,
                        int offset,
@@ -209,7 +267,38 @@ private:
 
         for (int i = 0; i < n; ++i)
         {
-            const float fineOffset = smoothedDelay.getNextValue();
+            float fineOffset = smoothedDelay.getCurrentValue();
+            float fineOffsetA = fineOffset;
+            float fineOffsetB = fineOffset;
+            float delayGainA = 0.0f;
+            float delayGainB = 1.0f;
+
+            if (delayCrossfadeActive)
+            {
+                const float denom = (float) juce::jmax (1, delayCrossfadeSamples - 1);
+                const float x = (float) delayCrossfadePosition / denom;
+                const float theta = x * juce::MathConstants<float>::halfPi;
+                delayGainA = std::cos (theta);
+                delayGainB = std::sin (theta);
+                fineOffsetA = delayCrossfadeFrom;
+                fineOffsetB = delayCrossfadeTo;
+
+                if (++delayCrossfadePosition >= delayCrossfadeSamples)
+                {
+                    delayCrossfadeActive = false;
+                    smoothedDelay.setCurrentAndTargetValue (delayCrossfadeTo);
+                    fineOffset = delayCrossfadeTo;
+                    fineOffsetA = fineOffsetB = fineOffset;
+                    delayGainA = 0.0f;
+                    delayGainB = 1.0f;
+                }
+            }
+            else
+            {
+                fineOffset = smoothedDelay.getNextValue();
+                fineOffsetA = fineOffsetB = fineOffset;
+            }
+
             const float polarity = smoothedPolarity.getNextValue();
             const float allpassWet = smoothedAllpassWet.getNextValue();
             const float allpassFreq = smoothedAllpassFreq.getNextValue();
@@ -221,7 +310,21 @@ private:
 
             updateDynamicEq (eqFreq, eqQ, eqBoost);
             if (allpassWet > 1.0e-5f || smoothedAllpassWet.isSmoothing())
-                updateAllpassCoefficients (allpassFreq, allpassQ);
+            {
+                if (allpassCoeffUpdateCountdown <= 0)
+                {
+                    updateAllpassCoefficients (allpassFreq, allpassQ);
+                    allpassCoeffUpdateCountdown = allpassCoeffUpdatePeriod;
+                }
+                else
+                {
+                    --allpassCoeffUpdateCountdown;
+                }
+            }
+            else
+            {
+                allpassCoeffUpdateCountdown = 0;
+            }
 
             float kickMono = 0.0f;
             for (int ch = 0; ch < sideChannels; ++ch)
@@ -234,10 +337,25 @@ private:
                 lowDelay.pushSample (ch, lowBuffer.getSample (ch, i));
                 highDelay.pushSample (ch, highBuffer.getSample (ch, i));
 
-                const float lowDelaySamples = juce::jlimit (0.0f,
-                                                            (float) lowDelay.getMaximumDelayInSamples(),
-                                                            (float) reportedLatency + fineOffset);
-                float low = lowDelay.popSample (ch, lowDelaySamples) * polarity;
+                const float lowDelaySamplesA = juce::jlimit (0.0f,
+                                                             (float) lowDelay.getMaximumDelayInSamples(),
+                                                             (float) reportedLatency + fineOffsetA);
+                const float lowDelaySamplesB = juce::jlimit (0.0f,
+                                                             (float) lowDelay.getMaximumDelayInSamples(),
+                                                             (float) reportedLatency + fineOffsetB);
+                float low = 0.0f;
+                if (delayCrossfadeActive)
+                {
+                    const float oldTap = lowDelay.popSample (ch, lowDelaySamplesA, false);
+                    const float newTap = lowDelay.popSample (ch, lowDelaySamplesB, true);
+                    low = delayGainA * oldTap + delayGainB * newTap;
+                }
+                else
+                {
+                    low = lowDelay.popSample (ch, lowDelaySamplesB);
+                }
+
+                low *= polarity;
 
                 if (allpassWet > 1.0e-5f || smoothedAllpassWet.isSmoothing())
                 {
@@ -261,6 +379,8 @@ private:
     }
 
     static constexpr int maxAllpassStages = 4;
+    static constexpr float delayCrossfadeMs = 45.0f;
+    static constexpr int allpassCoeffUpdatePeriod = 16;
 
     double sampleRate = 44100.0;
     int numChannels = 2;
@@ -272,6 +392,16 @@ private:
     float lastEqFreq = -1.0f;
     float lastEqQ = -1.0f;
     float lastEqBoost = -1.0f;
+    bool delayStateInitialised = false;
+    bool delayCrossfadeActive = false;
+    float delayCrossfadeFrom = 0.0f;
+    float delayCrossfadeTo = 0.0f;
+    int delayCrossfadePosition = 0;
+    int delayCrossfadeSamples = 1;
+    int pendingStages = 2;
+    bool stageSwitchPending = false;
+    float desiredAllpassWet = 0.0f;
+    int allpassCoeffUpdateCountdown = 0;
 
     juce::AudioBuffer<float> inputBuffer;
     juce::AudioBuffer<float> lowBuffer;
@@ -280,7 +410,7 @@ private:
     TransientEnvelopeFollower envelope;
     DynamicHighBandEQ dynEq;
     TransientHealthMeter health;
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran> lowDelay;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lowDelay;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> highDelay;
     std::array<std::array<juce::dsp::IIR::Filter<float>, (size_t) maxAllpassStages>, 2> allpassFilters;
 

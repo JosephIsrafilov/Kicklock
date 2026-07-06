@@ -6,6 +6,8 @@
 #include <complex>
 #include <juce_dsp/juce_dsp.h>
 
+#include "FftPlanCache.h"
+
 struct AlignmentResult
 {
     bool  valid          = false;
@@ -101,7 +103,7 @@ public:
         const int fftOrder = nextPow2Order (2 * window);
         const int fftSize  = 1 << fftOrder;
 
-        juce::dsp::FFT fft (fftOrder);
+        auto& fft = FftPlanCache::get (fftOrder);
 
         // juce::dsp::FFT::performRealOnlyForwardTransform expects the real
         // input packed contiguously in the first fftSize floats of a
@@ -250,8 +252,9 @@ public:
 
             const float freqCandidates[]  = { 40.0f, 60.0f, 80.0f, 100.0f, 140.0f,
                                                200.0f, 250.0f, 350.0f, 500.0f };
-            const float qCandidates[]     = { 0.5f, 0.7f, 1.0f, 2.0f, 4.0f };
-            const int   stageCandidates[] = { 2, 3, 4 };
+            const float qCandidates[]     = { 0.5f, 0.7f, 1.0f, 2.0f };
+            const int   stageCandidates[] = { 2, 3 };
+            double bestRotScore = baseAbs;
 
             for (int stages : stageCandidates)
             {
@@ -267,8 +270,14 @@ public:
 
                         const double m = std::abs (findPeakFFT (trial.data(), kickAligned.data(),
                                                                  alignedLen, 1).signed_);
-                        if (m > bestRotAbs + rotatorTieEpsilon)
+                        const double safetyPenalty = rotatorSafetyPenalty (bassBase, trial, sampleRate, qv, stages);
+                        if (! std::isfinite (safetyPenalty))
+                            continue;
+
+                        const double candidateScore = m - safetyPenalty;
+                        if (candidateScore > bestRotScore + rotatorTieEpsilon)
                         {
+                            bestRotScore = candidateScore;
                             bestRotAbs           = m;
                             result.rotatorFreqHz = freq;
                             result.rotatorQ      = qv;
@@ -350,7 +359,7 @@ private:
         const int fftOrder = nextPow2Order (2 * window);
         const int fftSize  = 1 << fftOrder;
 
-        juce::dsp::FFT fft (fftOrder);
+        auto& fft = FftPlanCache::get (fftOrder);
 
         std::vector<float> fftA (2 * (size_t) fftSize, 0.0f);
         std::vector<float> fftB (2 * (size_t) fftSize, 0.0f);
@@ -390,6 +399,61 @@ private:
         }
 
         return peak;
+    }
+
+    static double rotatorSafetyPenalty (const std::vector<float>& dry,
+                                        const std::vector<float>& wet,
+                                        double sampleRate,
+                                        float q,
+                                        int stages)
+    {
+        if (dry.empty() || dry.size() != wet.size() || sampleRate <= 0.0)
+            return std::numeric_limits<double>::infinity();
+
+        const int n = (int) dry.size();
+        const int attackSamples = juce::jlimit (8, n, (int) std::round (sampleRate * 0.018));
+        const int decayStart = juce::jlimit (0, n, (int) std::round (sampleRate * 0.070));
+
+        const float dryAttack = peakAbs (dry.data(), 0, attackSamples);
+        const float wetAttack = peakAbs (wet.data(), 0, attackSamples);
+        if (dryAttack > 1.0e-5f)
+        {
+            const double attackLossDb = 20.0 * std::log10 (std::max (1.0e-9, (double) wetAttack)
+                                                         / std::max (1.0e-9, (double) dryAttack));
+            if (attackLossDb < -1.5)
+                return std::numeric_limits<double>::infinity();
+        }
+
+        const double dryEarly = energy (dry.data(), 0, attackSamples);
+        const double wetEarly = energy (wet.data(), 0, attackSamples);
+        const double dryLate = decayStart < n ? energy (dry.data(), decayStart, n) : 0.0;
+        const double wetLate = decayStart < n ? energy (wet.data(), decayStart, n) : 0.0;
+        if (dryEarly > 1.0e-12 && wetEarly > 1.0e-12)
+        {
+            const double dryDecay = dryLate / dryEarly;
+            const double wetDecay = wetLate / wetEarly;
+            if (wetDecay > dryDecay * 1.75 + 0.10)
+                return std::numeric_limits<double>::infinity();
+        }
+
+        return 0.003 * (double) std::max (0, stages - 2)
+             + 0.004 * std::max (0.0, (double) q - 1.0);
+    }
+
+    static float peakAbs (const float* x, int start, int end) noexcept
+    {
+        float peak = 0.0f;
+        for (int i = start; i < end; ++i)
+            peak = std::max (peak, std::abs (x[i]));
+        return peak;
+    }
+
+    static double energy (const float* x, int start, int end) noexcept
+    {
+        double sum = 0.0;
+        for (int i = start; i < end; ++i)
+            sum += (double) x[i] * (double) x[i];
+        return sum / (double) std::max (1, end - start);
     }
 
     static void applyAllpassCascade (std::vector<float>& x, double fs,

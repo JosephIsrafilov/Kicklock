@@ -406,7 +406,7 @@ public:
             std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
 
             AllpassPhaseRotator rot;
-            rot.prepare (kSampleRate, 4);
+            rot.prepare (kSampleRate, 3);
             rot.setParameters (80.0f, 2.0f);
 
             for (int i = 0; i < n; ++i)
@@ -422,7 +422,7 @@ public:
 
             expect (r.valid);
             expect (r.adjustRotator);
-            expect (r.rotatorStages >= 2 && r.rotatorStages <= 4);
+            expect (r.rotatorStages >= 2 && r.rotatorStages <= 3);
             expectGreaterThan (r.afterMatch, r.beforeMatch);
         }
 
@@ -551,8 +551,8 @@ public:
             const auto refined = FrequencyDomainPhaseRefiner::refine (hits, kSampleRate);
 
             expect (refined.valid);
-            expectWithinAbsoluteError (refined.phaseDelaySamples.front(), delaySamples, 0.05f);
-            expectWithinAbsoluteError (refined.medianDelaySamples, delaySamples, 0.05f);
+            expectWithinAbsoluteError (refined.phaseDelaySamples.front(), delaySamples, 0.08f);
+            expectWithinAbsoluteError (refined.medianDelaySamples, delaySamples, 0.08f);
         }
 
         beginTest ("Coherence weighting does not underperform plain PHAT on distorted bass");

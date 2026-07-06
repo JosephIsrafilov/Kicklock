@@ -8,6 +8,8 @@
 
 #include <juce_dsp/juce_dsp.h>
 
+#include "FftPlanCache.h"
+
 class FrequencyDomainPhaseRefiner
 {
 public:
@@ -33,6 +35,8 @@ public:
         std::vector<float> delaySamples;
         std::vector<float> phaseDelaySamples;
         std::vector<float> peakDelaySamples;
+        std::vector<float> phaseResidualRadians;
+        std::vector<float> phaseConfidence;
         std::vector<bool> usedFallback;
     };
 
@@ -60,12 +64,14 @@ public:
         const int numBins = fftSize / 2 + 1;
         const double binHz = sampleRate / (double) fftSize;
 
-        juce::dsp::FFT fft (fftOrder);
+        auto& fft = FftPlanCache::get (fftOrder);
         std::vector<std::complex<double>> sxyByHit;
         std::vector<double> meanPxx ((size_t) numBins, 0.0);
         std::vector<double> meanPyy ((size_t) numBins, 0.0);
         std::vector<std::complex<double>> meanSxy ((size_t) numBins);
         std::vector<char> validHit;
+        std::vector<float> fftBass (2 * (size_t) fftSize, 0.0f);
+        std::vector<float> fftKick (2 * (size_t) fftSize, 0.0f);
 
         sxyByHit.reserve ((size_t) hits.size() * (size_t) numBins);
         validHit.reserve (hits.size());
@@ -82,11 +88,11 @@ public:
                 continue;
             }
 
-            std::vector<float> fftBass (2 * (size_t) fftSize, 0.0f);
-            std::vector<float> fftKick (2 * (size_t) fftSize, 0.0f);
+            std::fill (fftBass.begin(), fftBass.end(), 0.0f);
+            std::fill (fftKick.begin(), fftKick.end(), 0.0f);
 
-            copyWindow (hit.bass, hit.numSamples, fftBass);
-            copyWindow (hit.kick, hit.numSamples, fftKick);
+            copyWindow (hit.bass, hit.numSamples, sampleRate, fftBass);
+            copyWindow (hit.kick, hit.numSamples, sampleRate, fftKick);
 
             fft.performRealOnlyForwardTransform (fftBass.data(), true);
             fft.performRealOnlyForwardTransform (fftKick.data(), true);
@@ -144,7 +150,7 @@ public:
             if (combinedPower < powerFloor)
                 continue;
 
-            if (mode == WeightingMode::PlainPhat || numValidHits < 2)
+            if (mode == WeightingMode::PlainPhat || numValidHits < 4)
             {
                 weights[(size_t) bin] = 1.0;
                 continue;
@@ -152,12 +158,16 @@ public:
 
             const double denom = meanPxx[(size_t) bin] * meanPyy[(size_t) bin] + 1.0e-24;
             const double coherence = std::clamp (std::norm (meanSxy[(size_t) bin]) / denom, 0.0, 1.0);
-            weights[(size_t) bin] = coherence / (coherence + 0.05);
+            const double shrink = (double) (numValidHits - 3) / (double) (numValidHits + 1);
+            const double corrected = std::clamp (coherence * shrink, 0.0, 1.0);
+            weights[(size_t) bin] = corrected / (corrected + 0.05);
         }
 
         result.delaySamples.reserve (hits.size());
         result.phaseDelaySamples.reserve (hits.size());
         result.peakDelaySamples.reserve (hits.size());
+        result.phaseResidualRadians.reserve (hits.size());
+        result.phaseConfidence.reserve (hits.size());
         result.usedFallback.reserve (hits.size());
 
         size_t spectrumOffset = 0;
@@ -172,17 +182,27 @@ public:
                 result.delaySamples.push_back (hit.coarseDelaySamples);
                 result.phaseDelaySamples.push_back (std::numeric_limits<float>::quiet_NaN());
                 result.peakDelaySamples.push_back (std::numeric_limits<float>::quiet_NaN());
+                result.phaseResidualRadians.push_back (std::numeric_limits<float>::quiet_NaN());
+                result.phaseConfidence.push_back (0.0f);
                 result.usedFallback.push_back (true);
                 continue;
             }
 
+            float phaseResidual = std::numeric_limits<float>::quiet_NaN();
+            float phaseConfidence = 0.0f;
             const auto phaseDelay = estimateFromPhaseSlope (spectrum,
                                                             weights,
                                                             fftSize,
-                                                            hit.coarseDelaySamples);
+                                                            hit.coarseDelaySamples,
+                                                            phaseResidual,
+                                                            phaseConfidence);
+            if (numValidHits < 4)
+                phaseConfidence *= (float) numValidHits / 4.0f;
 
             float peakDelay = std::numeric_limits<float>::quiet_NaN();
             result.phaseDelaySamples.push_back (phaseDelay);
+            result.phaseResidualRadians.push_back (phaseResidual);
+            result.phaseConfidence.push_back (phaseConfidence);
 
             float candidate = std::isfinite (phaseDelay) ? phaseDelay : peakDelay;
             bool fallback = ! std::isfinite (candidate)
@@ -254,13 +274,28 @@ private:
 
     static void copyWindow (const float* input,
                             int numSamples,
+                            double sampleRate,
                             std::vector<float>& fftBuffer)
     {
-        const double denom = std::max (1, numSamples - 1);
+        const int taperSamples = std::clamp ((int) std::lround (sampleRate * 0.007),
+                                             1,
+                                             std::max (1, numSamples / 4));
+
         for (int i = 0; i < numSamples; ++i)
         {
-            const double phase = juce::MathConstants<double>::twoPi * (double) i / denom;
-            const float window = (float) (0.5 - 0.5 * std::cos (phase));
+            float window = 1.0f;
+
+            if (i < taperSamples)
+            {
+                const double x = (double) i / (double) taperSamples;
+                window = (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * x));
+            }
+            else if (i >= numSamples - taperSamples)
+            {
+                const double x = (double) (numSamples - 1 - i) / (double) taperSamples;
+                window = (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * x));
+            }
+
             fftBuffer[(size_t) i] = input[i] * window;
         }
     }
@@ -336,11 +371,24 @@ private:
     static float estimateFromPhaseSlope (const std::complex<double>* spectrum,
                                          const std::vector<double>& weights,
                                          int fftSize,
-                                         float coarseDelaySamples)
+                                         float coarseDelaySamples,
+                                         float& residualRadiansOut,
+                                         float& confidenceOut)
     {
         const int numBins = fftSize / 2 + 1;
-        double weightedDelaySum = 0.0;
+        double sumXX = 0.0;
+        double sumXY = 0.0;
         double weightSum = 0.0;
+
+        struct BinPoint
+        {
+            double omega = 0.0;
+            double phase = 0.0;
+            double weight = 0.0;
+        };
+
+        std::vector<BinPoint> points;
+        points.reserve ((size_t) numBins);
 
         for (int bin = 1; bin < numBins; ++bin)
         {
@@ -354,36 +402,43 @@ private:
 
             const double omega = juce::MathConstants<double>::twoPi * (double) bin / (double) fftSize;
             const double angle = std::atan2 (sxy.imag(), sxy.real());
-
-            double bestDelay = (double) coarseDelaySamples;
-            double bestDistance = std::numeric_limits<double>::max();
-            for (int sign : { -1, 1 })
-            {
-                for (int branch = -16; branch <= 16; ++branch)
-                {
-                    const double unwrapped = angle + juce::MathConstants<double>::twoPi * (double) branch;
-                    const double delay = (double) sign * unwrapped / omega;
-                    const double distance = std::abs (delay - (double) coarseDelaySamples);
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        bestDelay = delay;
-                    }
-                }
-            }
-
-            if (bestDistance > 1.5)
-                continue;
-
             const double binWeight = weight * std::abs (sxy);
-            weightedDelaySum += binWeight * bestDelay;
+            const double predicted = omega * (double) coarseDelaySamples;
+            const double branch = std::round ((predicted - angle) / juce::MathConstants<double>::twoPi);
+            const double unwrapped = angle + juce::MathConstants<double>::twoPi * branch;
+
+            points.push_back ({ omega, unwrapped, binWeight });
+            sumXX += binWeight * omega * omega;
+            sumXY += binWeight * omega * unwrapped;
             weightSum += binWeight;
         }
 
-        if (weightSum <= 1.0e-18)
+        if (weightSum <= 1.0e-18 || points.size() < 2)
             return std::numeric_limits<float>::quiet_NaN();
 
-        return (float) (weightedDelaySum / weightSum);
+        if (sumXX <= 1.0e-18)
+            return std::numeric_limits<float>::quiet_NaN();
+
+        // With spectrum = X * conj(Y), and Y being a delayed copy of X by tau,
+        // phase(X * conj(Y)) = +omega * tau. Positive return means "delay bass"
+        // in the existing PhaseFixEngine convention.
+        const double slope = sumXY / sumXX;
+
+        double residual = 0.0;
+        for (const auto& point : points)
+        {
+            const double e = point.phase - slope * point.omega;
+            residual += point.weight * e * e;
+        }
+
+        residual = std::sqrt (residual / weightSum);
+        residualRadiansOut = (float) residual;
+        confidenceOut = (float) std::clamp (1.0 - residual / 0.35, 0.0, 1.0);
+
+        if (std::abs (slope - (double) coarseDelaySamples) > 1.5)
+            return std::numeric_limits<float>::quiet_NaN();
+
+        return (float) slope;
     }
 
 };

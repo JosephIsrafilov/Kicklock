@@ -15,6 +15,7 @@ struct HitObservation
     float matchPercent = 0.0f;
     float energy = 0.0f;
     float signalConfidence = 0.0f;
+    float dominantFrequencyHz = 60.0f;
 };
 
 struct HitCluster
@@ -36,6 +37,8 @@ struct ConsensusResult
     std::vector<HitCluster> clusters;
     std::vector<int> outlierIndices;
     float consensusConfidence = 0.0f;
+    float dominantClusterShare = 0.0f;
+    float dominantEnergyShare = 0.0f;
 };
 
 class HitConsensus
@@ -62,20 +65,35 @@ public:
             result.clusters.push_back(c);
             result.dominantClusterIndex = 0;
             result.hasConsensus = true;
+            result.dominantClusterShare = 1.0f;
+            result.dominantEnergyShare = 1.0f;
             result.consensusConfidence = hits[0].signalConfidence * 0.5f; // Penalty for single hit
             return result;
         }
 
-        // 1. KDE (Kernel Density Estimation)
-        float minDelay = hits[0].delayMs;
-        float maxDelay = hits[0].delayMs;
+        const float dominantFrequencyHz = estimateDominantFrequency (hits);
+        const float periodMs = 1000.0f / dominantFrequencyHz;
+        const float halfPeriodMs = 0.5f * periodMs;
+        const float bandwidth = std::max (0.35f, periodMs * 0.08f);
+        const float assignmentDistance = std::max (0.6f, bandwidth * 1.5f);
+
+        std::vector<float> physicalDelayMs;
+        physicalDelayMs.reserve (hits.size());
         for (const auto& h : hits)
+            physicalDelayMs.push_back (canonicalPhysicalDelay (h, halfPeriodMs));
+
+        // 1. KDE (Kernel Density Estimation) over physical delay. An inverted
+        // observation is equivalent to a non-inverted one shifted by half a
+        // period around the dominant low frequency, so cluster that physical
+        // solution first and choose the simplest representative later.
+        float minDelay = physicalDelayMs[0];
+        float maxDelay = physicalDelayMs[0];
+        for (auto delay : physicalDelayMs)
         {
-            minDelay = std::min(minDelay, h.delayMs);
-            maxDelay = std::max(maxDelay, h.delayMs);
+            minDelay = std::min(minDelay, delay);
+            maxDelay = std::max(maxDelay, delay);
         }
 
-        const float bandwidth = 0.4f;
         const float step = 0.05f;
         const int numPoints = (int)std::ceil((maxDelay - minDelay) / step) + 1 + 20; // Padding
         const float startGrid = minDelay - 10.0f * step;
@@ -85,13 +103,13 @@ public:
         {
             float x = startGrid + (float)i * step;
             float d = 0.0f;
-            for (const auto& h : hits)
+            for (size_t h = 0; h < hits.size(); ++h)
             {
-                float dist = std::abs(x - h.delayMs);
+                float dist = std::abs(x - physicalDelayMs[h]);
                 if (dist < bandwidth)
                 {
                     // Triangle kernel weighted by energy
-                    d += h.energy * (1.0f - dist / bandwidth);
+                    d += hits[h].energy * (1.0f - dist / bandwidth);
                 }
             }
             density[(size_t)i] = d;
@@ -125,7 +143,7 @@ public:
             int bestCluster = -1;
             for (size_t c = 0; c < result.clusters.size(); ++c)
             {
-                float dist = std::abs(hits[i].delayMs - result.clusters[c].centroidDelayMs);
+                float dist = std::abs(physicalDelayMs[i] - result.clusters[c].centroidDelayMs);
                 if (dist < bestDist)
                 {
                     bestDist = dist;
@@ -133,7 +151,7 @@ public:
                 }
             }
             
-            if (bestCluster >= 0 && bestDist < 0.6f) // Max assignment distance
+            if (bestCluster >= 0 && bestDist < assignmentDistance)
             {
                 result.clusters[(size_t)bestCluster].memberIndices.push_back((int)i);
             }
@@ -151,69 +169,59 @@ public:
         std::vector<HitCluster> finalClusters;
         for (auto& c : result.clusters)
         {
-            // Split by polarity if needed
-            int numInverted = 0;
-            float energyNormal = 0.0f;
-            float energyInvert = 0.0f;
+            HitCluster sub;
+            int numPhaseEnabled = 0;
+            float totalFreq = 0.0f;
+            float freqWeightSum = 0.0f;
+            float physicalCentroid = 0.0f;
+            float normalEnergy = 0.0f;
+            float invertedEnergy = 0.0f;
+
             for (int idx : c.memberIndices)
             {
-                if (hits[(size_t)idx].polarityInvert) { numInverted++; energyInvert += hits[(size_t)idx].energy; }
-                else { energyNormal += hits[(size_t)idx].energy; }
+                const auto& h = hits[(size_t)idx];
+                sub.memberIndices.push_back(idx);
+                sub.totalEnergy += h.energy;
+                sub.averageSignalConfidence += h.signalConfidence;
+                physicalCentroid += physicalDelayMs[(size_t) idx] * h.energy;
+
+                if (h.polarityInvert)
+                    invertedEnergy += h.energy;
+                else
+                    normalEnergy += h.energy;
+
+                if (h.phaseFilterEnabled)
+                {
+                    numPhaseEnabled++;
+                    totalFreq += h.phaseFilterFreqHz * h.energy;
+                    freqWeightSum += h.energy;
+                }
             }
 
-            auto addSubCluster = [&](bool targetPolarity)
+            if (sub.memberIndices.empty() || sub.totalEnergy <= 0.0f)
+                continue;
+
+            sub.averageSignalConfidence /= (float) sub.memberIndices.size();
+            physicalCentroid /= sub.totalEnergy;
+
+            const float normalDelay = physicalCentroid;
+            const float invertedDelay = physicalCentroid - halfPeriodMs;
+            const bool preferInvertedByEnergy = invertedEnergy > normalEnergy * 1.2f;
+            sub.centroidPolarity = preferInvertedByEnergy
+                || (! (normalEnergy > invertedEnergy * 1.2f) && std::abs (invertedDelay) < std::abs (normalDelay));
+            sub.centroidDelayMs = sub.centroidPolarity ? invertedDelay : normalDelay;
+
+            for (int idx : sub.memberIndices)
             {
-                HitCluster sub;
-                sub.centroidPolarity = targetPolarity;
-                
-                int numPhaseEnabled = 0;
-                float totalFreq = 0.0f;
-                float freqWeightSum = 0.0f;
+                const float diff = physicalDelayMs[(size_t)idx] - physicalCentroid;
+                sub.internalSpread += diff * diff;
+            }
+            sub.internalSpread = std::sqrt(sub.internalSpread / (float)sub.memberIndices.size());
 
-                for (int idx : c.memberIndices)
-                {
-                    const auto& h = hits[(size_t)idx];
-                    if (h.polarityInvert == targetPolarity)
-                    {
-                        sub.memberIndices.push_back(idx);
-                        sub.totalEnergy += h.energy;
-                        sub.averageSignalConfidence += h.signalConfidence;
-                        sub.centroidDelayMs += h.delayMs * h.energy;
-                        
-                        if (h.phaseFilterEnabled)
-                        {
-                            numPhaseEnabled++;
-                            totalFreq += h.phaseFilterFreqHz * h.energy;
-                            freqWeightSum += h.energy;
-                        }
-                    }
-                }
-                
-                if (!sub.memberIndices.empty())
-                {
-                    sub.averageSignalConfidence /= (float)sub.memberIndices.size();
-                    sub.centroidDelayMs /= sub.totalEnergy; // Weighted average delay
-                    
-                    // Internal spread
-                    for (int idx : sub.memberIndices)
-                    {
-                        float diff = hits[(size_t)idx].delayMs - sub.centroidDelayMs;
-                        sub.internalSpread += diff * diff;
-                    }
-                    sub.internalSpread = std::sqrt(sub.internalSpread / (float)sub.memberIndices.size());
+            sub.centroidPhaseEnabled = (numPhaseEnabled > (int)sub.memberIndices.size() / 2);
+            sub.centroidPhaseFreqHz = freqWeightSum > 0.0f ? totalFreq / freqWeightSum : 200.0f;
 
-                    sub.centroidPhaseEnabled = (numPhaseEnabled > (int)sub.memberIndices.size() / 2);
-                    if (freqWeightSum > 0.0f)
-                        sub.centroidPhaseFreqHz = totalFreq / freqWeightSum;
-                    else
-                        sub.centroidPhaseFreqHz = 200.0f;
-                        
-                    finalClusters.push_back(sub);
-                }
-            };
-
-            if (numInverted > 0) addSubCluster(true);
-            if (numInverted < (int)c.memberIndices.size()) addSubCluster(false);
+            finalClusters.push_back(sub);
         }
         result.clusters = finalClusters;
 
@@ -248,16 +256,41 @@ public:
         const auto& dom = result.clusters[(size_t)bestClusterIdx];
         float clusterShare = (float)dom.memberIndices.size() / (float)hits.size();
         float energyShare = dom.totalEnergy / std::max(1e-6f, totalSystemEnergy);
-        float tightness = std::max(0.0f, 1.0f - dom.internalSpread / 1.0f);
+        float tightness = std::max(0.0f, 1.0f - dom.internalSpread / assignmentDistance);
+        float outlierPenalty = std::clamp ((float) result.outlierIndices.size() / (float) hits.size(), 0.0f, 1.0f);
+        result.dominantClusterShare = clusterShare;
+        result.dominantEnergyShare = energyShare;
         
         result.consensusConfidence = 0.35f * clusterShare + 
                                      0.25f * tightness + 
                                      0.25f * energyShare + 
                                      0.15f * dom.averageSignalConfidence;
+        result.consensusConfidence *= (1.0f - 0.35f * outlierPenalty);
                                      
         // Clamp it
         result.consensusConfidence = std::max(0.0f, std::min(1.0f, result.consensusConfidence));
 
         return result;
+    }
+
+private:
+    static float estimateDominantFrequency (const std::vector<HitObservation>& hits) noexcept
+    {
+        float weighted = 0.0f;
+        float weight = 0.0f;
+        for (const auto& h : hits)
+        {
+            const float f = std::clamp (h.dominantFrequencyHz, 30.0f, 120.0f);
+            const float w = std::max (h.energy, 1.0e-6f);
+            weighted += f * w;
+            weight += w;
+        }
+
+        return weight > 0.0f ? weighted / weight : 60.0f;
+    }
+
+    static float canonicalPhysicalDelay (const HitObservation& hit, float halfPeriodMs) noexcept
+    {
+        return hit.delayMs + (hit.polarityInvert ? halfPeriodMs : 0.0f);
     }
 };

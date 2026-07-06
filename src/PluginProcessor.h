@@ -217,6 +217,7 @@ private:
     PhaseFixResult latestFixResult;
     std::vector<float> lastAnalyzedBassWindow;
     std::vector<float> lastAnalyzedKickWindow;
+    float lastAnalyzedCrossoverHz = 150.0f;
     ParameterSnapshot latestRevertSnapshot;
     std::atomic<bool> revertSnapshotValid { false };
     std::array<ParameterSnapshot, 2> compareSlots {};

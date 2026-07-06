@@ -52,7 +52,7 @@ public:
     float processSample (int ch, float x, float env, float amount) noexcept
     {
         const int channel = juce::jlimit (0, (int) filters.size() - 1, ch);
-        const float band = filters[(size_t) channel].processSample (channel, x) * juce::jlimit (0.0f, 1.0f, q / 4.0f);
+        const float band = filters[(size_t) channel].processSample (channel, x);
         const float gain = juce::jlimit (0.0f, 1.0f, env) * juce::jlimit (0.0f, 1.0f, amount) * maxLinBoost;
         return x + band * gain;
     }

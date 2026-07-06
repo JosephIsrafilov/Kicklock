@@ -158,6 +158,7 @@ private:
     PhaseFixResult latestResult;
     AnalyzeState lastAnalyzeState = AnalyzeState::Idle;
     bool haveResult = false;
+    bool latestResultAutoApplied = false;
 
     // Panel backgrounds computed in resized(), painted behind the child
     // controls in paint() so the geometry lives in one place.

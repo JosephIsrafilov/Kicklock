@@ -309,6 +309,18 @@ namespace
                            + PhaseBands::table[1].weight * multiBandResult.bands[1].kickEnergy
                            + PhaseBands::table[2].weight * multiBandResult.bands[2].kickEnergy
                            + PhaseBands::table[3].weight * multiBandResult.bands[3].kickEnergy;
+
+                float bestBandEnergy = -1.0f;
+                for (int band = 0; band < PhaseBands::lowEndBandCount; ++band)
+                {
+                    const auto& bandDef = PhaseBands::table[(size_t) band];
+                    const float bandEnergy = multiBandResult.bands[(size_t) band].kickEnergy;
+                    if (bandEnergy > bestBandEnergy)
+                    {
+                        bestBandEnergy = bandEnergy;
+                        obs.dominantFrequencyHz = 0.5f * (bandDef.lowHz + bandDef.highHz);
+                    }
+                }
                            
                 hitObservations.push_back (obs);
             }
@@ -350,10 +362,8 @@ namespace
         if (consensus.hasConsensus)
         {
             const auto& domCluster = consensus.clusters[(size_t)consensus.dominantClusterIndex];
-            aggregated.unstableRecommendation =
-                consensus.clusters.size() > 1
-                || domCluster.memberIndices.size() < perHitResults.size()
-                || ! consensus.outlierIndices.empty();
+            aggregated.unstableRecommendation = consensus.dominantClusterShare <= 0.50f
+                || (perHitResults.size() < 4 && consensus.dominantClusterShare < 0.70f);
 
             aggregated.bassPolarityInvert = domCluster.centroidPolarity;
             aggregated.bassDelayMs = domCluster.centroidDelayMs;
@@ -1264,6 +1274,7 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
         latestFixResult = {};
         lastAnalyzedBassWindow.clear();
         lastAnalyzedKickWindow.clear();
+        lastAnalyzedCrossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
     }
     revertSnapshotValid.store (false, std::memory_order_release);
 
@@ -1604,12 +1615,13 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothAtomic(liveLowEndMatchPercent, activeLowEnd);
     smoothAtomic(liveBroadbandMatchPercent, activeBroad);
     smoothAtomic(realtimeLowBandMatchPercent, activeLowEnd); // legacy alias (sub/low)
+    smoothAtomic(correlationPercent, activeMatch); // legacy headline alias: low-end-weighted, not broadband
     for (int band = 0; band < PhaseBands::numBands; ++band)
         smoothAtomic (liveBandMatchPercent[(size_t) band], activeBands[(size_t) band]);
 
     uiSmoothingInitialized.store (true, std::memory_order_relaxed);
 
-    correlationPercent.store ((realtimeCorrelation.load() + 1.0f) * 50.0f);
+    realtimeCorrelation.store (juce::jlimit (-1.0f, 1.0f, activeMatch / 50.0f - 1.0f));
 }
 
 juce::AudioProcessorEditor* KickLockAudioProcessor::createEditor()
@@ -1982,6 +1994,7 @@ PhaseFixResult KickLockAudioProcessor::computeAndPublishFix (const std::vector<f
         latestFixResult = result;
         lastAnalyzedBassWindow = std::move (analyzedBass);
         lastAnalyzedKickWindow = std::move (analyzedKick);
+        lastAnalyzedCrossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
     }
 
     latestAnalyzedBeforePercent.store (result.beforeMatchPercent);
@@ -2017,6 +2030,7 @@ bool KickLockAudioProcessor::beginBackgroundAnalyze()
 
     analysisThreadPool.addJob ([this, bass, kick, n]
     {
+        juce::ScopedNoDenormals noDenormals;
         analyzeState.store (AnalyzeState::Analyzing, std::memory_order_release);
 
         try
@@ -2063,15 +2077,26 @@ bool KickLockAudioProcessor::applyLatestFix()
     PhaseFixResult fix;
     std::vector<float> bassWindow;
     std::vector<float> kickWindow;
+    float analyzedCrossoverHz = 150.0f;
     {
         const std::lock_guard<std::mutex> lock (resultMutex);
         fix = latestFixResult;
         bassWindow = lastAnalyzedBassWindow;
         kickWindow = lastAnalyzedKickWindow;
+        analyzedCrossoverHz = lastAnalyzedCrossoverHz;
     }
 
     if (! fix.applyAllowed && ! fix.optionalApplyAllowed)
         return false;
+
+    const float currentCrossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+    if (std::abs (currentCrossoverHz - analyzedCrossoverHz) > 1.0f)
+    {
+        const std::lock_guard<std::mutex> lock (resultMutex);
+        latestFixResult.verificationWarning = true;
+        latestFixResult.message = "Crossover changed after analysis. Analyze again before applying.";
+        return false;
+    }
 
     latestRevertSnapshot = captureCurrentParameterSnapshot();
     revertSnapshotValid.store (true, std::memory_order_release);

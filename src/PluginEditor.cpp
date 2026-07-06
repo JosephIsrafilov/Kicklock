@@ -41,8 +41,15 @@ void TransientHealthComponent::paint (juce::Graphics& g)
                 readout, juce::Justification::centredRight);
 
     auto bars = inner.removeFromTop (20).toFloat();
-    const float preW = bars.getWidth() * juce::jlimit (0.0f, 1.0f, prePeak * 2.0f);
-    const float postW = bars.getWidth() * juce::jlimit (0.0f, 1.0f, postPeak * 2.0f);
+    const float minDb = -48.0f;
+    auto toScale = [minDb](float linearPeak) {
+        if (linearPeak <= 1.0e-5f) return 0.0f;
+        float db = 20.0f * std::log10(linearPeak);
+        return juce::jlimit(0.0f, 1.0f, (db - minDb) / -minDb);
+    };
+
+    const float preW = bars.getWidth() * toScale(prePeak);
+    const float postW = bars.getWidth() * toScale(postPeak);
 
     g.setColour (orange.withAlpha (0.22f));
     g.fillRoundedRectangle (bars.withWidth (preW), 3.0f);
@@ -79,16 +86,17 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     freezeButton.onClick = [this] { oscilloscope.setFrozen (freezeButton.getToggleState()); oscilloscope.repaint(); };
     addAndMakeVisible (freezeButton);
 
-    analyzeButton.setButtonText ("Analyze");
+    analyzeButton.setButtonText ("Auto-Align");
     analyzeButton.setColour (juce::TextButton::buttonColourId, teal);
     analyzeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
-    analyzeButton.setTooltip ("Captures the current kick and bass loop and recommends a bass-path correction.");
+    analyzeButton.setTooltip ("Captures the current kick and bass loop and automatically applies a bass-path correction.");
     analyzeButton.setEnabled (false);
     analyzeButton.onClick = [this]
     {
         if (! canStartAnalyze)
             return;
 
+        latestResultAutoApplied = false;
         if (audioProcessor.beginBackgroundAnalyze())
         {
             suggestedText.clear();
@@ -560,11 +568,13 @@ void KickLockAudioProcessorEditor::refreshTransientEqControlState()
 
     dynEqFreqSlider.setAlpha (dependentAlpha);
     dynEqQSlider.setAlpha (dependentAlpha);
+    dynEqBoostSlider.setAlpha(amount > 0.001f ? 1.0f : 0.48f);
+    
     dynEqFreqLabel.setColour (juce::Label::textColourId, dependentColour);
     dynEqQLabel.setColour (juce::Label::textColourId, dependentColour);
 
     dynEqAmountLabel.setColour (juce::Label::textColourId, active ? teal : amber);
-    dynEqBoostLabel.setColour (juce::Label::textColourId, amount > 0.001f ? mutedText : mutedText.withAlpha (0.75f));
+    dynEqBoostLabel.setColour (juce::Label::textColourId, amount > 0.001f ? mutedText : mutedText.withAlpha (0.55f));
 }
 
 void KickLockAudioProcessorEditor::timerCallback()

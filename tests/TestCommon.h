@@ -21,6 +21,7 @@
 #include "SignalActivityTracker.h"
 #include "PhaseFixEngine.h"
 #include "FrequencyDomainPhaseRefiner.h"
+#include "HitConsensus.h"
 #include "LinkwitzRileyCrossover.h"
 #include "TransientEnvelopeFollower.h"
 #include "DynamicHighBandEQ.h"

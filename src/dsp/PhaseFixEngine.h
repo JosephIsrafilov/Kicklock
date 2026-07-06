@@ -160,15 +160,6 @@ public:
         if (bass != nullptr && kick != nullptr && numSamples > 32 && sampleRate > 0.0)
         {
             const int peak = locateDominantTransient (kick, numSamples, sampleRate);
-            const int bassPeak = locateDominantTransient (bass, numSamples, sampleRate);
-            if (peak >= 0 && bassPeak >= 0)
-            {
-                const float transientOffsetMs = (float) ((double) (peak - bassPeak) * 1000.0 / sampleRate);
-                if (std::abs (transientOffsetMs) > maxDelayMs + 0.25f)
-                    return analyzeCore (bass, kick, numSamples, sampleRate,
-                                        maxDelayMs, delayInterpolation, searchRotator);
-            }
-
             if (peak >= 0)
             {
                 const int preSamples  = juce::jmax (1, (int) std::lround (sampleRate * (double) hitPreRollMs  / 1000.0));
@@ -404,8 +395,22 @@ private:
 
         // Mirror TransientDetector's defaults so offline detection matches what
         // the audio thread would have latched onto for the same signal.
-        constexpr float threshold = 0.004f;
-        constexpr float minimumEnergyGate = 0.0004f;
+        double meanEnergy = 0.0;
+        float peakEnergy = 0.0f;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float energy = kick[i] * kick[i];
+            meanEnergy += (double) energy;
+            peakEnergy = juce::jmax (peakEnergy, energy);
+        }
+
+        meanEnergy /= (double) numSamples;
+        const float threshold = juce::jlimit (1.0e-8f, 0.004f,
+                                             juce::jmax ((float) meanEnergy * 6.0f,
+                                                        peakEnergy * 0.08f));
+        const float minimumEnergyGate = juce::jlimit (1.0e-9f, 0.0004f,
+                                                     juce::jmax ((float) meanEnergy * 1.5f,
+                                                                peakEnergy * 0.01f));
         const float attackCoeff  = timeMsToCoeff (2.0f, sampleRate);
         const float releaseCoeff = timeMsToCoeff (60.0f, sampleRate);
         const int holdoffSamples = juce::jmax (1, (int) std::round (sampleRate * 90.0 / 1000.0));
