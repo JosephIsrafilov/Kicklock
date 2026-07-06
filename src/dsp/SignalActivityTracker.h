@@ -60,8 +60,14 @@ public:
         else
         {
             heldSamplesRemaining = std::max (0, heldSamplesRemaining - std::max (0, blockSamples));
+            // Once the hold window lapses, decay the held peak instead of
+            // zeroing it in a single block. isUsable() reads heldPeakRms, so a
+            // hard reset made "usable" collapse in the exact instant isActive()
+            // did — a fresh hit landing one block later then had to re-cross the
+            // usable floor from zero, flickering SIGNAL TOO LOW. A gentle decay
+            // keeps the reading stable across the gap between transients.
             if (heldSamplesRemaining <= 0)
-                heldPeakRms = 0.0f;
+                heldPeakRms *= 0.5f;
         }
     }
 

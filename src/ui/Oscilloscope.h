@@ -107,7 +107,7 @@ private:
     bool refreshTriggeredSnapshot();
     void reserveTriggeredBuffers();
     void buildFreeRunTriggeredSnapshot();
-    void updateTriggeredAutoGain() noexcept;
+    bool updateTriggeredAutoGain() noexcept;
     void setDelayFromDrag (const juce::MouseEvent&);
 
     // Temporary mouse-hold inspection. beginInspectionHold pauses the display
@@ -169,6 +169,14 @@ private:
     int triggeredPreRollSamples = 0;
     KickReferenceState kickReferenceState = KickReferenceState::NoReference;
     int reservedTriggeredSamples = 0;
+
+    // Effective sample rate of whatever currently fills the triggered buffers.
+    // The real per-hit snapshot comes from the full-rate HitCaptureBuffer, but
+    // the watchdog fallback fills from the DECIMATED scope ring, so the ms axis
+    // has to know which source produced the data or the labels/grid come out
+    // ~decimation× wrong. Updated whenever the snapshot is (re)built.
+    double triggeredSnapshotRate = 44100.0;
+
     int freeRunTicks = 0;
     static constexpr int freeRunWatchdogTicks = 120;
 

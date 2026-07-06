@@ -62,6 +62,33 @@ public:
                           4096);
         }
 
+        beginTest ("Triggered visible range zooms around the trigger line");
+        {
+            // Zoom 1 shows the whole captured window.
+            const auto whole = computeTriggeredVisibleRange (1000, 200, 1.0f);
+            expectEquals (whole.first, 0);
+            expectEquals (whole.visible, 1000);
+
+            // Zoom 2 shows half the window, keeping the trigger at the same
+            // fractional x-position it had at 1x (invariant, not the buffer start).
+            const auto zoomed = computeTriggeredVisibleRange (1000, 200, 2.0f);
+            expectEquals (zoomed.visible, 500);
+            const float fraction1x = 200.0f / 999.0f;
+            const float fractionZoom = (float) (200 - zoomed.first) / (float) (zoomed.visible - 1);
+            expectWithinAbsoluteError (fractionZoom, fraction1x, 0.01f);
+
+            // A trigger near the end clamps the slice to the buffer's end edge
+            // rather than running past it.
+            const auto nearEnd = computeTriggeredVisibleRange (1000, 999, 4.0f);
+            expectEquals (nearEnd.visible, 250);
+            expectEquals (nearEnd.first + nearEnd.visible, 1000);
+
+            // Degenerate windows never produce a negative or out-of-range slice.
+            const auto tiny = computeTriggeredVisibleRange (1, 0, 3.0f);
+            expectEquals (tiny.first, 0);
+            expect (tiny.visible <= 1);
+        }
+
         beginTest ("Visual offset shifts the display index by decimated samples");
         {
             const int unshifted = resolveDisplayHistoryIndex (100, 2048, 1800, 12, 0, 4);

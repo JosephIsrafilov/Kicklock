@@ -384,6 +384,62 @@ public:
             expect (! everInactiveAfterFirst, "status flickered to inactive between kicks");
         }
 
+        beginTest ("Default 1.5 s hold survives slow-tempo and half-time gaps");
+        {
+            // Regression for the "Analyze never enables" bug: a 500 ms hold
+            // lapsed in the gap between kicks at or below ~120 BPM, so the
+            // status flickered to WAITING FOR KICK and the button never
+            // enabled. The runtime now prepares the trackers with a 1.5 s hold
+            // (see prepareToPlay). Verify that hold keeps a sparse beat with
+            // 600-1000 ms gaps continuously active after the first hit.
+            for (const double gapMs : { 600.0, 800.0, 1000.0 })
+            {
+                SignalActivityTracker kick;
+                kick.prepare (kSampleRate, 1500.0f, 3.0e-3f);
+
+                const int block = 512;
+                const int blocksPerBeat = std::max (2, (int) (kSampleRate * gapMs / 1000.0 / block));
+                bool everInactiveAfterFirst = false;
+
+                for (int beat = 0; beat < 8; ++beat)
+                {
+                    kick.pushBlock (0.4f, block); // transient block
+                    for (int i = 1; i < blocksPerBeat; ++i)
+                    {
+                        kick.pushBlock (0.0f, block); // gap
+                        if (! kick.isActive())
+                            everInactiveAfterFirst = true;
+                    }
+                }
+
+                expect (! everInactiveAfterFirst,
+                        "1.5 s hold flickered inactive at " + juce::String (gapMs, 0) + " ms gaps");
+            }
+        }
+
+        beginTest ("Held peak persists across a lapsed hold instead of hard-resetting");
+        {
+            // isUsable() reads heldPeakRms; zeroing it the instant the hold
+            // lapsed made "usable" collapse together with "active", flickering
+            // SIGNAL TOO LOW when a fresh hit arrived a block later. The lapse
+            // now decays the held peak, so it stays above a usable floor across
+            // a short gap.
+            SignalActivityTracker tracker;
+            tracker.prepare (kSampleRate, 100.0f, 3.0e-3f); // short hold to force a lapse
+
+            const int block = 512;
+            tracker.pushBlock (0.5f, block);
+            expect (tracker.isUsable (8.0e-3f), "loud hit should be usable");
+
+            // Push enough silence to lapse the 100 ms hold, but only just.
+            const int lapseBlocks = (int) (kSampleRate * 0.15 / block) + 1;
+            for (int i = 0; i < lapseBlocks; ++i)
+                tracker.pushBlock (0.0f, block);
+
+            expect (! tracker.isActive(), "hold should have lapsed");
+            expect (tracker.getHeldPeakRms() > 0.0f, "held peak should decay, not hard-reset to zero");
+        }
+
         beginTest ("Material-usable separates present-but-quiet from playing");
         {
             SignalActivityTracker tracker;

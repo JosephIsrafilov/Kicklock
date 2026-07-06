@@ -203,10 +203,11 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     relockKickButton.onClick = [this] { oscilloscope.relockKickReference(); oscilloscope.repaint(); };
     addAndMakeVisible (relockKickButton);
 
-    analyzeButton.setButtonText ("Auto-Align");
+    analyzeButton.setButtonText ("Analyze");
     analyzeButton.setColour (juce::TextButton::buttonColourId, teal);
     analyzeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
-    analyzeButton.setTooltip ("Captures the current kick and bass loop and automatically applies a bass-path correction.");
+    analyzeButton.setTooltip ("Captures the current kick and bass loop and recommends a bass-path correction. "
+                              "Use Apply Fix to apply it.");
     analyzeButton.setEnabled (false);
     analyzeButton.onClick = [this]
     {
@@ -327,12 +328,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     visualOffsetSlider.setTextValueSuffix (" smp");
     visualOffsetSlider.setNumDecimalPlacesToDisplay (0);
     visualOffsetSlider.setTooltip ("Display-only sample shift applied to the bass wave on the scope so you can align phases visually. Does not affect the sound.");
-    configureControlLabel (visualOffsetLabel, "Visual Shift");
     addAndMakeVisible (visualOffsetSlider);
 
     crossoverEnableButton.setButtonText ("Enable");
     crossoverEnableButton.setTooltip ("Toggles the crossover. When disabled, the entire signal passes through the delay and polarity invert.");
-    configureControlLabel (crossoverEnableLabel, "Crossover");
     addAndMakeVisible (crossoverEnableButton);
 
     configureRotary (crossoverSlider);
@@ -346,7 +345,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureControlLabel (phaseFreqLabel, "Phase Freq");
     configureControlLabel (phaseQLabel, "Q");
     configureControlLabel (visualOffsetLabel, "Visual Offset");
-    configureControlLabel (crossoverLabel, "Crossover");
+    configureControlLabel (crossoverLabel, "Crossover Freq");
+    configureControlLabel (crossoverEnableLabel, "Crossover");
 
     // --- Advanced ----------------------------------------------------------
     configureSectionLabel (advancedHeader, "ADVANCED");
@@ -436,7 +436,7 @@ KickLockAudioProcessorEditor::~KickLockAudioProcessorEditor()
 void KickLockAudioProcessorEditor::configureRotary (juce::Slider& slider)
 {
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 84, 20);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 78, 18);
     slider.setColour (juce::Slider::rotarySliderFillColourId, teal);
     slider.setColour (juce::Slider::rotarySliderOutlineColourId, border);
     slider.setColour (juce::Slider::thumbColourId, text);
@@ -666,7 +666,13 @@ void KickLockAudioProcessorEditor::timerCallback()
     refreshAnalyzeWorkflow();
     refreshCompareButtons();
 
-    repaint();
+    // Only the top-bar status texts (sidechain state, BPM, PDC) are drawn
+    // directly by this editor's paint() and change per tick; the scope,
+    // correlation meter, overlays, analyzer body and kick-punch meter are all
+    // child components that repaint themselves when their own state changes.
+    // Repainting the whole window at 30 Hz forced the scope to redraw on an
+    // irregular cadence and wasted CPU, so invalidate just the top bar here.
+    repaint (0, 0, getWidth(), kTopBarHeight);
 }
 
 void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
@@ -779,7 +785,7 @@ void KickLockAudioProcessorEditor::resized()
     controls.removeFromLeft (4);
     compareCopyButton.setBounds (controls.removeFromLeft (48).reduced (0, 2));
     controls.removeFromLeft (10);
-    analyzeButton.setBounds (controls.removeFromLeft (108).reduced (0, 2));
+    analyzeButton.setBounds (controls.removeFromLeft (156).reduced (0, 2));
     controls.removeFromLeft (6);
     applyFixButton.setBounds (controls.removeFromLeft (82).reduced (0, 2));
     controls.removeFromLeft (6);
@@ -827,8 +833,15 @@ void KickLockAudioProcessorEditor::resized()
     manualHeader.setBounds (manualArea.removeFromTop (20));
     manualArea.removeFromTop (2);
 
-    auto row1 = manualArea.removeFromTop (84);
-    const int knobW = juce::jlimit (74, 98, (manualArea.getWidth() - 32) / 5);
+    // Row 1 (rotaries) grows to fill whatever height the resizable bottom panel
+    // leaves after the toggle row, advanced row and their headers, so dragging
+    // the splitter taller enlarges the knobs instead of just adding dead space
+    // below them. The lower rows need a fixed ~94 px; the jlimit keeps the knobs
+    // comfortably large without starving those rows at small sizes.
+    constexpr int lowerRowsHeight = 94; // row2 + advanced header + advanced row + gaps
+    const int rowH1 = juce::jlimit (96, 150, manualArea.getHeight() - lowerRowsHeight);
+    auto row1 = manualArea.removeFromTop (rowH1);
+    const int knobW = juce::jlimit (84, 132, (manualArea.getWidth() - 32) / 5);
 
     auto delayCell = row1.removeFromLeft (knobW);
     delayLabel.setBounds (delayCell.removeFromTop (14));
