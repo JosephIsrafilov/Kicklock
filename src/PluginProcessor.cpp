@@ -482,217 +482,6 @@ namespace
     }
 }
 
-class KickLockAudioProcessor::PhaseAlignmentEngine
-{
-public:
-    void prepare (double newSampleRate, int samplesPerBlock, int newBaseDelaySamples)
-    {
-        sampleRate = newSampleRate;
-        baseDelaySamples = juce::jmax (0, newBaseDelaySamples);
-
-        const auto maxDelay = juce::jmax (1, baseDelaySamples * 2 + 4);
-        delayLine.setMaximumDelayInSamples (maxDelay);
-        delayLine.prepare ({ sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), 2 });
-        delayLine.reset();
-
-        smoothedDelay.reset (sampleRate, 0.020);
-        smoothedDelay.setCurrentAndTargetValue ((float) baseDelaySamples);
-
-        smoothedAllpassFreq.reset (sampleRate, 0.030);
-        smoothedAllpassFreq.setCurrentAndTargetValue (50.0f);
-
-        // Q is smoothed with the same 30 ms ramp as frequency so that a change
-        // to the rotator resonance recomputes coefficients gradually instead of
-        // snapping (the same reason frequency is smoothed).
-        smoothedAllpassQ.reset (sampleRate, 0.030);
-        smoothedAllpassQ.setCurrentAndTargetValue (defaultAllpassQ);
-
-        allpassWet.reset (sampleRate, 0.010);
-        allpassWet.setCurrentAndTargetValue (0.0f);
-
-        activeStages = 2;
-
-        initialiseFilters();
-        reset();
-    }
-
-    void reset()
-    {
-        delayLine.reset();
-
-        for (auto& channel : allpassFilters)
-            for (auto& stage : channel)
-                stage.reset();
-
-        smoothedDelay.setCurrentAndTargetValue ((float) baseDelaySamples);
-        smoothedAllpassFreq.setCurrentAndTargetValue (50.0f);
-        smoothedAllpassQ.setCurrentAndTargetValue (defaultAllpassQ);
-        allpassWet.setCurrentAndTargetValue (0.0f);
-        lastAppliedAllpassFreq = -1.0f;
-        lastAppliedAllpassQ = -1.0f;
-    }
-
-    void process (juce::AudioBuffer<float>& mainBuffer,
-                  float delayMs,
-                  bool polarityInvert,
-                  float allpassFreqHz,
-                  bool allpassEnabled,
-                  float allpassQ,
-                  int allpassStages)
-    {
-        const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
-        const auto numSamples = mainBuffer.getNumSamples();
-
-        // Match AllpassPhaseRotator's clamp so the audio path and the offline
-        // analyzer/verification agree on how many stages actually run.
-        const int clampedStages = juce::jlimit (2, 4, allpassStages);
-        if (clampedStages != activeStages)
-        {
-            // A stage-count change alters the cascade topology; the trailing
-            // stages' z-state is stale for the new routing, so clear it to avoid
-            // a click. Coefficients are re-pushed below via the epsilon guard.
-            activeStages = clampedStages;
-            for (auto& channel : allpassFilters)
-                for (auto& stage : channel)
-                    stage.reset();
-            lastAppliedAllpassFreq = -1.0f;
-            lastAppliedAllpassQ = -1.0f;
-        }
-
-        smoothedDelay.setTargetValue (delaySamplesForUserDelayMs (delayMs));
-        smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 500.0f, allpassFreqHz));
-        smoothedAllpassQ.setTargetValue (juce::jlimit (minAllpassQ, maxAllpassQ, allpassQ));
-        allpassWet.setTargetValue (allpassEnabled ? 1.0f : 0.0f);
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const auto delaySamples = juce::jlimit (0.0f,
-                                                   (float) delayLine.getMaximumDelayInSamples(),
-                                                   smoothedDelay.getNextValue());
-            const auto wet = allpassWet.getNextValue();
-            const bool runAllpass = wet > 1.0e-5f || allpassWet.isSmoothing();
-
-            if (runAllpass)
-                updateAllpassCoefficients (smoothedAllpassFreq.getNextValue(),
-                                           smoothedAllpassQ.getNextValue());
-
-            for (int ch = 0; ch < numChannels; ++ch)
-            {
-                delayLine.pushSample (ch, mainBuffer.getSample (ch, i));
-                auto sample = delayLine.popSample (ch, delaySamples);
-
-                if (polarityInvert)
-                    sample = -sample;
-
-                if (runAllpass)
-                {
-                    const auto dry = sample;
-                    auto rotated = sample;
-                    for (int s = 0; s < activeStages; ++s)
-                        rotated = allpassFilters[(size_t) ch][(size_t) s].processSample (rotated);
-                    sample = dry + wet * (rotated - dry);
-                }
-
-                mainBuffer.setSample (ch, i, sample);
-            }
-
-            for (int ch = numChannels; ch < 2; ++ch)
-            {
-                delayLine.pushSample (ch, 0.0f);
-                (void) delayLine.popSample (ch, delaySamples);
-            }
-        }
-    }
-
-    void processBypassed (juce::AudioBuffer<float>& mainBuffer)
-    {
-        const auto numChannels = juce::jmin (2, mainBuffer.getNumChannels());
-        const auto numSamples = mainBuffer.getNumSamples();
-        const auto fixedDelay = (float) baseDelaySamples;
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            for (int ch = 0; ch < numChannels; ++ch)
-            {
-                delayLine.pushSample (ch, mainBuffer.getSample (ch, i));
-                mainBuffer.setSample (ch, i, delayLine.popSample (ch, fixedDelay));
-            }
-
-            for (int ch = numChannels; ch < 2; ++ch)
-            {
-                delayLine.pushSample (ch, 0.0f);
-                (void) delayLine.popSample (ch, fixedDelay);
-            }
-        }
-    }
-
-private:
-    void initialiseFilters()
-    {
-        for (auto& channel : allpassFilters)
-        {
-            for (auto& stage : channel)
-            {
-                stage.coefficients = new juce::dsp::IIR::Coefficients<float> (1.0f, 0.0f, 1.0f, 0.0f);
-                stage.prepare ({ sampleRate, 1, 1 });
-            }
-        }
-
-        updateAllpassCoefficients (50.0f, defaultAllpassQ);
-    }
-
-    float delaySamplesForUserDelayMs (float delayMs) const noexcept
-    {
-        const auto clampedMs = juce::jlimit (-20.0f, 20.0f, delayMs);
-        return (float) baseDelaySamples + (float) (clampedMs * sampleRate / 1000.0);
-    }
-
-    // Recompute the shared allpass coefficients when either the (smoothed)
-    // frequency or Q moves past a small epsilon. Both guards matter: the runtime
-    // cascade must track the same freq/Q/stage settings the analyzer predicted
-    // and applyLatestFix() writes, or the audible result won't match the
-    // reported "after" match (the P1 bug). Coefficients are shared across all
-    // four stages of both channels; only the first activeStages are run.
-    void updateAllpassCoefficients (float frequencyHz, float q)
-    {
-        const auto limitedFreq = juce::jlimit (20.0f, 500.0f, frequencyHz);
-        const auto limitedQ = juce::jlimit (minAllpassQ, maxAllpassQ, q);
-
-        if (std::abs (limitedFreq - lastAppliedAllpassFreq) < 0.01f
-            && std::abs (limitedQ - lastAppliedAllpassQ) < 1.0e-4f)
-            return;
-
-        const auto coeffs = juce::dsp::IIR::ArrayCoefficients<float>::makeAllPass (sampleRate, limitedFreq, limitedQ);
-
-        for (auto& channel : allpassFilters)
-            for (auto& stage : channel)
-                *stage.coefficients = coeffs;
-
-        lastAppliedAllpassFreq = limitedFreq;
-        lastAppliedAllpassQ = limitedQ;
-    }
-
-    static constexpr int maxAllpassStages = 4;
-    static constexpr float defaultAllpassQ = 0.70710678f;
-    static constexpr float minAllpassQ = 0.1f;
-    static constexpr float maxAllpassQ = 10.0f;
-
-    double sampleRate = 44100.0;
-    int baseDelaySamples = 0;
-    int activeStages = 2;
-    float lastAppliedAllpassFreq = -1.0f;
-    float lastAppliedAllpassQ = -1.0f;
-
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> delayLine;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDelay;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassFreq;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassQ;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> allpassWet;
-
-    // Per-channel cascade of up to 4 allpass stages (matching AllpassPhaseRotator).
-    std::array<std::array<juce::dsp::IIR::Filter<float>, (size_t) maxAllpassStages>, 2> allpassFilters;
-};
-
 class KickLockAudioProcessor::AutoAlignEngine : public juce::Thread
 {
 public:
@@ -1183,12 +972,16 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     transientPunchMeter.prepare (sampleRate);
     transientPunchReferenceDb.store (0.0f, std::memory_order_release);
     transientPunchReferenceSet.store (false, std::memory_order_release);
-    // Held-activity trackers for the P3 status. ~500 ms hold so a steady loop
-    // never flickers to "no signal" in the gaps between kick transients. The
+    // Held-activity trackers for the P3 status. ~1.5 s hold so a steady loop
+    // never flickers to "no signal" in the gaps between kick transients — a
+    // 500 ms hold lapsed between hits at or below ~120 BPM (and on any
+    // half-time / sparse pattern), which is what made the Analyze button read
+    // "waiting for kick" and never enable. 1.5 s covers 4-on-floor down to
+    // ~40 BPM while still going inactive quickly once the transport stops. The
     // activation floor is low: it only needs to tell "playing" from "silent",
     // not judge phase-read quality (that is materialUsable below).
-    kickActivity.prepare (sampleRate, 500.0f, 3.0e-3f);
-    bassActivity.prepare (sampleRate, 500.0f, 3.0e-3f);
+    kickActivity.prepare (sampleRate, 1500.0f, 3.0e-3f);
+    bassActivity.prepare (sampleRate, 1500.0f, 3.0e-3f);
     kickActiveHeld.store (false);
     bassActiveHeld.store (false);
     analysisSignalUsable.store (false);
@@ -1206,9 +999,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     for (auto& bandMatch : liveBandMatchPercent)
         bandMatch.store (50.0f);
     latestAppliedBeforePercent.store (-1.0f);
-    correlationProductLpf = 0.0f;
-    correlationMainEnergyLpf = 0.0f;
-    correlationSideEnergyLpf = 0.0f;
     realtimeCorrelation.store (0.0f);
     uiSmoothingInitialized.store (false, std::memory_order_relaxed);
 
@@ -1359,20 +1149,6 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState (float mainMono, f
     hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
     transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetected);
 
-    constexpr float alpha = 0.005f;
-    correlationProductLpf += alpha * ((mainMono * meteredSidechainMono) - correlationProductLpf);
-    correlationMainEnergyLpf += alpha * ((mainMono * mainMono) - correlationMainEnergyLpf);
-    correlationSideEnergyLpf += alpha * ((meteredSidechainMono * meteredSidechainMono) - correlationSideEnergyLpf);
-
-    constexpr float noiseFloorEnergy = 1.0e-8f; // -80 dBFS squared
-    const auto denominator = std::sqrt (correlationMainEnergyLpf * correlationSideEnergyLpf);
-    const float signedCorrelation = (correlationMainEnergyLpf > noiseFloorEnergy
-                                     && correlationSideEnergyLpf > noiseFloorEnergy
-                                     && denominator > 1.0e-12f)
-        ? juce::jlimit (-1.0f, 1.0f, correlationProductLpf / denominator)
-        : 0.0f;
-    realtimeCorrelation.store (std::isfinite (signedCorrelation) ? signedCorrelation : 0.0f);
-
     // Decimate the scope feed only: the meter still sees every sample,
     // but the UI keeps a slower, longer history for the musical grid.
     if (++scopeDecimationCounter >= scopeDecimationFactor)
@@ -1399,6 +1175,15 @@ void KickLockAudioProcessor::processBlockBypassed (juce::AudioBuffer<float>& buf
     const int numSamples = mainBuffer.getNumSamples();
     double bassEnergySum = 0.0;
     double kickEnergySum = 0.0;
+
+    // Track the crossover cutoff here too: processObservationCapture() low-passes
+    // the raw bass/kick it hands to the Analyze capture with rawBassLowpass /
+    // rawKickLowpass, but only processBlock() ever set their cutoff. Under host
+    // bypass the Analyze capture was therefore filtered at whatever cutoff was
+    // last active (the JUCE default on a fresh instance), skewing the analysis.
+    const float crossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+    rawBassLowpass.setCutoffFrequency (crossoverHz);
+    rawKickLowpass.setCutoffFrequency (crossoverHz);
 
     processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples,
                                bassEnergySum, kickEnergySum);
@@ -2025,9 +1810,18 @@ bool KickLockAudioProcessor::beginBackgroundAnalyze()
     if (analyzeStateIsBusy (analyzeState.load (std::memory_order_acquire)))
         return false;
 
+    // Gate the click on the sidechain being routed and on there being enough
+    // captured material to analyse — NOT on the instantaneous held-activity
+    // flags. Those flags legitimately lapse in the gap between kick transients;
+    // re-checking them here (in addition to the editor already gating the
+    // button on them) only added a race where a click landing mid-gap was
+    // silently dropped with no feedback. computeAndPublishFix() itself reports
+    // "not enough material" cleanly if the captured window turns out unusable,
+    // and analysing what was just playing right after the transport stops is
+    // the correct behaviour.
+    const int minMaterialSamples = (int) (getSampleRate() * 0.5);
     if (! sidechainReferenceAvailable.load (std::memory_order_acquire)
-        || ! analysisSignalUsable.load (std::memory_order_acquire)
-        || ! analysisMaterialReady.load (std::memory_order_acquire))
+        || rawCapture.getFilledSamples() < minMaterialSamples)
     {
         return false;
     }

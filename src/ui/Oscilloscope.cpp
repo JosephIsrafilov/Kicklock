@@ -132,7 +132,11 @@ void Oscilloscope::timerCallback()
             else if (viewMode == ScopeViewMode::Triggered && ++freeRunTicks >= freeRunWatchdogTicks)
                 buildFreeRunTriggeredSnapshot();
 
-            updateTriggeredAutoGain();
+            // The auto-gain smooths toward its target every tick; repaint when
+            // it actually moves so the trace settles smoothly between hits
+            // (the timer otherwise only repaints on a new snapshot).
+            if (updateTriggeredAutoGain() && viewMode == ScopeViewMode::Triggered)
+                repaint();
         }
     }
 
@@ -160,13 +164,6 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     if (viewMode == ScopeViewMode::Triggered)
     {
-        float peak = 0.0f;
-        for (size_t i = 0; i < triggeredBass.size() && i < triggeredKick.size(); ++i)
-        {
-            peak = juce::jmax (peak, std::abs (triggeredBass[i]));
-            peak = juce::jmax (peak, std::abs (triggeredKick[i]));
-        }
-
         drawTriggeredMode (g, plotBounds, displayGain * ampZoom);
 
         g.setColour (juce::Colours::white.withAlpha (0.9f));
@@ -260,14 +257,24 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     }
 
     const int safePreRoll = juce::jlimit (0, n - 1, triggeredPreRollSamples);
-    const float triggerX = bounds.getX() + bounds.getWidth() * (float) safePreRoll / (float) (n - 1);
 
-    const float totalMs = samplesToMs (n, sampleRate);
-    const float preMs = samplesToMs (safePreRoll, sampleRate);
-    const float postMs = totalMs - preMs;
+    // Time zoom: select the visible slice of the captured window, keeping the
+    // trigger line at a fixed fractional x. The ms axis uses the snapshot's own
+    // sample rate (full-rate per-hit capture vs the decimated watchdog ring).
+    const auto range = computeTriggeredVisibleRange (n, safePreRoll, timeZoom);
+    const int first = range.first;
+    const int visible = juce::jmax (2, range.visible);
+    const int last = first + visible - 1;
+    const double rate = triggeredSnapshotRate;
+
+    const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
+    const float triggerX = bounds.getX() + (float) (safePreRoll - first) * sampleXStep;
+
+    const float preMs = samplesToMs (safePreRoll - first, rate);
+    const float postMs = samplesToMs (last - safePreRoll, rate);
 
     g.setColour (gridMinor);
-    for (float ms = -20.0f; ms <= 150.0f; ms += 10.0f)
+    for (float ms = -200.0f; ms <= 300.0f; ms += 10.0f)
     {
         const float x = triggerX + bounds.getWidth() * (ms / juce::jmax (1.0f, preMs + postMs));
         if (x >= bounds.getX() && x <= bounds.getRight())
@@ -277,17 +284,52 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     g.setColour (juce::Colours::white.withAlpha (0.65f));
     g.drawVerticalLine ((int) std::round (triggerX), bounds.getY(), bounds.getBottom());
 
+    // Faint decaying "ghost" strokes of the last few bass hits (oldest first,
+    // so the most recent sits brightest just under the live pair). The kick is
+    // frozen, so only past bass positions are worth persisting.
+    auto drawGhostBass = [&] (const std::vector<float>& bass, float alpha)
+    {
+        const int available = (int) bass.size();
+        const int ghostFirst = juce::jlimit (0, juce::jmax (0, available - 1), first);
+        const int ghostVisible = juce::jmin (visible, available - ghostFirst);
+        if (ghostVisible <= 1)
+            return;
+
+        juce::Path path;
+        const int pointCount = calculateTriggeredRenderPointCount (ghostVisible, (int) std::ceil (bounds.getWidth()));
+        path.preallocateSpace (pointCount * 3);
+
+        for (int point = 0; point < pointCount; ++point)
+        {
+            const int k = triggeredRenderSampleIndex (point, pointCount, ghostVisible);
+            const float x = bounds.getX() + (float) k * sampleXStep;
+            const float y = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) (ghostFirst + k)] * gain) * halfHeight;
+            if (point == 0)
+                path.startNewSubPath (x, y);
+            else
+                path.lineTo (x, y);
+        }
+
+        g.setColour (bassColour.withAlpha (alpha));
+        g.strokePath (path, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
+                                                  juce::PathStrokeType::rounded));
+    };
+
+    for (int gi = ghostCount - 1; gi >= 0; --gi)
+        drawGhostBass (ghostBass[(size_t) gi], 0.06f * (float) (ghostCount - gi));
+
     auto drawPair = [&] (const std::vector<float>& bass,
                          const std::vector<float>& kick,
                          float alpha)
     {
-        const int samples = juce::jmin ((int) bass.size(), (int) kick.size());
-        if (samples <= 1)
+        const int available = juce::jmin ((int) bass.size(), (int) kick.size());
+        const int pairFirst = juce::jlimit (0, juce::jmax (0, available - 1), first);
+        const int pairVisible = juce::jmin (visible, available - pairFirst);
+        if (pairVisible <= 1)
             return;
 
         juce::Path bassPath, kickPath, bassFill, kickFill;
-        const int pointCount = calculateTriggeredRenderPointCount (samples, (int) std::ceil (bounds.getWidth()));
-        const float sampleXStep = bounds.getWidth() / (float) (samples - 1);
+        const int pointCount = calculateTriggeredRenderPointCount (pairVisible, (int) std::ceil (bounds.getWidth()));
         bassPath.preallocateSpace (pointCount * 3);
         kickPath.preallocateSpace (pointCount * 3);
         bassFill.preallocateSpace (pointCount * 3);
@@ -295,10 +337,11 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
 
         for (int point = 0; point < pointCount; ++point)
         {
-            const int i = triggeredRenderSampleIndex (point, pointCount, samples);
-            const float x = bounds.getX() + (float) i * sampleXStep;
-            const float bassY = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) i] * gain) * halfHeight;
-            const float kickY = midY - juce::jlimit (-1.0f, 1.0f, kick[(size_t) i] * gain) * halfHeight;
+            const int k = triggeredRenderSampleIndex (point, pointCount, pairVisible);
+            const int idx = pairFirst + k;
+            const float x = bounds.getX() + (float) k * sampleXStep;
+            const float bassY = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) idx] * gain) * halfHeight;
+            const float kickY = midY - juce::jlimit (-1.0f, 1.0f, kick[(size_t) idx] * gain) * halfHeight;
 
             if (point == 0)
             {
@@ -317,8 +360,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
                 kickFill.lineTo (x, kickY);
             }
         }
-        
-        const float lastX = bounds.getX() + (float) (samples - 1) * sampleXStep;
+
+        const float lastX = bounds.getX() + (float) (pairVisible - 1) * sampleXStep;
         bassFill.lineTo (lastX, midY);
         bassFill.closeSubPath();
         kickFill.lineTo (lastX, midY);
@@ -329,7 +372,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         g.setColour (kickColour.withAlpha (alpha));
         g.strokePath (kickPath, juce::PathStrokeType (1.25f, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
-                                                      
+
         g.setColour (bassColour.withAlpha (juce::jmin (1.0f, alpha + 0.04f) * 0.18f));
         g.fillPath (bassFill);
         g.setColour (bassColour.withAlpha (juce::jmin (1.0f, alpha + 0.04f)));
@@ -861,6 +904,8 @@ bool Oscilloscope::refreshTriggeredSnapshot()
 
     triggeredPreRollSamples = hitCapture.getPreRollSamples();
     latestTriggeredSequence = copiedSequence;
+    // The per-hit window comes from the full-rate HitCaptureBuffer.
+    triggeredSnapshotRate = sampleRate;
     repaint();
     return true;
 }
@@ -886,6 +931,9 @@ void Oscilloscope::buildFreeRunTriggeredSnapshot()
     triggeredKick.swap (triggeredScratchKick);
     triggeredPreRollSamples = juce::jlimit (0, desiredSamples - 1,
                                             msToSamples (20.0f, sampleRate) / juce::jmax (1, decimationFactor));
+    // The fallback fills from the DECIMATED scope ring, so the ms axis must use
+    // the decimated rate or the labels/grid come out ~decimation× too dense.
+    triggeredSnapshotRate = sampleRate / (double) juce::jmax (1, decimationFactor);
     freeRunTicks = freeRunWatchdogTicks;
 
     // Free-run is a raw scrolling fallback, not a real trigger-aligned
@@ -895,7 +943,7 @@ void Oscilloscope::buildFreeRunTriggeredSnapshot()
     repaint();
 }
 
-void Oscilloscope::updateTriggeredAutoGain() noexcept
+bool Oscilloscope::updateTriggeredAutoGain() noexcept
 {
     float peak = 0.0f;
     for (size_t i = 0; i < triggeredBass.size() && i < triggeredKick.size(); ++i)
@@ -905,7 +953,12 @@ void Oscilloscope::updateTriggeredAutoGain() noexcept
     }
 
     const float targetGain = peak > 1.0e-4f ? juce::jlimit (1.0f, 40.0f, 0.88f / peak) : 1.0f;
-    displayGain += 0.18f * (targetGain - displayGain);
+    const float step = 0.18f * (targetGain - displayGain);
+    displayGain += step;
+
+    // Report whether the gain moved enough to be worth a repaint, so the timer
+    // can settle the trace between hits without repainting on every idle tick.
+    return std::abs (step) > 1.0e-3f;
 }
 
 void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)

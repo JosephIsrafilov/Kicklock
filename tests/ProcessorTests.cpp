@@ -1223,7 +1223,7 @@ private:
     }
 
     // Offline reference render: sign, fractional delay, then the allpass cascade,
-    // in the SAME order the runtime PhaseAlignmentEngine applies them.
+    // in the SAME order the runtime bass path (MultibandPhaseCore) applies them.
     static std::vector<float> offlineRender (const std::vector<float>& bass,
                                              int numSamples,
                                              const PhaseFixRenderSettings& settings)

@@ -156,7 +156,6 @@ public:
     void requestAutoAlign();
 
 private:
-    class PhaseAlignmentEngine;
     class AutoAlignEngine;
 
     struct ParameterSnapshot
@@ -316,9 +315,6 @@ private:
     std::atomic<float> latestBpm { 0.0f };
     std::atomic<float> bassSignalRms { 0.0f };
     std::atomic<float> kickSignalRms { 0.0f };
-    float correlationProductLpf = 0.0f;
-    float correlationMainEnergyLpf = 0.0f;
-    float correlationSideEnergyLpf = 0.0f;
 
     // Musically-aware activity detection. Instant per-block RMS flickers to
     // "no signal" in every gap between kick transients; these trackers HOLD an

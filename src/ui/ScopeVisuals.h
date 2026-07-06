@@ -86,6 +86,46 @@ inline int triggeredRenderSampleIndex (int pointIndex, int pointCount, int sampl
                        0, sampleCount - 1);
 }
 
+struct TriggeredVisibleRange
+{
+    int first = 0;
+    int visible = 0;
+};
+
+// Time-zoom for the triggered scope. Unlike the scrolling views, the triggered
+// view draws a fixed captured window rather than the rolling history, so its
+// zoom has to select a sub-slice of that window here. At zoom 1 the whole
+// captured window (n samples) is shown; higher zoom narrows to a slice centred
+// so the trigger sample keeps the SAME fractional x-position it had at 1x —
+// i.e. the wheel magnifies around the trigger line, not the buffer start.
+inline TriggeredVisibleRange computeTriggeredVisibleRange (int n, int preRoll, float timeZoom) noexcept
+{
+    TriggeredVisibleRange range;
+
+    if (n <= 2)
+    {
+        range.first = 0;
+        range.visible = std::max (0, n);
+        return range;
+    }
+
+    const float zoom = std::max (1.0f, timeZoom);
+    int visible = (int) std::lround ((double) n / (double) zoom);
+    visible = std::clamp (visible, 2, n);
+
+    const int clampedPreRoll = std::clamp (preRoll, 0, n - 1);
+    const double triggerFraction = (double) clampedPreRoll / (double) (n - 1);
+
+    // Keep the trigger at triggerFraction of the visible window's width, then
+    // clamp so the slice never runs off either end of the captured buffer.
+    int first = clampedPreRoll - (int) std::lround (triggerFraction * (double) (visible - 1));
+    first = std::clamp (first, 0, n - visible);
+
+    range.first = first;
+    range.visible = visible;
+    return range;
+}
+
 inline GridDivision gridDivisionFromChoiceIndex (int index) noexcept
 {
     switch (index)
