@@ -713,6 +713,8 @@ KickLockAudioProcessor::KickLockAudioProcessor()
     rotatorQParam = apvts.getRawParameterValue ("rotatorQ");
     rotatorStagesParam = apvts.getRawParameterValue ("rotatorStages");
     crossoverFreqParam = apvts.getRawParameterValue ("crossover_freq");
+    crossoverEnableParamRaw = apvts.getRawParameterValue ("crossover_enable");
+    pitchTrackParam = apvts.getRawParameterValue ("pitch_track");
 
     for (const auto* id : { "delay_ms", "delayMs",
                             "polarity_invert", "polarityInvert",
@@ -881,6 +883,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         "Allpass Enable",
         false));
 
+    // Dynamic pitch follow: when on (and the phase filter is enabled), the
+    // allpass centre frequency continuously follows the bass's detected
+    // fundamental instead of the static Phase Freq knob, so the phase
+    // correction stays on the note as the bassline moves.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "pitch_track", 1 },
+        "Pitch Follow",
+        false));
+
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "delayMs", 1 },
         "Legacy Audio Bass Delay",
@@ -1001,6 +1012,11 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     transientDetector.setTriggerRatio (3.0f);
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 20.0f, 150.0f);
+    // Bass fundamental tracker for the Pitch Follow mode; fed the low-passed
+    // bass in processObservationCapture. 25-300 Hz covers the playable bass
+    // range while rejecting octave-up garbage.
+    pitchTracker.prepare (sampleRate, 25.0f, 300.0f);
+    trackedBassHz.store (0.0f);
     transientPunchMeter.prepare (sampleRate);
     transientPunchReferenceDb.store (0.0f, std::memory_order_release);
     transientPunchReferenceSet.store (false, std::memory_order_release);
@@ -1111,6 +1127,7 @@ void KickLockAudioProcessor::processObservationCapture (const juce::AudioBuffer<
             const float kickLow = rawKickLowpass.processSample (0, kickMono);
 
             rawCapture.push (bassLow, kickLow);
+            pitchTracker.pushSample (bassLow);
 
             if (autoAlignEngine != nullptr)
                 autoAlignEngine->pushSample (bassLow, kickLow);
@@ -1377,17 +1394,37 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float delayMs = getEffectiveDelayMs();
     const bool polarityInvert = getEffectivePolarityInvert();
     const bool phaseFilterEnabled = getEffectivePhaseFilterEnabled();
-    const float allpassFreq = getEffectiveAllpassFreqHz();
+    float allpassFreq = getEffectiveAllpassFreqHz();
     const float allpassQ = rotatorQParam != nullptr ? rotatorQParam->load() : 0.70710678f;
     const int allpassStages = 2 + (rotatorStagesParam != nullptr
                                        ? juce::jlimit (0, 2, (int) std::lround (rotatorStagesParam->load()))
                                        : 0);
 
+    // Dynamic pitch follow: retarget the allpass centre to the tracked bass
+    // fundamental so the phase rotation stays on the note as the bassline
+    // moves. The DSP's own 30 ms frequency smoothing + throttled coefficient
+    // updates make the retune click-free. The Phase Freq PARAMETER is never
+    // written from here (audio thread must not push parameter changes); it
+    // simply stops being the source while follow is active, and the UI shows
+    // the live tracked value instead.
+    const float trackedHz = pitchTracker.getFrequencyHz();
+    trackedBassHz.store (trackedHz);
+
+    const bool pitchFollowActive = pitchTrackParam != nullptr
+                                && pitchTrackParam->load() > 0.5f
+                                && phaseFilterEnabled
+                                && trackedHz > 0.0f;
+    if (pitchFollowActive)
+        allpassFreq = juce::jlimit (20.0f, 500.0f, trackedHz);
+
     MultibandPhaseCore::Params coreParams;
-    
-    const auto* crossoverEnableParam = apvts.getParameter ("crossover_enable");
-    const bool crossoverEnable = crossoverEnableParam != nullptr ? crossoverEnableParam->getValue() > 0.5f : true;
-    
+
+    // Raw parameter pointer cached in the constructor — the previous
+    // apvts.getParameter() call here was a per-block string-keyed lookup on
+    // the audio thread.
+    const bool crossoverEnable = crossoverEnableParamRaw == nullptr
+                              || crossoverEnableParamRaw->load() > 0.5f;
+
     coreParams.crossoverEnabled = crossoverEnable;
     coreParams.crossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
     coreParams.userDelayMs = delayMs;

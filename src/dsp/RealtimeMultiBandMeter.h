@@ -32,6 +32,13 @@ public:
         sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
         windowSize = windowSizeSamples > 0 ? windowSizeSamples : 1;
 
+        // EMA coefficients hoisted out of pushSample: computing
+        // 1 - exp(-1/window) PER SAMPLE was a transcendental on the audio
+        // thread 48k+ times a second (x2 meter instances) for a value that
+        // only ever changes here.
+        emaAlpha = 1.0 - std::exp (-1.0 / (double) windowSize);
+        emaBeta = 1.0 - emaAlpha;
+
         for (int b = 0; b < numBands; ++b)
         {
             auto& band = bands[(size_t) b];
@@ -58,12 +65,12 @@ public:
         }
     }
 
-    // Audio thread. O(numBands), no allocation.
+    // Audio thread. O(numBands), no allocation, no transcendentals.
     void pushSample (float bass, float kick) noexcept
     {
         if (windowSize <= 0) return;
-        const double alpha = 1.0 - std::exp(-1.0 / (double)windowSize);
-        const double beta = 1.0 - alpha;
+        const double alpha = emaAlpha;
+        const double beta = emaBeta;
 
         for (auto& band : bands)
         {
@@ -260,5 +267,7 @@ private:
 
     double sampleRate = 44100.0;
     int windowSize = 1;
+    double emaAlpha = 0.0;
+    double emaBeta = 1.0;
     std::array<BandState, numBands> bands;
 };

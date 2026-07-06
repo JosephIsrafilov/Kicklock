@@ -16,6 +16,7 @@
 #include "AllpassPhaseRotator.h"
 #include "AlignmentAnalyzer.h"
 #include "TransientDetector.h"
+#include "PitchTracker.h"
 #include "MultiBandCorrelation.h"
 #include "RealtimeMultiBandMeter.h"
 #include "SignalActivityTracker.h"

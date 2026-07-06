@@ -19,6 +19,7 @@
 #include "dsp/AnalyzeState.h"
 #include "dsp/TransientDetector.h"
 #include "dsp/SignalActivityTracker.h"
+#include "dsp/PitchTracker.h"
 #include "dsp/PhaseFixEngine.h"
 #include "dsp/MultibandPhaseCore.h"
 #include "dsp/TransientPunchMeter.h"
@@ -94,6 +95,13 @@ public:
     // frozen kick reference; scopeTriggerCount increments once per transient.
     std::atomic<int> scopeSamplesSinceTrigger { 1 << 28 };
     std::atomic<int> scopeTriggerCount { 0 };
+
+    // Detected bass fundamental (Hz, 0 = not tracking), published every block
+    // for the UI readout. When the Pitch Follow parameter is on and the phase
+    // filter is enabled, the allpass centre frequency follows this value so
+    // the phase correction stays on the note as the bassline moves — the
+    // dynamic behaviour a static filter setup can't provide.
+    std::atomic<float> trackedBassHz { 0.0f };
 
     std::atomic<float> latestAnalyzedBeforePercent { 50.0f };
     std::atomic<float> latestAnalyzedAfterPercent { 50.0f };
@@ -188,6 +196,8 @@ private:
     std::atomic<float>* rotatorQParam = nullptr;
     std::atomic<float>* rotatorStagesParam = nullptr;
     std::atomic<float>* crossoverFreqParam = nullptr;
+    std::atomic<float>* crossoverEnableParamRaw = nullptr;
+    std::atomic<float>* pitchTrackParam = nullptr;
 
     void parameterChanged (const juce::String& parameterID, float newValue) override;
     void markRestoredParameterSources (bool hasDelayMs,
@@ -238,6 +248,7 @@ private:
     RawCaptureBuffer rawCapture;
     TransientDetector transientDetector;
     HitCaptureBuffer hitCapture;
+    PitchTracker pitchTracker;
     PhaseFixResult latestFixResult;
     std::vector<float> lastAnalyzedBassWindow;
     std::vector<float> lastAnalyzedKickWindow;
