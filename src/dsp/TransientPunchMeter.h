@@ -14,12 +14,12 @@
 // < 0  -> bass cancels it (the "hollow" low end).
 // ~ 0  -> neutral.
 //
-// Readings smooth hit-to-hit with a light EMA so the number doesn't jitter,
-// and go invalid after ~1.5 s of no kick so the UI can show a placeholder
-// rather than a stale value. Kick peaks below a small floor are ignored so
-// silence never produces garbage. If a new transient arrives before the
-// current window closes (very fast patterns) the open window is finalized
-// early so nothing double-counts.
+// Readings smooth hit-to-hit with a light EMA so the number doesn't jitter.
+// Once a reading exists it stays displayed rather than expiring between hits
+// (deliberate: a constantly appearing/disappearing number read as broken).
+// Kick peaks below a small floor are ignored so silence never produces
+// garbage. If a new transient arrives before the current window closes (very
+// fast patterns) the open window is finalized early so nothing double-counts.
 //
 // pushSample() runs on the audio thread and must not allocate, lock, or throw.
 // The published readings are stored in atomics so the message-thread getters
@@ -31,7 +31,6 @@ public:
     {
         const double sr = sampleRate > 0.0 ? sampleRate : 44100.0;
         windowSamples = juce::jmax (1, (int) std::round (sr * (double) windowMs / 1000.0));
-        validityTimeoutSamples = juce::jmax (1, (int) std::round (sr * 1.5));
         reset();
     }
 
@@ -43,7 +42,6 @@ public:
         sumPeak = 0.0f;
         smoothedPunchDb = 0.0f;
         hasReading = false;
-        samplesSinceValidHit = validityTimeoutSamples;
 
         publishedPunchDb.store (0.0f, std::memory_order_relaxed);
         publishedKickPeak.store (0.0f, std::memory_order_relaxed);
@@ -74,13 +72,6 @@ public:
             if (--windowRemaining <= 0)
                 finalizeWindow();
         }
-
-        // Age the last valid reading; previously this dropped validity after 1.5s.
-        // The user requested the reading to stay constantly without disappearing.
-        if (samplesSinceValidHit < validityTimeoutSamples)
-        {
-            ++samplesSinceValidHit;
-        }
     }
 
     // Smoothed signed punch in dB (positive = reinforcing, negative = cancelling).
@@ -108,7 +99,6 @@ private:
             smoothedPunchDb = punchDb;
 
         hasReading = true;
-        samplesSinceValidHit = 0;
 
         publishedPunchDb.store (smoothedPunchDb, std::memory_order_relaxed);
         publishedKickPeak.store (kickPeak, std::memory_order_relaxed);
@@ -121,7 +111,6 @@ private:
     static constexpr float eps = 1.0e-9f;
 
     int windowSamples = 1;
-    int validityTimeoutSamples = 1;
 
     bool windowActive = false;
     int windowRemaining = 0;
@@ -129,7 +118,6 @@ private:
     float sumPeak = 0.0f;
     float smoothedPunchDb = 0.0f;
     bool hasReading = false;
-    int samplesSinceValidHit = 1;
 
     std::atomic<float> publishedPunchDb { 0.0f };
     std::atomic<float> publishedKickPeak { 0.0f };

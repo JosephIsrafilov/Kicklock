@@ -482,6 +482,135 @@ public:
 static SidechainStatusTests sidechainStatusTestsInstance;
 
 //==============================================================================
+// Processor-level material readiness: the 30 s grace latch keeps Analyze armed
+// after the transport stops, and peak-based activity detection keeps a short
+// quiet kick tick detectable regardless of host buffer size.
+class MaterialReadinessTests : public juce::UnitTest
+{
+public:
+    MaterialReadinessTests() : juce::UnitTest ("MaterialReadiness", "P10") {}
+
+    void runTest() override
+    {
+        beginTest ("Enough-material latch survives transport stop, then expires");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            // ~1.2 s of a loud kick+bass loop banks enough material.
+            feedLoop (processor, 512, 1.2, 0.5f, 0.3f);
+            expect (processor.hasEnoughMaterialForAnalysis(),
+                    "material should be ready while the loop plays");
+
+            // 10 s of silence: activity holds lapse, but the banked material
+            // stays analyzable through the grace window.
+            feedSilence (processor, 512, 10.0);
+            expect (! processor.isKickActive(), "kick activity should lapse in silence");
+            expect (processor.hasEnoughMaterialForAnalysis(),
+                    "banked material must stay ready shortly after stop");
+
+            // Push well past the ~30 s grace window: readiness expires.
+            feedSilence (processor, 512, 30.0);
+            expect (! processor.hasEnoughMaterialForAnalysis(),
+                    "stale material should eventually disarm Analyze");
+        }
+
+        beginTest ("Quiet short kick ticks are detected at large host buffers");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
+            processor.prepareToPlay (kSampleRate, 4096);
+
+            // One 20-sample tick at 5e-3 peak per 4096-sample block:
+            // block RMS ~= 3.5e-4 (below the 1e-3 activation floor), but
+            // peak * 0.25 = 1.25e-3 crosses it — detection must not depend on
+            // the host buffer size diluting the RMS.
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             4096);
+            for (int block = 0; block < 12; ++block)
+            {
+                buffer.clear();
+                for (int i = 0; i < 20; ++i)
+                {
+                    const float tick = 5.0e-3f;
+                    buffer.setSample (0, i, tick);
+                    if (buffer.getNumChannels() > 1) buffer.setSample (1, i, tick);
+                    if (buffer.getNumChannels() > 2) buffer.setSample (2, i, tick);
+                    if (buffer.getNumChannels() > 3) buffer.setSample (3, i, tick);
+                }
+
+                juce::MidiBuffer midi;
+                processor.processBlock (buffer, midi);
+            }
+
+            expect (processor.isKickActive(),
+                    "quiet short ticks must register as kick activity at 4096-sample blocks");
+        }
+    }
+
+private:
+    static void feedLoop (KickLockAudioProcessor& processor, int blockSize,
+                          double seconds, float kickAmp, float bassAmp)
+    {
+        const int totalSamples = (int) (kSampleRate * seconds);
+        int samplePos = 0;
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int sample = samplePos + i;
+                // Kick: decaying 60 Hz burst every 400 ms; bass: steady 80 Hz.
+                const int sinceHit = sample % (int) (kSampleRate * 0.4);
+                const float kickEnv = (float) std::exp (-8.0 * (double) sinceHit / kSampleRate);
+                const float kick = kickAmp * kickEnv
+                                 * (float) std::sin (kTwoPi * 60.0 * (double) sinceHit / kSampleRate);
+                const float bass = bassAmp
+                                 * (float) std::sin (kTwoPi * 80.0 * (double) sample / kSampleRate);
+
+                buffer.setSample (0, i, bass);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, bass);
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, kick);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, kick);
+            }
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+            samplePos += numSamples;
+        }
+    }
+
+    static void feedSilence (KickLockAudioProcessor& processor, int blockSize, double seconds)
+    {
+        const int totalSamples = (int) (kSampleRate * seconds);
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+        }
+    }
+};
+
+static MaterialReadinessTests materialReadinessTestsInstance;
+
+//==============================================================================
 // P10.3 - Multi-band scoring: bands span 20 Hz-500 Hz, the low-end-weighted
 // score is not dominated by a high-frequency click, inverted bass scores low in
 // the low bands, and an aligned pair scores high.

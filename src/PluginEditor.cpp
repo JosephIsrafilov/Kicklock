@@ -411,6 +411,13 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
     pushScopeSettings();
 
+    // Seed the analysis result from the processor: closing and reopening the
+    // editor must not lose an already-computed fix (haveResult otherwise only
+    // becomes true on an AnalyzeState transition this instance observes, so
+    // Apply Fix would stay disabled until the user re-analyzed).
+    latestResult = audioProcessor.getLatestFixResult();
+    haveResult = latestResult.applyAllowed || latestResult.optionalApplyAllowed;
+
     resizeConstrainer.setSizeLimits (kMinEditorWidth, kMinEditorHeight,
                                      kMaxEditorWidth, kMaxEditorHeight);
     setConstrainer (&resizeConstrainer);
@@ -819,8 +826,10 @@ void KickLockAudioProcessorEditor::resized()
     bounds.removeFromTop (2);
 
     // --- Lower area: manual controls (left) + analyzer/live (right) -------
+    // The analyzer column scales gently with the window so it doesn't look
+    // orphaned at very wide sizes.
     auto lower = bounds;
-    auto right = lower.removeFromRight (300);
+    auto right = lower.removeFromRight (juce::jlimit (280, 360, getWidth() / 4));
     lower.removeFromRight (12);
     auto manualArea = lower;
 

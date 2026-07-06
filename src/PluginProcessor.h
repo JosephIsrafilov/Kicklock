@@ -263,22 +263,33 @@ private:
     // sidechain is routed, even while the corrective DSP itself is bypassed or
     // neutral. Neither allocates, locks, or throws; both are audio-thread-safe.
     //
+    // Per-block observation statistics accumulated by processObservationCapture
+    // for the activity trackers. Both energy (RMS) and PEAK are tracked: block
+    // RMS of a short kick tick dilutes with the host buffer size (~10 dB going
+    // 512 -> 4096 samples), so a peak term keeps activity detection
+    // buffer-size-independent.
+    struct BlockObservationStats
+    {
+        double bassEnergySum = 0.0;
+        double kickEnergySum = 0.0;
+        float bassPeak = 0.0f;
+        float kickPeak = 0.0f;
+    };
+
     // Captures raw (pre-processing) mono bass/kick, low-passed, into rawCapture
     // / the auto-align engine / the dry multi-band meter, and accumulates the
-    // block's bass/kick energy for the RMS-based activity trackers.
+    // block's bass/kick energy and peak for the activity trackers.
     void processObservationCapture (const juce::AudioBuffer<float>& mainBuffer,
                                     const juce::AudioBuffer<float>& sidechainBuffer,
                                     bool hasSidechain,
                                     int numSamples,
-                                    double& bassEnergySumOut,
-                                    double& kickEnergySumOut) noexcept;
+                                    BlockObservationStats& statsOut) noexcept;
 
     // Publishes block-level RMS and the musically-held kick/bass activity and
-    // analysis-readiness flags from the energies processObservationCapture()
+    // analysis-readiness flags from the stats processObservationCapture()
     // accumulated.
     void updateActivityAndSignalState (bool hasSidechain,
-                                       double bassEnergySum,
-                                       double kickEnergySum,
+                                       const BlockObservationStats& stats,
                                        int numSamples) noexcept;
 
     // Per-sample: aligns the sidechain to the current latency, runs the
@@ -325,6 +336,13 @@ private:
     // captured), which is the primary status source rather than instant RMS.
     SignalActivityTracker kickActivity;
     SignalActivityTracker bassActivity;
+
+    // Grace window keeping analysisMaterialReady true for a while after the
+    // held activity lapses (e.g. transport stopped), so the user can still
+    // click Analyze on the audio they just played. Counted down in samples on
+    // the audio thread; bounded so hours-old material eventually reads stale.
+    int materialReadyHoldSamples = 0;
+
     std::atomic<bool> kickActiveHeld { false };
     std::atomic<bool> bassActiveHeld { false };
     std::atomic<bool> analysisSignalUsable { false };

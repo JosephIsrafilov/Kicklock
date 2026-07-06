@@ -62,6 +62,53 @@ public:
                           4096);
         }
 
+        beginTest ("Min/max columns capture every peak and split ranges exactly");
+        {
+            // 12 samples into 3 columns of 4: each column reports its true
+            // extremes, including peaks a point-sampler would skip.
+            const float src[12] = { 0.0f, 0.9f, -0.2f, 0.1f,
+                                    -0.8f, 0.0f, 0.3f, 0.05f,
+                                    0.2f, -0.1f, 0.6f, -0.5f };
+            float lo[3] = {}, hi[3] = {};
+            buildMinMaxColumns (src, 0, 12, 3, lo, hi);
+
+            expectWithinAbsoluteError (hi[0], 0.9f, 1.0e-6f);
+            expectWithinAbsoluteError (lo[0], -0.2f, 1.0e-6f);
+            expectWithinAbsoluteError (hi[1], 0.3f, 1.0e-6f);
+            expectWithinAbsoluteError (lo[1], -0.8f, 1.0e-6f);
+            expectWithinAbsoluteError (hi[2], 0.6f, 1.0e-6f);
+            expectWithinAbsoluteError (lo[2], -0.5f, 1.0e-6f);
+
+            // The `first` offset shifts the analysed range.
+            float lo1[1] = {}, hi1[1] = {};
+            buildMinMaxColumns (src, 4, 4, 1, lo1, hi1);
+            expectWithinAbsoluteError (hi1[0], 0.3f, 1.0e-6f);
+            expectWithinAbsoluteError (lo1[0], -0.8f, 1.0e-6f);
+
+            // Band rendering only engages once several samples share a pixel.
+            expect (! scopeShouldRenderMinMaxBand (1000, 1000));
+            expect (! scopeShouldRenderMinMaxBand (3000, 1000));
+            expect (scopeShouldRenderMinMaxBand (3001, 1000));
+        }
+
+        beginTest ("Anchored zoom keeps the time under the cursor fixed");
+        {
+            // Point at fraction f from the left has age scroll + (1-f)*window.
+            // Halving a 100 ms window anchored at mid-view (f = 0.5) must add
+            // 25 ms of scroll to keep that point's age constant.
+            expectWithinAbsoluteError (scopeAnchoredZoomScrollMs (10.0f, 100.0f, 50.0f, 0.5f),
+                                       35.0f, 1.0e-5f);
+            // Right-edge anchor (live view) is a no-op.
+            expectWithinAbsoluteError (scopeAnchoredZoomScrollMs (10.0f, 100.0f, 50.0f, 1.0f),
+                                       10.0f, 1.0e-5f);
+            // Left-edge anchor absorbs the whole window change.
+            expectWithinAbsoluteError (scopeAnchoredZoomScrollMs (10.0f, 100.0f, 50.0f, 0.0f),
+                                       60.0f, 1.0e-5f);
+            // Zooming back out reverses the compensation symmetrically.
+            expectWithinAbsoluteError (scopeAnchoredZoomScrollMs (35.0f, 50.0f, 100.0f, 0.5f),
+                                       10.0f, 1.0e-5f);
+        }
+
         beginTest ("Triggered visible range zooms around the trigger line");
         {
             // Zoom 1 shows the whole captured window.
@@ -307,6 +354,10 @@ public:
             // Both present but too quiet -> SIGNAL TOO LOW.
             expectEquals ((int) classifyAnalysisMaterialStatus (true, true, true, false, false),
                           (int) AnalysisMaterialStatus::SignalTooLow);
+            // Banked material trumps momentary activity: once enough capture
+            // exists, the status is ReadyToAnalyze even mid-gap / after stop.
+            expectEquals ((int) classifyAnalysisMaterialStatus (true, false, false, false, true),
+                          (int) AnalysisMaterialStatus::ReadyToAnalyze);
             // Usable but still gathering -> CAPTURING (shown as SIDECHAIN ACTIVE).
             expectEquals ((int) classifyAnalysisMaterialStatus (true, true, true, true, false),
                           (int) AnalysisMaterialStatus::CapturingMaterial);

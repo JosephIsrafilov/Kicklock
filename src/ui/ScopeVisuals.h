@@ -92,6 +92,45 @@ struct TriggeredVisibleRange
     int visible = 0;
 };
 
+// Per-pixel-column peak envelope: for each of numColumns, the min and max
+// sample within that column's share of [first, first + count). Point-sampling
+// individual samples when several samples share one pixel misses the peaks
+// between picks, so the trace "boils" frame to frame; a min/max envelope is
+// stable and also caps the rendered path size at 2 * numColumns regardless of
+// zoom. O(count), no allocation (caller owns the output arrays).
+inline void buildMinMaxColumns (const float* src, int first, int count,
+                                int numColumns, float* minOut, float* maxOut) noexcept
+{
+    if (src == nullptr || minOut == nullptr || maxOut == nullptr
+        || count <= 0 || numColumns <= 0)
+        return;
+
+    for (int c = 0; c < numColumns; ++c)
+    {
+        const int s0 = first + (int) ((long long) c * count / numColumns);
+        const int s1 = first + (int) ((long long) (c + 1) * count / numColumns);
+
+        float lo = src[s0];
+        float hi = src[s0];
+        for (int i = s0 + 1; i < std::max (s0 + 1, s1); ++i)
+        {
+            lo = std::min (lo, src[i]);
+            hi = std::max (hi, src[i]);
+        }
+
+        minOut[c] = lo;
+        maxOut[c] = hi;
+    }
+}
+
+// Whether a trace should be rendered as a per-column min/max envelope band
+// instead of a point-sampled polyline: only once several samples genuinely
+// share each pixel — below that a polyline is smoother-looking and cheaper.
+inline bool scopeShouldRenderMinMaxBand (int visibleSamples, int pixelWidth) noexcept
+{
+    return pixelWidth > 0 && visibleSamples > pixelWidth * 3;
+}
+
 // Time-zoom for the triggered scope. Unlike the scrolling views, the triggered
 // view draws a fixed captured window rather than the rolling history, so its
 // zoom has to select a sub-slice of that window here. At zoom 1 the whole
@@ -308,6 +347,19 @@ inline const char* triggeredScopeEmptyText (KickReferenceState state) noexcept
 inline float scopeDragToScrollMs (float startScrollMs, float pixelsMoved, float msPerPixel) noexcept
 {
     return startScrollMs + pixelsMoved * msPerPixel;
+}
+
+// Cursor-anchored zoom: keep the time under a given horizontal fraction of the
+// view (0 = left edge, 1 = right/live edge) fixed while the visible window
+// changes size. displayScrollMs measures the right edge's age, so a point at
+// fraction f from the left has age scroll + (1 - f) * window; holding that age
+// constant across the window change gives the compensation below. Anchoring at
+// the right edge (f = 1) is a no-op, matching the live view's behaviour.
+inline float scopeAnchoredZoomScrollMs (float scrollMs, float oldWindowMs,
+                                        float newWindowMs, float anchorFraction) noexcept
+{
+    const float f = std::clamp (anchorFraction, 0.0f, 1.0f);
+    return scrollMs + (oldWindowMs - newWindowMs) * (1.0f - f);
 }
 
 // Clamp the display scroll to a valid history range: 0 ms is the latest/live

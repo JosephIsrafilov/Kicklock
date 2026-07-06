@@ -27,13 +27,20 @@ public:
 
     // Builds one allpass coefficients object and shares it across all 4
     // stages (only the first `activeStages` of which are actually used in
-    // processSample).
+    // processSample). Resets stage state afterwards: the default-constructed
+    // filters carry first-order coefficients, and the biquad assigned here
+    // changes the filter order, so the state buffer must be resized to match
+    // before processSample runs. All callers set parameters before streaming,
+    // so clearing state here never interrupts audio.
     void setParameters (float frequencyHz, float q)
     {
         auto coefficients = juce::dsp::IIR::Coefficients<float>::makeAllPass (sampleRate, frequencyHz, q);
 
         for (auto& stage : stages)
+        {
             stage.coefficients = coefficients;
+            stage.reset();
+        }
     }
 
     float processSample (float input)
