@@ -1182,3 +1182,95 @@ public:
 
 static CaptureBufferTests captureBufferTestsInstance;
 
+
+//==============================================================================
+// PitchTracker — the Pitch Follow ("dynamic phase") feature's fundamental
+// detector. Fed the low-passed bass; must lock fast, follow note changes,
+// reject harmonic ripple, and report "not tracking" in silence.
+class PitchTrackerTests : public juce::UnitTest
+{
+public:
+    PitchTrackerTests() : juce::UnitTest ("PitchTracker", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Locks onto a sustained 60 Hz fundamental within 1 Hz");
+        {
+            PitchTracker tracker;
+            tracker.prepare (kSampleRate);
+
+            feedSine (tracker, 60.0, 0.4f, 0.5);
+            expect (tracker.isTracking(), "should be tracking a loud sustained note");
+            expectWithinAbsoluteError (tracker.getFrequencyHz(), 60.0f, 1.0f);
+        }
+
+        beginTest ("Follows a note change (55 Hz -> 82.4 Hz)");
+        {
+            PitchTracker tracker;
+            tracker.prepare (kSampleRate);
+
+            feedSine (tracker, 55.0, 0.4f, 0.5);
+            expectWithinAbsoluteError (tracker.getFrequencyHz(), 55.0f, 1.0f);
+
+            feedSine (tracker, 82.4, 0.4f, 0.5);
+            expectWithinAbsoluteError (tracker.getFrequencyHz(), 82.4f, 1.5f);
+        }
+
+        beginTest ("Tolerates moderate second-harmonic content");
+        {
+            PitchTracker tracker;
+            tracker.prepare (kSampleRate);
+
+            const int total = (int) (kSampleRate * 0.5);
+            for (int i = 0; i < total; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                const float x = 0.4f * (float) std::sin (kTwoPi * 70.0 * t)
+                              + 0.12f * (float) std::sin (kTwoPi * 140.0 * t + 0.7);
+                tracker.pushSample (x);
+            }
+
+            expect (tracker.isTracking(), "harmonic ripple must not mute the tracker");
+            expectWithinAbsoluteError (tracker.getFrequencyHz(), 70.0f, 1.5f);
+        }
+
+        beginTest ("Silence stops tracking and reports 0");
+        {
+            PitchTracker tracker;
+            tracker.prepare (kSampleRate);
+
+            feedSine (tracker, 60.0, 0.4f, 0.5);
+            expect (tracker.isTracking());
+
+            const int silent = (int) (kSampleRate * 0.6);
+            for (int i = 0; i < silent; ++i)
+                tracker.pushSample (0.0f);
+
+            expect (! tracker.isTracking(), "sustained silence must report not-tracking");
+            expectWithinAbsoluteError (tracker.getFrequencyHz(), 0.0f, 1.0e-6f);
+        }
+
+        beginTest ("Noise floor alone never produces a frequency");
+        {
+            PitchTracker tracker;
+            tracker.prepare (kSampleRate);
+
+            juce::Random rng (42);
+            const int total = (int) (kSampleRate * 0.5);
+            for (int i = 0; i < total; ++i)
+                tracker.pushSample (2.0e-4f * (rng.nextFloat() * 2.0f - 1.0f));
+
+            expect (! tracker.isTracking(), "sub-floor noise must not track");
+        }
+    }
+
+private:
+    static void feedSine (PitchTracker& tracker, double freqHz, float amplitude, double seconds)
+    {
+        const int total = (int) (kSampleRate * seconds);
+        for (int i = 0; i < total; ++i)
+            tracker.pushSample (amplitude * (float) std::sin (kTwoPi * freqHz * (double) i / kSampleRate));
+    }
+};
+
+static PitchTrackerTests pitchTrackerTestsInstance;

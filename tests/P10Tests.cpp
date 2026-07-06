@@ -538,6 +538,22 @@ public:
             expectLessThan (processor.scopeSamplesSinceTrigger.load(), maxLagDecimated + 1);
         }
 
+        beginTest ("Bass fundamental is tracked through the processor");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            expectWithinAbsoluteError (processor.trackedBassHz.load(), 0.0f, 1.0e-6f);
+
+            // The 80 Hz bass in feedLoop passes the 150 Hz crossover low-pass
+            // that feeds the tracker; ~1.2 s is far more than the lock time.
+            feedLoop (processor, 512, 1.2, 0.5f, 0.3f);
+
+            expectWithinAbsoluteError (processor.trackedBassHz.load(), 80.0f, 2.0f);
+        }
+
         beginTest ("Quiet short kick ticks are detected at large host buffers");
         {
             KickLockAudioProcessor processor;

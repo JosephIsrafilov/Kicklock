@@ -312,6 +312,13 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                                   "without moving the whole signal in time.");
     addAndMakeVisible (phaseFilterButton);
 
+    pitchTrackButton.setButtonText ("Follow Bass");
+    pitchTrackButton.setTooltip ("Continuously tunes the Phase Filter to the bass's detected "
+                                 "fundamental, so the phase correction stays on the note as the "
+                                 "bassline moves. A static phase filter detunes the moment the "
+                                 "bass changes notes.");
+    addAndMakeVisible (pitchTrackButton);
+
     configureRotary (phaseFreqSlider);
     phaseFreqSlider.setTooltip ("Centre frequency of the phase filter (20 Hz - 500 Hz).");
     addAndMakeVisible (phaseFreqSlider);
@@ -336,6 +343,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureControlLabel (delayLabel, "Delay");
     configureControlLabel (polarityLabel, "Polarity");
     configureControlLabel (phaseFilterLabel, "Phase");
+    configureControlLabel (pitchTrackLabel, "Pitch");
     configureControlLabel (phaseFreqLabel, "Phase Freq");
     configureControlLabel (phaseQLabel, "Q");
     configureControlLabel (visualOffsetLabel, "Visual Offset");
@@ -390,6 +398,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     delayAttachment        = std::make_unique<SliderAttachment> (apvts, "delay_ms", delaySlider);
     polarityInvertAttachment = std::make_unique<ButtonAttachment> (apvts, "polarity_invert", polarityInvertButton);
     phaseFilterAttachment  = std::make_unique<ButtonAttachment> (apvts, "allpass_enable", phaseFilterButton);
+    pitchTrackAttachment   = std::make_unique<ButtonAttachment> (apvts, "pitch_track", pitchTrackButton);
     phaseFreqAttachment    = std::make_unique<SliderAttachment> (apvts, "allpass_freq", phaseFreqSlider);
     phaseQAttachment       = std::make_unique<SliderAttachment> (apvts, "rotatorQ", phaseQSlider);
     visualOffsetAttachment = std::make_unique<SliderAttachment> (apvts, "visualOffsetSamples", visualOffsetSlider);
@@ -665,6 +674,15 @@ void KickLockAudioProcessorEditor::timerCallback()
                               punchValid ? audioProcessor.getTransientSumPeak() : 0.0f);
     setRefButton.setButtonText (audioProcessor.isTransientPunchReferenceSet() ? "Clear Ref" : "Set Ref");
 
+    // Live pitch readout: while Follow Bass is on, the label shows the tracked
+    // fundamental the phase filter is currently tuned to. Label::setText
+    // no-ops (no repaint) when the text is unchanged.
+    const float trackedHz = audioProcessor.trackedBassHz.load();
+    pitchTrackLabel.setText (pitchTrackButton.getToggleState() && trackedHz > 0.0f
+                                 ? "Pitch " + juce::String ((int) std::lround (trackedHz)) + " Hz"
+                                 : "Pitch",
+                             juce::dontSendNotification);
+
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
     refreshCompareButtons();
@@ -884,9 +902,14 @@ void KickLockAudioProcessorEditor::resized()
     crossoverEnableButton.setBounds (crossEnCell.removeFromTop (24));
 
     row2.removeFromLeft (8);
-    auto phCell = row2.removeFromLeft (knobW * 2 + 8);
+    auto phCell = row2.removeFromLeft (knobW * 2);
     phaseFilterLabel.setBounds (phCell.removeFromTop (14));
     phaseFilterButton.setBounds (phCell.removeFromTop (24));
+
+    row2.removeFromLeft (8);
+    auto pitchCell = row2.removeFromLeft (knobW);
+    pitchTrackLabel.setBounds (pitchCell.removeFromTop (14));
+    pitchTrackButton.setBounds (pitchCell.removeFromTop (24));
 
     manualArea.removeFromTop (2);
     advancedHeader.setBounds (manualArea.removeFromTop (16));

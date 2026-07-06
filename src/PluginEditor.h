@@ -148,6 +148,7 @@ private:
     juce::Slider delaySlider;
     juce::ToggleButton polarityInvertButton;
     juce::ToggleButton phaseFilterButton;
+    juce::ToggleButton pitchTrackButton;
     juce::Slider phaseFreqSlider;
     juce::Slider phaseQSlider;
     juce::Slider visualOffsetSlider;
@@ -157,6 +158,7 @@ private:
     juce::Label delayLabel;
     juce::Label polarityLabel;
     juce::Label phaseFilterLabel;
+    juce::Label pitchTrackLabel;
     juce::Label phaseFreqLabel;
     juce::Label phaseQLabel;
     juce::Label visualOffsetLabel;
@@ -177,6 +179,7 @@ private:
     std::unique_ptr<SliderAttachment> delayAttachment;
     std::unique_ptr<ButtonAttachment> polarityInvertAttachment;
     std::unique_ptr<ButtonAttachment> phaseFilterAttachment;
+    std::unique_ptr<ButtonAttachment> pitchTrackAttachment;
     std::unique_ptr<SliderAttachment> phaseFreqAttachment;
     std::unique_ptr<SliderAttachment> phaseQAttachment;
     std::unique_ptr<SliderAttachment> visualOffsetAttachment;
