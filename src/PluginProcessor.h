@@ -92,14 +92,6 @@ public:
     // passes through 50%.
     std::atomic<bool> uiSmoothingInitialized { false };
 
-    // Trigger markers for the scope stream (ReVision-style live triggered
-    // sweep). scopeSamplesSinceTrigger counts DECIMATED scope samples pushed
-    // since the last detected kick transient, so the editor can locate the
-    // trigger inside its ring history and draw the live bass aligned to the
-    // frozen kick reference; scopeTriggerCount increments once per transient.
-    std::atomic<int> scopeSamplesSinceTrigger { 1 << 28 };
-    std::atomic<int> scopeTriggerCount { 0 };
-
     // Detected bass fundamental (Hz, 0 = not tracking), published every block
     // for the UI readout. When the Pitch Follow parameter is on and the phase
     // filter is enabled, the allpass centre frequency follows this value so
@@ -141,6 +133,9 @@ public:
     float getLatestBpm() const noexcept;
     float getBassSignalRms() const noexcept;
     float getKickSignalRms() const noexcept;
+    // Non-const: the editor's oscilloscope drains the capture's progressive
+    // sweep stream (a ReVision-style per-hit redraw feed) on the UI thread.
+    HitCaptureBuffer& getTriggeredHitCapture() noexcept { return hitCapture; }
     const HitCaptureBuffer& getTriggeredHitCapture() const noexcept { return hitCapture; }
 
     // Kick-punch transient integrity meter. Reads live from the processed
@@ -345,11 +340,6 @@ private:
     int scopeDecimationFactor = 1;
     int scopeDecimationCounter = 0;
 
-    // Audio-thread bookkeeping behind the published scope trigger markers: a
-    // transient detected between decimated pushes latches until the next push,
-    // which then resets the since-trigger counter.
-    bool scopePendingTrigger = false;
-    int scopeSinceTriggerCounter = 1 << 28;
     std::atomic<bool> sidechainReferenceAvailable { false };
     std::atomic<bool> tempoAvailable { false };
     std::atomic<float> latestBpm { 0.0f };

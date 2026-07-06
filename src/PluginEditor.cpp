@@ -413,8 +413,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
-    oscilloscope.setLiveTriggerCounters (&audioProcessor.scopeSamplesSinceTrigger,
-                                         &audioProcessor.scopeTriggerCount);
     pushScopeSettings();
 
     // Seed the analysis result from the processor: closing and reopening the

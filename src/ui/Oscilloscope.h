@@ -9,17 +9,20 @@
 #include "ScopeVisuals.h"
 
 // Timer-polled scope. Reads paired main/sidechain samples from a ScopeFifo
-// into two fixed-size ring buffers and draws them as two filled traces with a
-// grid and legend. Auto-gain scales quiet signals up so they fill the view,
-// a freeze toggle stops the scroll so the waveform can be inspected, and
-// time/amplitude zoom (sliders or mouse wheel) let you inspect alignment
-// closely.
+// into two fixed-size ring buffers for the scrolling views, and assembles the
+// HitCaptureBuffer's progressive sweep stream into a ReVision-style triggered
+// view: the kick reference is locked once and held static while every new hit
+// redraws the live bass left-to-right over it, with the previous hits fading
+// out underneath like phosphor. Auto-gain scales quiet signals up so they fill
+// the view, a freeze toggle stops the display so the waveform can be
+// inspected, and time/amplitude zoom (sliders or mouse wheel) let you inspect
+// alignment closely.
 class Oscilloscope : public juce::Component,
                      public juce::SettableTooltipClient,
                      private juce::Timer
 {
 public:
-    Oscilloscope (ScopeFifo& fifoToRead, const HitCaptureBuffer& hitCaptureToRead);
+    Oscilloscope (ScopeFifo& fifoToRead, HitCaptureBuffer& hitCaptureToRead);
     ~Oscilloscope() override;
 
     void paint (juce::Graphics&) override;
@@ -34,7 +37,7 @@ public:
     bool isFrozen() const noexcept              { return frozen; }
 
     // Effective display freeze: manual Freeze button OR a temporary mouse-hold
-    // inspection. Both the timer (whether it advances the history/snapshot) and
+    // inspection. Both the timer (whether it advances the history/sweep) and
     // paint gate on this, but they are stored separately so ending an
     // inspection hold never clears a manual freeze the user set on purpose.
     bool isDisplayFrozen() const noexcept { return scopeDisplayHeld (frozen, interactionHoldActive); }
@@ -70,23 +73,13 @@ public:
     void setTimebase (double newSampleRate, int newDecimationFactor) noexcept;
     void setDelayParameter (juce::RangedAudioParameter* parameter) noexcept { delayParameter = parameter; }
 
-    // Wires the processor's scope-stream trigger markers (decimated samples
-    // since the last kick transient + a trigger sequence counter) so Triggered
-    // mode can draw the LIVE bass aligned to the frozen kick reference — a
-    // ReVision-style progressive sweep that redraws on every hit instead of
-    // only when a completed capture window is published.
-    void setLiveTriggerCounters (const std::atomic<int>* samplesSinceTrigger,
-                                 const std::atomic<int>* triggerCount) noexcept
-    {
-        liveSamplesSinceTrigger = samplesSinceTrigger;
-        liveTriggerCount = triggerCount;
-    }
-
-    // The kick's captured window is locked to the first hit after each
-    // (re)lock point and held static, since its shape doesn't meaningfully
-    // change hit-to-hit — only the bass trace keeps refreshing on retrigger.
-    // Call this to force re-capturing a fresh kick reference on the next hit
-    // (e.g. if the kick sample/pattern changed and the old reference is stale).
+    // The kick's captured window is locked to the first completed hit after
+    // each (re)lock point and held static, since its shape doesn't
+    // meaningfully change hit-to-hit — only the bass sweep keeps redrawing on
+    // retrigger. Call this to force re-capturing a fresh kick reference on the
+    // next hit (e.g. if the kick sample/pattern changed and the old reference
+    // is stale). The current display stays on screen while the re-lock waits,
+    // so re-locking never blanks the view.
     void relockKickReference() noexcept;
     KickReferenceState getKickReferenceState() const noexcept { return kickReferenceState; }
 
@@ -129,10 +122,34 @@ private:
     void drawHoldIndicator (juce::Graphics&, juce::Rectangle<float>) const;
     void rebuildVisibleBuffers (int visible, bool applyVisualOffset = true,
                                 bool computeSmoothedEnvelope = true);
-    bool refreshTriggeredSnapshot();
-    void reserveTriggeredBuffers();
-    void buildFreeRunTriggeredSnapshot();
-    bool updateTriggeredAutoGain() noexcept;
+
+    // --- ReVision-style triggered sweep engine ------------------------------
+    // Drains the HitCaptureBuffer's progressive full-rate sweep stream into
+    // sweepBass/sweepKick. Each hit begins with a start marker: the previous
+    // sweep rotates into the ghost stack and the new one grows left-to-right,
+    // sample-accurately, so the trace never jumps or shimmers — the ONLY
+    // change on screen is the sweep head advancing. When `consume` is false
+    // (display held) the stream is still drained so it can't overflow, but the
+    // on-screen sweep stays untouched and resyncs at the next hit.
+    // Returns true when the displayed state changed (a repaint is due).
+    bool drainSweepStream (bool consume);
+    void beginNewSweep();
+    void finishSweep();
+    void ensureSweepBuffersSized();
+    void buildWaitingFallback();
+    bool glideTriggeredAutoGain() noexcept;
+
+    // One waveform lane of the triggered window: the visible slice
+    // [first, first + visible) clipped to the actually-filled prefix
+    // [0, fill). Strokes the trace and optionally lays a soft glow under it
+    // and a vertical-gradient fill beneath it toward the midline.
+    void drawTriggeredTrace (juce::Graphics&, juce::Rectangle<float> bounds,
+                             const float* data, int fill, int first, int visible,
+                             float sampleXStep, float midY, float halfHeight, float gain,
+                             juce::Colour colour, float strokeWidth,
+                             float fillAlpha, float glowAlpha) const;
+
+    bool refreshingSweepIsLive() const noexcept { return ticksSinceFifoRead < idleAfterTicks; }
     void setDelayFromDrag (const juce::MouseEvent&);
 
     // Temporary mouse-hold inspection. beginInspectionHold pauses the display
@@ -153,7 +170,7 @@ private:
     static constexpr int scratchSize   = 256;
 
     ScopeFifo& fifo;
-    const HitCaptureBuffer& hitCapture;
+    HitCaptureBuffer& hitCapture;
 
     // Ring buffers sized once in the ctor, never reallocated.
     std::vector<float> mainHistory;
@@ -195,24 +212,32 @@ private:
     std::array<float, historyLength> columnMinScratch {};
     std::array<float, historyLength> columnMaxScratch {};
 
-    static constexpr int ghostCount = 3;
-    std::vector<float> triggeredBass;
-    std::vector<float> triggeredKick;
-    std::vector<float> triggeredScratchBass;
-    std::vector<float> triggeredScratchKick;
-    std::array<std::vector<float>, ghostCount> ghostBass;
-    std::array<std::vector<float>, ghostCount> ghostKick;
-    int latestTriggeredSequence = 0;
-    int triggeredPreRollSamples = 0;
+    // --- Triggered sweep state (all full-rate, windowSamples long) ----------
+    static constexpr int ghostCount = 4;
+    std::vector<float> kickReference;                    // locked kick window
+    std::vector<float> sweepBass;                        // current/last bass sweep
+    std::vector<float> sweepKick;                        // kick riding with the sweep (pending reference)
+    std::array<std::vector<float>, ghostCount> ghostBass; // past sweeps, newest first
+    std::array<int, ghostCount> ghostFill {};
+    int sweepFill = 0;               // samples of the current sweep assembled so far
+    bool sweepDiscarding = true;     // waiting for the next hit's start marker
+    bool kickReferenceValid = false;
+    float sweepPeak = 0.0f;          // running |peak| of the current sweep (both lanes)
+    float kickReferencePeak = 0.0f;
+    float targetDisplayGain = 1.0f;  // retargeted per completed hit, with hysteresis
+    ScopePeakMarkers sweepMarkers;   // cached at sweep completion (full-window indices)
+    int sweepWindowSamples = 0;
+    int sweepPreRollSamples = 0;
     KickReferenceState kickReferenceState = KickReferenceState::NoReference;
-    int reservedTriggeredSamples = 0;
 
-    // Effective sample rate of whatever currently fills the triggered buffers.
-    // The real per-hit snapshot comes from the full-rate HitCaptureBuffer, but
-    // the watchdog fallback fills from the DECIMATED scope ring, so the ms axis
-    // has to know which source produced the data or the labels/grid come out
-    // ~decimation× wrong. Updated whenever the snapshot is (re)built.
-    double triggeredSnapshotRate = 44100.0;
+    // Pre-first-kick fallback: the decimated ring shown live so the triggered
+    // view is never blank while waiting for the first hit. Cleared for good
+    // once a real sweep starts. Its ms axis runs at the DECIMATED ring rate,
+    // not the full rate, hence the separate rate field.
+    std::vector<float> fallbackBass;
+    std::vector<float> fallbackKick;
+    int fallbackPreRoll = 0;
+    double fallbackRate = 44100.0;
 
     int freeRunTicks = 0;
     static constexpr int freeRunWatchdogTicks = 120;
@@ -224,11 +249,6 @@ private:
     static constexpr int idleAfterTicks = 30;   // ~0.5 s at 60 Hz
 
     juce::RangedAudioParameter* delayParameter = nullptr;
-
-    // Scope-stream trigger markers published by the processor (see
-    // setLiveTriggerCounters). Null until the editor wires them.
-    const std::atomic<int>* liveSamplesSinceTrigger = nullptr;
-    const std::atomic<int>* liveTriggerCount = nullptr;
 
     bool delayGestureActive = false;
     float dragStartX = 0.0f;
