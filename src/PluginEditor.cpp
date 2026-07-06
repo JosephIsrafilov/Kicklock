@@ -98,6 +98,44 @@ void TransientPunchComponent::paint (juce::Graphics& g)
     g.setColour (mutedText.withAlpha (0.9f));
     g.fillRect (juce::Rectangle<float> (centreX - 0.5f, barArea.getY() - 2.0f, 1.0f, barArea.getHeight() + 4.0f));
 
+    inner.removeFromTop (8);
+
+    // Transient health: kick-alone vs combined (kick+bass) low-end peak, in
+    // dBFS. These are the meter's per-hit finalized peaks, so the bars hold
+    // steady between hits instead of dancing per block.
+    g.setColour (mutedText);
+    g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
+    g.drawText ("TRANSIENT", inner.removeFromTop (12), juce::Justification::centredLeft);
+
+    constexpr float minDb = -48.0f;
+    auto toScale = [] (float linearPeak)
+    {
+        if (linearPeak <= 1.0e-5f)
+            return 0.0f;
+        const float db = 20.0f * std::log10 (linearPeak);
+        return juce::jlimit (0.0f, 1.0f, (db - minDb) / -minDb);
+    };
+
+    auto drawBar = [&g, &toScale] (juce::Rectangle<int> rowInt, const juce::String& label,
+                                   float peak, juce::Colour fill)
+    {
+        auto row = rowInt.toFloat();
+        auto labelArea = row.removeFromLeft (58.0f);
+        g.setColour (mutedText);
+        g.setFont (juce::Font (juce::FontOptions (10.5f)));
+        g.drawText (label, labelArea, juce::Justification::centredLeft);
+
+        g.setColour (border);
+        g.fillRoundedRectangle (row, 3.0f);
+        g.setColour (fill);
+        g.fillRoundedRectangle (row.withWidth (row.getWidth() * toScale (peak)), 3.0f);
+    };
+
+    inner.removeFromTop (2);
+    drawBar (inner.removeFromTop (10), "Kick", kickPeak, orange.withAlpha (0.75f));
+    inner.removeFromTop (3);
+    drawBar (inner.removeFromTop (10), "Kick+Bass", sumPeak, teal.withAlpha (0.85f));
+
     inner.removeFromTop (6);
     auto refRow = inner.removeFromTop (16);
     if (hasReference)
@@ -591,7 +629,9 @@ void KickLockAudioProcessorEditor::timerCallback()
     transientPunch.setValues (audioProcessor.getTransientPunchDb(),
                               punchValid,
                               audioProcessor.isTransientPunchReferenceSet(),
-                              audioProcessor.getTransientPunchReferenceDb());
+                              audioProcessor.getTransientPunchReferenceDb(),
+                              punchValid ? audioProcessor.getTransientKickPeak() : 0.0f,
+                              punchValid ? audioProcessor.getTransientSumPeak() : 0.0f);
     setRefButton.setButtonText (audioProcessor.isTransientPunchReferenceSet() ? "Clear Ref" : "Set Ref");
 
     refreshStatusStrings();
@@ -808,7 +848,7 @@ void KickLockAudioProcessorEditor::resized()
     phaseStagesCombo.setBounds (stagesCell.removeFromTop (22).reduced (0, 1));
 
     // Right column: kick-punch meter, its reference button, then analyzer.
-    transientPunch.setBounds (right.removeFromTop (118));
+    transientPunch.setBounds (right.removeFromTop (166));
     right.removeFromTop (6);
     setRefButton.setBounds (right.removeFromTop (26).reduced (0, 2));
     right.removeFromTop (8);

@@ -123,6 +123,11 @@ public:
     // change. The reference feature stores a snapshot for before/after A/B.
     float getTransientPunchDb() const noexcept { return transientPunchMeter.getPunchDb(); }
     bool isTransientPunchValid() const noexcept { return transientPunchMeter.isValid(); }
+    // Per-hit finalized low-end peaks: kick-alone vs combined (kick+bass). Real,
+    // stable inputs for the transient-health bars (updated once per kick, so
+    // they don't jitter per block).
+    float getTransientKickPeak() const noexcept { return transientPunchMeter.getKickPunch(); }
+    float getTransientSumPeak() const noexcept { return transientPunchMeter.getSumPunch(); }
     void setTransientPunchReference() noexcept
     {
         transientPunchReferenceDb.store (transientPunchMeter.getPunchDb(), std::memory_order_release);

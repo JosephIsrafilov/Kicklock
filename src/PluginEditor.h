@@ -16,12 +16,15 @@
 class TransientPunchComponent : public juce::Component
 {
 public:
-    void setValues (float punchDbIn, bool validIn, bool hasReferenceIn, float referenceDbIn) noexcept
+    void setValues (float punchDbIn, bool validIn, bool hasReferenceIn, float referenceDbIn,
+                    float kickPeakIn, float sumPeakIn) noexcept
     {
         punchDb = punchDbIn;
         valid = validIn;
         hasReference = hasReferenceIn;
         referenceDb = referenceDbIn;
+        kickPeak = kickPeakIn;
+        sumPeak = sumPeakIn;
         repaint();
     }
 
@@ -32,6 +35,8 @@ private:
     bool valid = false;
     bool hasReference = false;
     float referenceDb = 0.0f;
+    float kickPeak = 0.0f;
+    float sumPeak = 0.0f;
 };
 
 // Full visual + manual phase-alignment editor. The oscilloscope is the visual
