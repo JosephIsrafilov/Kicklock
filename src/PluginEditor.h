@@ -55,7 +55,6 @@ private:
     void refreshStatusStrings();
     void refreshAnalyzeWorkflow();
     void refreshCompareButtons();
-    void refreshTransientEqControlState();
     void pushScopeSettings();
 
     KickLockAudioProcessor& audioProcessor;
@@ -97,10 +96,6 @@ private:
     juce::Slider phaseQSlider;
     juce::Slider visualOffsetSlider;
     juce::Slider crossoverSlider;
-    juce::Slider dynEqAmountSlider;
-    juce::Slider dynEqFreqSlider;
-    juce::Slider dynEqQSlider;
-    juce::Slider dynEqBoostSlider;
 
     juce::Label delayLabel;
     juce::Label polarityLabel;
@@ -109,10 +104,6 @@ private:
     juce::Label phaseQLabel;
     juce::Label visualOffsetLabel;
     juce::Label crossoverLabel;
-    juce::Label dynEqAmountLabel;
-    juce::Label dynEqFreqLabel;
-    juce::Label dynEqQLabel;
-    juce::Label dynEqBoostLabel;
 
     // --- Advanced ----------------------------------------------------------
     juce::Label advancedHeader;
@@ -132,10 +123,6 @@ private:
     std::unique_ptr<SliderAttachment> phaseQAttachment;
     std::unique_ptr<SliderAttachment> visualOffsetAttachment;
     std::unique_ptr<SliderAttachment> crossoverAttachment;
-    std::unique_ptr<SliderAttachment> dynEqAmountAttachment;
-    std::unique_ptr<SliderAttachment> dynEqFreqAttachment;
-    std::unique_ptr<SliderAttachment> dynEqQAttachment;
-    std::unique_ptr<SliderAttachment> dynEqBoostAttachment;
     std::unique_ptr<ComboAttachment>  gridAttachment;
     std::unique_ptr<ComboAttachment>  viewAttachment;
     std::unique_ptr<ComboAttachment>  delayInterpAttachment;

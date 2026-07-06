@@ -187,66 +187,6 @@ public:
             expectGreaterThan (sumAbs, 1.0f);
         }
 
-        beginTest ("Transient envelope emits attack/hold/release window");
-        {
-            TransientEnvelopeFollower follower;
-            follower.prepare (1000.0);
-            follower.setWindow (2.0f, 4.0f, 20.0f);
-            follower.setTriggerRatio (2.0f);
-
-            float peak = 0.0f;
-            for (int i = 0; i < 80; ++i)
-                peak = juce::jmax (peak, follower.processSample (i == 10 ? 1.0f : 0.0f));
-
-            expectGreaterThan (peak, 0.8f);
-        }
-
-        beginTest ("Transient envelope opens on a decaying kick tone");
-        {
-            TransientEnvelopeFollower follower;
-            follower.prepare (kSampleRate);
-            follower.setWindow (2.0f, 18.0f, 80.0f);
-            follower.setTriggerRatio (1.6f);
-
-            float peak = 0.0f;
-            for (int i = 0; i < 4096; ++i)
-            {
-                const double t = (double) i / kSampleRate;
-                const float kick = (float) (std::sin (kTwoPi * 60.0 * t) * std::exp (-t * 35.0));
-                peak = juce::jmax (peak, follower.processSample (kick));
-            }
-
-            expectGreaterThan (peak, 0.8f);
-        }
-
-        beginTest ("Dynamic EQ can increase high-band peak when envelope is open");
-        {
-            DynamicHighBandEQ eq;
-            eq.prepare ({ kSampleRate, 512, 2 });
-            eq.setFrequency (3200.0f);
-            eq.setQ (4.0f);
-            eq.setMaxBoostDb (9.0f);
-
-            float pre = 0.0f, post = 0.0f;
-            for (int i = 0; i < 2048; ++i)
-            {
-                const float x = (float) (0.2 * std::sin (kTwoPi * 3200.0 * (double) i / kSampleRate));
-                pre = juce::jmax (pre, std::abs (x));
-                post = juce::jmax (post, std::abs (eq.processSample (0, x, 1.0f, 1.0f)));
-            }
-
-            expectGreaterThan (post, pre);
-        }
-
-        beginTest ("Transient health reports positive delta when post peak is larger");
-        {
-            TransientHealthMeter meter;
-            meter.prepare (kSampleRate, 80.0f);
-            meter.pushBlock (0.25f, 0.5f);
-            expectGreaterThan (meter.getPostPeak(), meter.getPrePeak());
-            expectGreaterThan (meter.getHealthDb(), 0.0f);
-        }
-
         beginTest ("Multiband core reports fixed 20 ms latency");
         {
             MultibandPhaseCore core;
@@ -257,12 +197,10 @@ public:
             main.clear();
             kick.clear();
             MultibandPhaseCore::Params params;
-            params.dynEqAmount = 0.0f;
             params.allpassEnabled = false;
             params.polarityInvert = false;
             core.process (main, kick, params, 512);
             expectEquals (core.reportLatencySamples(), (int) std::ceil (kSampleRate * 0.020));
-            expectWithinAbsoluteError (core.getHealthMeter().getHealthDb(), 0.0f, 0.01f);
         }
     }
 };

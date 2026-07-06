@@ -915,7 +915,6 @@ public:
     void runTest() override
     {
         runMatchesOfflineRotatorTest();
-        runRealizedMatchesPredictedTest();
     }
 
 private:
@@ -1037,38 +1036,6 @@ private:
         expectGreaterThan (peak, 0.05f);
     }
 
-    void runRealizedMatchesPredictedTest()
-    {
-        beginTest ("Transient EQ health rises on kick hits");
-
-        const int numSamples = 48000;
-        KickLockAudioProcessor processor;
-        processor.setRateAndBufferSizeDetails (kSampleRate, numSamples);
-        processor.enableAllBuses();
-        processor.prepareToPlay (kSampleRate, numSamples);
-        setFloatParam (processor, "dyneq_amount", 1.0f);
-        setFloatParam (processor, "dyneq_boost_db", 12.0f);
-        setFloatParam (processor, "dyneq_freq", 3200.0f);
-
-        juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
-                                                     processor.getTotalNumOutputChannels()),
-                                         numSamples);
-        buffer.clear();
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const double t = (double) i / kSampleRate;
-            const float bass = (float) (0.2 * std::sin (kTwoPi * 3200.0 * t));
-            const float kick = (i % 12000) < 32 ? 1.0f : 0.0f;
-            buffer.setSample (0, i, bass);
-            buffer.setSample (1, i, bass);
-            buffer.setSample (2, i, kick);
-            buffer.setSample (3, i, kick);
-        }
-
-        juce::MidiBuffer midi;
-        processor.processBlock (buffer, midi);
-        expectGreaterThan (processor.getTransientHealthDb(), 0.0f);
-    }
 };
 
 static KickLockPhaseFilterRuntimeTests kickLockPhaseFilterRuntimeTestsInstance;

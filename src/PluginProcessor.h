@@ -67,9 +67,6 @@ public:
     std::atomic<float> realtimeLowBandMatchPercent { 0.0f };
     std::atomic<float> dryInputMatchPercent { 0.0f };
     std::atomic<float> processedMatchPercent { 0.0f };
-    std::atomic<float> transientHealthDb { 0.0f };
-    std::atomic<float> transientPrePeak { 0.0f };
-    std::atomic<float> transientPostPeak { 0.0f };
 
     // Live multi-band phase-match read-outs (P5/P8), updated per block from the
     // realtime meter over the currently-monitored (dry or processed) low end.
@@ -119,9 +116,6 @@ public:
     float getBassSignalRms() const noexcept;
     float getKickSignalRms() const noexcept;
     const HitCaptureBuffer& getTriggeredHitCapture() const noexcept { return hitCapture; }
-    float getTransientPrePeak() const noexcept { return transientPrePeak.load(); }
-    float getTransientPostPeak() const noexcept { return transientPostPeak.load(); }
-    float getTransientHealthDb() const noexcept { return transientHealthDb.load(); }
 
     // Musically-aware activity flags for P3 status. These hold "active" for a
     // window after the last transient/level crossing, so a normal beat does not
@@ -159,14 +153,6 @@ private:
     std::atomic<float>* rotatorQParam = nullptr;
     std::atomic<float>* rotatorStagesParam = nullptr;
     std::atomic<float>* crossoverFreqParam = nullptr;
-    std::atomic<float>* dynEqFreqParam = nullptr;
-    std::atomic<float>* dynEqQParam = nullptr;
-    std::atomic<float>* dynEqBoostDbParam = nullptr;
-    std::atomic<float>* dynEqAmountParam = nullptr;
-    std::atomic<float>* dynEqAttackMsParam = nullptr;
-    std::atomic<float>* dynEqHoldMsParam = nullptr;
-    std::atomic<float>* dynEqReleaseMsParam = nullptr;
-    std::atomic<float>* dynEqTriggerRatioParam = nullptr;
 
     void parameterChanged (const juce::String& parameterID, float newValue) override;
     void markRestoredParameterSources (bool hasDelayMs,

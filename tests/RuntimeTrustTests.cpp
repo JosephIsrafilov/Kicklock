@@ -38,7 +38,6 @@ namespace
         params.allpassEnabled = true;
         params.allpassFreqHz = 70.0f;
         params.allpassQ = 1.0f;
-        params.dynEqAmount = 0.0f;
 
         for (int offset = 0; offset < totalSamples; offset += blockSize)
         {
@@ -150,8 +149,6 @@ namespace
             p->setValueNotifyingHost (p->convertTo0to1 (settings.phaseFilterQ));
         if (auto* p = processor.apvts.getParameter ("rotatorStages"))
             p->setValueNotifyingHost (p->convertTo0to1 ((float) juce::jlimit (0, 2, settings.phaseFilterStages - 2)));
-        if (auto* p = processor.apvts.getParameter ("dyneq_amount"))
-            p->setValueNotifyingHost (p->convertTo0to1 (0.0f));
     }
 
     std::vector<float> renderRuntime (const std::vector<float>& bass,

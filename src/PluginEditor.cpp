@@ -215,55 +215,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     crossoverSlider.setNumDecimalPlacesToDisplay (0);
     addAndMakeVisible (crossoverSlider);
 
-    configureRotary (dynEqAmountSlider);
-    dynEqAmountSlider.textFromValueFunction = [] (double value)
-    {
-        return juce::String ((int) std::round (value * 100.0)) + "%";
-    };
-    dynEqAmountSlider.valueFromTextFunction = [] (const juce::String& input)
-    {
-        const float value = input.retainCharacters ("0123456789.").getFloatValue();
-        return input.containsChar ('%') ? (double) (value / 100.0f) : (double) value;
-    };
-    dynEqAmountSlider.setTooltip ("Sidechain-triggered high-band transient EQ amount. At 0%, the EQ Freq, EQ Q and EQ Boost controls are intentionally inactive.");
-    addAndMakeVisible (dynEqAmountSlider);
-
-    configureRotary (dynEqFreqSlider);
-    dynEqFreqSlider.textFromValueFunction = [] (double value)
-    {
-        return juce::String ((int) std::round (value)) + " Hz";
-    };
-    dynEqFreqSlider.valueFromTextFunction = [] (const juce::String& input)
-    {
-        return (double) input.retainCharacters ("0123456789.").getFloatValue();
-    };
-    dynEqFreqSlider.setTooltip ("Frequency of the transient enhancer. Audible only when Transient Amt and EQ Boost are above zero.");
-    addAndMakeVisible (dynEqFreqSlider);
-
-    configureRotary (dynEqQSlider);
-    dynEqQSlider.textFromValueFunction = [] (double value)
-    {
-        return juce::String (value, 2);
-    };
-    dynEqQSlider.valueFromTextFunction = [] (const juce::String& input)
-    {
-        return (double) input.retainCharacters ("0123456789.").getFloatValue();
-    };
-    dynEqQSlider.setTooltip ("Sharpness of the transient enhancer band. Audible only when Transient Amt and EQ Boost are above zero.");
-    addAndMakeVisible (dynEqQSlider);
-
-    configureRotary (dynEqBoostSlider);
-    dynEqBoostSlider.textFromValueFunction = [] (double value)
-    {
-        return juce::String (value, 1) + " dB";
-    };
-    dynEqBoostSlider.valueFromTextFunction = [] (const juce::String& input)
-    {
-        return (double) input.retainCharacters ("0123456789.").getFloatValue();
-    };
-    dynEqBoostSlider.setTooltip ("Maximum transient boost. At 0 dB this section is intentionally silent even if Transient Amt is raised.");
-    addAndMakeVisible (dynEqBoostSlider);
-
     configureControlLabel (delayLabel, "Delay");
     configureControlLabel (polarityLabel, "Polarity");
     configureControlLabel (phaseFilterLabel, "Phase");
@@ -271,10 +222,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureControlLabel (phaseQLabel, "Q");
     configureControlLabel (visualOffsetLabel, "Visual Offset");
     configureControlLabel (crossoverLabel, "Crossover");
-    configureControlLabel (dynEqAmountLabel, "Trans Amt");
-    configureControlLabel (dynEqFreqLabel, "EQ Freq");
-    configureControlLabel (dynEqQLabel, "EQ Q");
-    configureControlLabel (dynEqBoostLabel, "EQ Boost");
 
     // --- Advanced ----------------------------------------------------------
     configureSectionLabel (advancedHeader, "ADVANCED");
@@ -313,10 +260,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     phaseQAttachment       = std::make_unique<SliderAttachment> (apvts, "rotatorQ", phaseQSlider);
     visualOffsetAttachment = std::make_unique<SliderAttachment> (apvts, "visualOffsetSamples", visualOffsetSlider);
     crossoverAttachment    = std::make_unique<SliderAttachment> (apvts, "crossover_freq", crossoverSlider);
-    dynEqAmountAttachment  = std::make_unique<SliderAttachment> (apvts, "dyneq_amount", dynEqAmountSlider);
-    dynEqFreqAttachment    = std::make_unique<SliderAttachment> (apvts, "dyneq_freq", dynEqFreqSlider);
-    dynEqQAttachment       = std::make_unique<SliderAttachment> (apvts, "dyneq_q", dynEqQSlider);
-    dynEqBoostAttachment   = std::make_unique<SliderAttachment> (apvts, "dyneq_boost_db", dynEqBoostSlider);
     gridAttachment         = std::make_unique<ComboAttachment> (apvts, "gridDivision", gridCombo);
     viewAttachment         = std::make_unique<ComboAttachment> (apvts, "scopeViewMode", viewCombo);
     delayInterpAttachment  = std::make_unique<ComboAttachment> (apvts, "delayInterp", delayInterpCombo);
@@ -555,28 +498,6 @@ void KickLockAudioProcessorEditor::refreshCompareButtons()
     helpButton.setColour (juce::TextButton::textColourOffId, helpOverlayVisible ? juce::Colours::black : text);
 }
 
-void KickLockAudioProcessorEditor::refreshTransientEqControlState()
-{
-    const auto* amountParam = audioProcessor.apvts.getRawParameterValue ("dyneq_amount");
-    const auto* boostParam = audioProcessor.apvts.getRawParameterValue ("dyneq_boost_db");
-    const float amount = amountParam != nullptr ? amountParam->load() : 0.0f;
-    const float boostDb = boostParam != nullptr ? boostParam->load() : 0.0f;
-
-    const bool active = amount > 0.001f && boostDb > 0.01f;
-    const float dependentAlpha = active ? 1.0f : 0.48f;
-    const auto dependentColour = active ? mutedText : mutedText.withAlpha (0.55f);
-
-    dynEqFreqSlider.setAlpha (dependentAlpha);
-    dynEqQSlider.setAlpha (dependentAlpha);
-    dynEqBoostSlider.setAlpha(amount > 0.001f ? 1.0f : 0.48f);
-    
-    dynEqFreqLabel.setColour (juce::Label::textColourId, dependentColour);
-    dynEqQLabel.setColour (juce::Label::textColourId, dependentColour);
-
-    dynEqAmountLabel.setColour (juce::Label::textColourId, active ? teal : amber);
-    dynEqBoostLabel.setColour (juce::Label::textColourId, amount > 0.001f ? mutedText : mutedText.withAlpha (0.55f));
-}
-
 void KickLockAudioProcessorEditor::timerCallback()
 {
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
@@ -584,14 +505,10 @@ void KickLockAudioProcessorEditor::timerCallback()
     oscilloscope.setTempoInfo (audioProcessor.getLatestBpm(),
                                audioProcessor.isTempoAvailable());
     pushScopeSettings();
-    transientHealth.setValues (audioProcessor.getTransientPrePeak(),
-                               audioProcessor.getTransientPostPeak(),
-                               audioProcessor.getTransientHealthDb());
 
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
     refreshCompareButtons();
-    refreshTransientEqControlState();
 
     repaint();
 }
@@ -771,27 +688,6 @@ void KickLockAudioProcessorEditor::resized()
     auto visualCell = row1.removeFromLeft (knobW);
     visualOffsetLabel.setBounds (visualCell.removeFromTop (14));
     visualOffsetSlider.setBounds (visualCell);
-
-    manualArea.removeFromTop (4);
-    auto transientRow = manualArea.removeFromTop (88);
-    auto dynAmtCell = transientRow.removeFromLeft (knobW);
-    dynEqAmountLabel.setBounds (dynAmtCell.removeFromTop (14));
-    dynEqAmountSlider.setBounds (dynAmtCell);
-
-    transientRow.removeFromLeft (8);
-    auto dynFreqCell = transientRow.removeFromLeft (knobW);
-    dynEqFreqLabel.setBounds (dynFreqCell.removeFromTop (14));
-    dynEqFreqSlider.setBounds (dynFreqCell);
-
-    transientRow.removeFromLeft (8);
-    auto dynQCell = transientRow.removeFromLeft (knobW);
-    dynEqQLabel.setBounds (dynQCell.removeFromTop (14));
-    dynEqQSlider.setBounds (dynQCell);
-
-    transientRow.removeFromLeft (8);
-    auto dynBoostCell = transientRow.removeFromLeft (knobW);
-    dynEqBoostLabel.setBounds (dynBoostCell.removeFromTop (14));
-    dynEqBoostSlider.setBounds (dynBoostCell);
 
     manualArea.removeFromTop (4);
     auto row2 = manualArea.removeFromTop (42);

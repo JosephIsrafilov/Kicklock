@@ -4,10 +4,7 @@
 #include <array>
 #include <cmath>
 
-#include "DynamicHighBandEQ.h"
 #include "LinkwitzRileyCrossover.h"
-#include "TransientEnvelopeFollower.h"
-#include "TransientHealthMeter.h"
 
 class MultibandPhaseCore
 {
@@ -21,14 +18,6 @@ public:
         float allpassFreqHz = 50.0f;
         float allpassQ = 0.7f;
         int allpassStages = 2;
-        float dynEqFreqHz = 3200.0f;
-        float dynEqQ = 4.0f;
-        float dynEqMaxBoostDb = 9.0f;
-        float dynEqAmount = 0.0f;
-        float dynEqAttackMs = 2.0f;
-        float dynEqHoldMs = 18.0f;
-        float dynEqReleaseMs = 80.0f;
-        float dynEqTriggerRatio = 1.6f;
     };
 
     void prepare (double sr, int maxBlock, int channels, float latencyBudgetMs = 20.0f)
@@ -44,15 +33,11 @@ public:
 
         const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) scratchSamples, (juce::uint32) numChannels };
         crossover.prepare (spec);
-        dynEq.prepare (spec);
 
         lowDelay.setMaximumDelayInSamples (reportedLatency * 2 + 8);
         lowDelay.prepare (spec);
         highDelay.setMaximumDelayInSamples (reportedLatency + 8);
         highDelay.prepare (spec);
-
-        envelope.prepare (sampleRate);
-        health.prepare (sampleRate, 180.0f);
 
         initialiseAllpassFilters();
 
@@ -62,21 +47,14 @@ public:
         smoothedAllpassFreq.reset (sampleRate, 0.030);
         smoothedAllpassQ.reset (sampleRate, 0.030);
         smoothedAllpassWet.reset (sampleRate, 0.010);
-        smoothedDynEqFreq.reset (sampleRate, 0.030);
-        smoothedDynEqQ.reset (sampleRate, 0.030);
-        smoothedDynEqBoost.reset (sampleRate, 0.030);
-        smoothedDynEqAmount.reset (sampleRate, 0.010);
         reset();
     }
 
     void reset()
     {
         crossover.reset();
-        dynEq.reset();
         lowDelay.reset();
         highDelay.reset();
-        envelope.reset();
-        health.reset();
 
         for (auto& channel : allpassFilters)
             for (auto& stage : channel)
@@ -88,16 +66,9 @@ public:
         smoothedAllpassFreq.setCurrentAndTargetValue (50.0f);
         smoothedAllpassQ.setCurrentAndTargetValue (0.7f);
         smoothedAllpassWet.setCurrentAndTargetValue (0.0f);
-        smoothedDynEqFreq.setCurrentAndTargetValue (3200.0f);
-        smoothedDynEqQ.setCurrentAndTargetValue (4.0f);
-        smoothedDynEqBoost.setCurrentAndTargetValue (9.0f);
-        smoothedDynEqAmount.setCurrentAndTargetValue (0.0f);
         activeStages = 2;
         lastAllpassFreq = -1.0f;
         lastAllpassQ = -1.0f;
-        lastEqFreq = -1.0f;
-        lastEqQ = -1.0f;
-        lastEqBoost = -1.0f;
         delayStateInitialised = false;
         delayCrossfadeActive = false;
         delayCrossfadePosition = 0;
@@ -109,13 +80,14 @@ public:
     }
 
     int reportLatencySamples() const noexcept { return reportedLatency; }
-    const TransientHealthMeter& getHealthMeter() const noexcept { return health; }
 
     void process (juce::AudioBuffer<float>& main,
                   const juce::AudioBuffer<float>& sidechain,
                   const Params& params,
                   int n)
     {
+        juce::ignoreUnused (sidechain);
+
         smoothedCrossover.setTargetValue (juce::jlimit (40.0f, 500.0f, params.crossoverHz));
 
         const float targetDelayOffset = juce::jlimit (-(float) reportedLatency, (float) reportedLatency,
@@ -144,12 +116,6 @@ public:
         smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 500.0f, params.allpassFreqHz));
         smoothedAllpassQ.setTargetValue (juce::jlimit (0.1f, 10.0f, params.allpassQ));
         desiredAllpassWet = params.allpassEnabled ? 1.0f : 0.0f;
-        smoothedDynEqFreq.setTargetValue (juce::jlimit (1000.0f, 8000.0f, params.dynEqFreqHz));
-        smoothedDynEqQ.setTargetValue (juce::jlimit (0.5f, 12.0f, params.dynEqQ));
-        smoothedDynEqBoost.setTargetValue (juce::jlimit (0.0f, 18.0f, params.dynEqMaxBoostDb));
-        smoothedDynEqAmount.setTargetValue (juce::jlimit (0.0f, 1.0f, params.dynEqAmount));
-        envelope.setWindow (params.dynEqAttackMs, params.dynEqHoldMs, params.dynEqReleaseMs);
-        envelope.setTriggerRatio (params.dynEqTriggerRatio);
 
         const int requestedStages = juce::jlimit (2, 4, params.allpassStages);
         if (requestedStages != activeStages && (! stageSwitchPending || requestedStages != pendingStages))
@@ -182,7 +148,7 @@ public:
         while (offset < n)
         {
             const int chunk = juce::jmin (scratchSamples, n - offset);
-            processChunk (main, sidechain, offset, chunk);
+            processChunk (main, offset, chunk);
             offset += chunk;
         }
     }
@@ -216,25 +182,6 @@ private:
         lastAllpassQ = limitedQ;
     }
 
-    void updateDynamicEq (float frequencyHz, float q, float boostDb)
-    {
-        if (std::abs (frequencyHz - lastEqFreq) >= 0.5f)
-        {
-            dynEq.setFrequency (frequencyHz);
-            lastEqFreq = frequencyHz;
-        }
-        if (std::abs (q - lastEqQ) >= 0.005f)
-        {
-            dynEq.setQ (q);
-            lastEqQ = q;
-        }
-        if (std::abs (boostDb - lastEqBoost) >= 0.02f)
-        {
-            dynEq.setMaxBoostDb (boostDb);
-            lastEqBoost = boostDb;
-        }
-    }
-
     void applyPendingStageCount()
     {
         activeStages = juce::jlimit (2, 4, pendingStages);
@@ -248,7 +195,6 @@ private:
     }
 
     void processChunk (juce::AudioBuffer<float>& main,
-                       const juce::AudioBuffer<float>& sidechain,
                        int offset,
                        int n)
     {
@@ -260,10 +206,6 @@ private:
             smoothedCrossover.skip (n - 1);
         crossover.setCrossoverFrequency (crossoverHz);
         crossover.split (inputBuffer, lowBuffer, highBuffer, n);
-
-        float prePeak = 0.0f;
-        float postPeak = 0.0f;
-        const int sideChannels = sidechain.getNumChannels();
 
         for (int i = 0; i < n; ++i)
         {
@@ -303,12 +245,7 @@ private:
             const float allpassWet = smoothedAllpassWet.getNextValue();
             const float allpassFreq = smoothedAllpassFreq.getNextValue();
             const float allpassQ = smoothedAllpassQ.getNextValue();
-            const float eqFreq = smoothedDynEqFreq.getNextValue();
-            const float eqQ = smoothedDynEqQ.getNextValue();
-            const float eqBoost = smoothedDynEqBoost.getNextValue();
-            const float eqAmount = smoothedDynEqAmount.getNextValue();
 
-            updateDynamicEq (eqFreq, eqQ, eqBoost);
             if (allpassWet > 1.0e-5f || smoothedAllpassWet.isSmoothing())
             {
                 if (allpassCoeffUpdateCountdown <= 0)
@@ -325,12 +262,6 @@ private:
             {
                 allpassCoeffUpdateCountdown = 0;
             }
-
-            float kickMono = 0.0f;
-            for (int ch = 0; ch < sideChannels; ++ch)
-                kickMono += sidechain.getSample (ch, offset + i);
-            kickMono = sideChannels > 0 ? kickMono / (float) sideChannels : 0.0f;
-            const float env = envelope.processSample (kickMono);
 
             for (int ch = 0; ch < numChannels; ++ch)
             {
@@ -366,16 +297,12 @@ private:
                     low = dry + allpassWet * (wet - dry);
                 }
 
-                const float highPre = highDelay.popSample (ch, (float) reportedLatency);
-                const float highPost = dynEq.processSample (ch, highPre, env, eqAmount);
-
-                prePeak = juce::jmax (prePeak, std::abs (highPre));
-                postPeak = juce::jmax (postPeak, std::abs (highPost));
-                main.setSample (ch, offset + i, low + highPost);
+                // The high band is a plain latency-compensated passthrough; only
+                // the low band carries the delay/polarity/phase-filter correction.
+                const float high = highDelay.popSample (ch, (float) reportedLatency);
+                main.setSample (ch, offset + i, low + high);
             }
         }
-
-        health.pushBlock (prePeak, postPeak);
     }
 
     static constexpr int maxAllpassStages = 4;
@@ -389,9 +316,6 @@ private:
     int activeStages = 2;
     float lastAllpassFreq = -1.0f;
     float lastAllpassQ = -1.0f;
-    float lastEqFreq = -1.0f;
-    float lastEqQ = -1.0f;
-    float lastEqBoost = -1.0f;
     bool delayStateInitialised = false;
     bool delayCrossfadeActive = false;
     float delayCrossfadeFrom = 0.0f;
@@ -407,9 +331,6 @@ private:
     juce::AudioBuffer<float> lowBuffer;
     juce::AudioBuffer<float> highBuffer;
     LinkwitzRileyCrossover crossover;
-    TransientEnvelopeFollower envelope;
-    DynamicHighBandEQ dynEq;
-    TransientHealthMeter health;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lowDelay;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> highDelay;
     std::array<std::array<juce::dsp::IIR::Filter<float>, (size_t) maxAllpassStages>, 2> allpassFilters;
@@ -420,8 +341,4 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassFreq;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassQ;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedAllpassWet;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDynEqFreq;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDynEqQ;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDynEqBoost;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDynEqAmount;
 };

@@ -910,14 +910,6 @@ KickLockAudioProcessor::KickLockAudioProcessor()
     rotatorQParam = apvts.getRawParameterValue ("rotatorQ");
     rotatorStagesParam = apvts.getRawParameterValue ("rotatorStages");
     crossoverFreqParam = apvts.getRawParameterValue ("crossover_freq");
-    dynEqFreqParam = apvts.getRawParameterValue ("dyneq_freq");
-    dynEqQParam = apvts.getRawParameterValue ("dyneq_q");
-    dynEqBoostDbParam = apvts.getRawParameterValue ("dyneq_boost_db");
-    dynEqAmountParam = apvts.getRawParameterValue ("dyneq_amount");
-    dynEqAttackMsParam = apvts.getRawParameterValue ("dyneq_attack_ms");
-    dynEqHoldMsParam = apvts.getRawParameterValue ("dyneq_hold_ms");
-    dynEqReleaseMsParam = apvts.getRawParameterValue ("dyneq_release_ms");
-    dynEqTriggerRatioParam = apvts.getRawParameterValue ("dyneq_trigger_ratio");
 
     for (const auto* id : { "delay_ms", "delayMs",
                             "polarity_invert", "polarityInvert",
@@ -1134,54 +1126,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::NormalisableRange<float> (40.0f, 500.0f, 0.0f, 0.35f),
         150.0f));
 
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_freq", 1 },
-        "Transient EQ Frequency",
-        juce::NormalisableRange<float> (1000.0f, 8000.0f, 0.0f, 0.45f),
-        3200.0f));
-
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_q", 1 },
-        "Transient EQ Q",
-        juce::NormalisableRange<float> (0.5f, 12.0f, 0.01f),
-        4.0f));
-
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_boost_db", 1 },
-        "Transient EQ Max Boost",
-        juce::NormalisableRange<float> (0.0f, 18.0f, 0.01f),
-        9.0f));
-
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_amount", 1 },
-        "Transient EQ Amount",
-        juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f),
-        0.0f));
-
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_attack_ms", 1 },
-        "Transient EQ Attack",
-        juce::NormalisableRange<float> (0.1f, 50.0f, 0.01f),
-        2.0f));
-
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_hold_ms", 1 },
-        "Transient EQ Hold",
-        juce::NormalisableRange<float> (0.0f, 250.0f, 0.01f),
-        18.0f));
-
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_release_ms", 1 },
-        "Transient EQ Release",
-        juce::NormalisableRange<float> (1.0f, 500.0f, 0.01f),
-        80.0f));
-
-    layout.add (std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { "dyneq_trigger_ratio", 1 },
-        "Transient EQ Trigger Ratio",
-        juce::NormalisableRange<float> (1.05f, 20.0f, 0.01f),
-        1.6f));
-
     return layout;
 }
 
@@ -1251,9 +1195,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     latestBpm.store (0.0f);
     bassSignalRms.store (0.0f);
     kickSignalRms.store (0.0f);
-    transientHealthDb.store (0.0f);
-    transientPrePeak.store (0.0f);
-    transientPostPeak.store (0.0f);
     for (auto& bandMatch : liveBandMatchPercent)
         bandMatch.store (50.0f);
     latestAppliedBeforePercent.store (-1.0f);
@@ -1346,12 +1287,9 @@ bool KickLockAudioProcessor::isBassProcessingNeutral() const noexcept
 {
     constexpr float epsilon = 1.0e-6f;
 
-    const float dynEqAmount = dynEqAmountParam != nullptr ? dynEqAmountParam->load() : 0.0f;
-
     return std::abs (getEffectiveDelayMs()) <= epsilon
         && ! getEffectivePolarityInvert()
-        && ! getEffectivePhaseFilterEnabled()
-        && dynEqAmount <= epsilon;
+        && ! getEffectivePhaseFilterEnabled();
 }
 
 void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -1412,14 +1350,6 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     coreParams.allpassFreqHz = allpassFreq;
     coreParams.allpassQ = allpassQ;
     coreParams.allpassStages = allpassStages;
-    coreParams.dynEqFreqHz = dynEqFreqParam != nullptr ? dynEqFreqParam->load() : 3200.0f;
-    coreParams.dynEqQ = dynEqQParam != nullptr ? dynEqQParam->load() : 4.0f;
-    coreParams.dynEqMaxBoostDb = dynEqBoostDbParam != nullptr ? dynEqBoostDbParam->load() : 9.0f;
-    coreParams.dynEqAmount = dynEqAmountParam != nullptr ? dynEqAmountParam->load() : 0.0f;
-    coreParams.dynEqAttackMs = dynEqAttackMsParam != nullptr ? dynEqAttackMsParam->load() : 2.0f;
-    coreParams.dynEqHoldMs = dynEqHoldMsParam != nullptr ? dynEqHoldMsParam->load() : 18.0f;
-    coreParams.dynEqReleaseMs = dynEqReleaseMsParam != nullptr ? dynEqReleaseMsParam->load() : 80.0f;
-    coreParams.dynEqTriggerRatio = dynEqTriggerRatioParam != nullptr ? dynEqTriggerRatioParam->load() : 1.6f;
 
     rawBassLowpass.setCutoffFrequency (coreParams.crossoverHz);
     rawKickLowpass.setCutoffFrequency (coreParams.crossoverHz);
@@ -1513,9 +1443,6 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const bool processingNeeded = ! neutral;
 
     multibandCore.process (mainBuffer, sidechainBuffer, coreParams, numSamples);
-    transientHealthDb.store (multibandCore.getHealthMeter().getHealthDb());
-    transientPrePeak.store (multibandCore.getHealthMeter().getPrePeak());
-    transientPostPeak.store (multibandCore.getHealthMeter().getPostPeak());
 
     // Feed the correlation meter and scope fifo with mono-summed
     // main/sidechain values. Skipped entirely when there's no sidechain,
