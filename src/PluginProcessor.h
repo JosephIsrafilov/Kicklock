@@ -87,6 +87,14 @@ public:
     // passes through 50%.
     std::atomic<bool> uiSmoothingInitialized { false };
 
+    // Trigger markers for the scope stream (ReVision-style live triggered
+    // sweep). scopeSamplesSinceTrigger counts DECIMATED scope samples pushed
+    // since the last detected kick transient, so the editor can locate the
+    // trigger inside its ring history and draw the live bass aligned to the
+    // frozen kick reference; scopeTriggerCount increments once per transient.
+    std::atomic<int> scopeSamplesSinceTrigger { 1 << 28 };
+    std::atomic<int> scopeTriggerCount { 0 };
+
     std::atomic<float> latestAnalyzedBeforePercent { 50.0f };
     std::atomic<float> latestAnalyzedAfterPercent { 50.0f };
     std::atomic<float> latestVerifiedAfterPercent { -1.0f };
@@ -321,6 +329,12 @@ private:
     // from the sample rate.
     int scopeDecimationFactor = 1;
     int scopeDecimationCounter = 0;
+
+    // Audio-thread bookkeeping behind the published scope trigger markers: a
+    // transient detected between decimated pushes latches until the next push,
+    // which then resets the since-trigger counter.
+    bool scopePendingTrigger = false;
+    int scopeSinceTriggerCounter = 1 << 28;
     std::atomic<bool> sidechainReferenceAvailable { false };
     std::atomic<bool> tempoAvailable { false };
     std::atomic<float> latestBpm { 0.0f };

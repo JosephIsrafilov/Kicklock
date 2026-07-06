@@ -844,6 +844,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
+    // Human-readable value text. The slider attachments install each
+    // parameter's text conversion as the slider's textFromValueFunction, so
+    // without these the knob textboxes (and host automation lanes) show raw
+    // float precision like "236.1548004".
+    const auto signedMsText = [] (float value, int) { return formatSignedDelayMs (value); };
+    const auto wholeHzText  = [] (float value, int) { return juce::String ((int) std::lround (value)) + " Hz"; };
+    const auto qText        = [] (float value, int) { return juce::String (value, 2); };
+
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "crossover_enable", 1 },
         "Crossover Enable",
@@ -853,7 +861,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::ParameterID { "delay_ms", 1 },
         "Delay",
         juce::NormalisableRange<float> (-20.0f, 20.0f, 0.01f),
-        0.0f));
+        0.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction (signedMsText)));
 
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "polarity_invert", 1 },
@@ -864,7 +873,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::ParameterID { "allpass_freq", 1 },
         "Allpass Frequency",
         juce::NormalisableRange<float> (20.0f, 500.0f, 0.0f, 0.35f),
-        50.0f));
+        50.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction (wholeHzText)));
 
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "allpass_enable", 1 },
@@ -875,7 +885,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::ParameterID { "delayMs", 1 },
         "Legacy Audio Bass Delay",
         juce::NormalisableRange<float> (-20.0f, 20.0f, 0.01f),
-        0.0f));
+        0.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction (signedMsText)));
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "delayInterp", 1 },
@@ -883,11 +894,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::StringArray { "Linear", "Allpass" },
         0));
 
+    // Default to a beat-synced 1/4 grid (ReVision-style): with host tempo the
+    // scrolling views then show one quarter-note per screen — a stationary,
+    // readable window for a looping pattern — instead of the entire multi-
+    // second history squashed into the width. "ms" mode remains selectable.
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "gridDivision", 1 },
         "Grid Division",
         juce::StringArray { "1/4", "1/8", "1/16", "1/32", "Bar", "ms" },
-        5));
+        0));
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "scopeViewMode", 1 },
@@ -914,13 +929,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::ParameterID { "rotatorFreq", 1 },
         "Legacy Rotator Frequency",
         juce::NormalisableRange<float> (20.0f, 500.0f, 0.0f, 0.35f),
-        50.0f));
+        50.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction (wholeHzText)));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "rotatorQ", 1 },
         "Rotator Q",
         juce::NormalisableRange<float> (0.1f, 10.0f, 0.01f),
-        0.7f));
+        0.7f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction (qText)));
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "rotatorStages", 1 },
@@ -932,7 +949,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
         juce::ParameterID { "crossover_freq", 1 },
         "Crossover Frequency",
         juce::NormalisableRange<float> (40.0f, 500.0f, 0.0f, 0.35f),
-        150.0f));
+        150.0f,
+        juce::AudioParameterFloatAttributes().withStringFromValueFunction (wholeHzText)));
 
     return layout;
 }
@@ -1007,6 +1025,10 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // without allocating on the audio thread.
     scopeDecimationFactor = juce::jmax (1, (int) (sampleRate / 2048.0));
     scopeDecimationCounter = 0;
+    scopePendingTrigger = false;
+    scopeSinceTriggerCounter = 1 << 28;
+    scopeSamplesSinceTrigger.store (1 << 28, std::memory_order_release);
+    scopeTriggerCount.store (0, std::memory_order_release);
     sidechainReferenceAvailable.store (false);
     tempoAvailable.store (false);
     latestBpm.store (0.0f);
@@ -1183,12 +1205,30 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState (float mainMono, f
     hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
     transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetected);
 
+    if (transientDetected)
+        scopePendingTrigger = true;
+
     // Decimate the scope feed only: the meter still sees every sample,
-    // but the UI keeps a slower, longer history for the musical grid.
+    // but the UI keeps a slower, longer history for the musical grid. Trigger
+    // markers ride along in decimated-sample units so the scope can locate the
+    // last kick inside its ring history for the live triggered sweep.
     if (++scopeDecimationCounter >= scopeDecimationFactor)
     {
         scopeDecimationCounter = 0;
         scopeFifo.pushSample (mainMono, meteredSidechainMono);
+
+        if (scopePendingTrigger)
+        {
+            scopePendingTrigger = false;
+            scopeSinceTriggerCounter = 0;
+            scopeTriggerCount.fetch_add (1, std::memory_order_relaxed);
+        }
+        else if (scopeSinceTriggerCounter < (1 << 28))
+        {
+            ++scopeSinceTriggerCounter;
+        }
+
+        scopeSamplesSinceTrigger.store (scopeSinceTriggerCounter, std::memory_order_release);
     }
 }
 

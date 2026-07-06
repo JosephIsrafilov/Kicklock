@@ -35,3 +35,7 @@ CLAUDE.md
 HANDOFF.md
 PLAN.md
 outputs/fable5_kicklock_prompt.md
+build/
+build_*/
+Builds/
+*.vst3/

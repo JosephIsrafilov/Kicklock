@@ -289,16 +289,15 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     // --- Manual alignment --------------------------------------------------
     configureSectionLabel (manualHeader, "MANUAL ALIGNMENT");
 
+    // Value text for the parameter-attached rotaries comes from each
+    // parameter's stringFromValue function (see createParameterLayout): the
+    // SliderAttachment installs the parameter's text conversion as the
+    // slider's textFromValueFunction, overwriting anything set here — which is
+    // why custom slider-side formatters and setNumDecimalPlacesToDisplay never
+    // took effect (textboxes showed raw "236.1548004" floats). Units live in
+    // the parameter strings, so no setTextValueSuffix on these either (the
+    // suffix is appended after textFromValueFunction and would double up).
     configureRotary (delaySlider);
-    delaySlider.setTextValueSuffix ({});
-    delaySlider.textFromValueFunction = [] (double value)
-    {
-        return formatSignedDelayMs ((float) value).toStdString();
-    };
-    delaySlider.valueFromTextFunction = [] (const juce::String& t)
-    {
-        return (double) t.retainCharacters ("-0123456789.").getFloatValue();
-    };
     delaySlider.setTooltip ("Moves the bass earlier or later relative to the kick. "
                             "Negative values advance bass using plugin delay compensation.");
     addAndMakeVisible (delaySlider);
@@ -314,13 +313,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     addAndMakeVisible (phaseFilterButton);
 
     configureRotary (phaseFreqSlider);
-    phaseFreqSlider.setTextValueSuffix (" Hz");
-    phaseFreqSlider.setNumDecimalPlacesToDisplay (0);
     phaseFreqSlider.setTooltip ("Centre frequency of the phase filter (20 Hz - 500 Hz).");
     addAndMakeVisible (phaseFreqSlider);
 
     configureRotary (phaseQSlider);
-    phaseQSlider.setNumDecimalPlacesToDisplay (2);
     phaseQSlider.setTooltip ("Q (sharpness) of the phase filter around its centre frequency.");
     addAndMakeVisible (phaseQSlider);
 
@@ -335,8 +331,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     addAndMakeVisible (crossoverEnableButton);
 
     configureRotary (crossoverSlider);
-    crossoverSlider.setTextValueSuffix (" Hz");
-    crossoverSlider.setNumDecimalPlacesToDisplay (0);
     addAndMakeVisible (crossoverSlider);
 
     configureControlLabel (delayLabel, "Delay");
@@ -409,6 +403,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
+    oscilloscope.setLiveTriggerCounters (&audioProcessor.scopeSamplesSinceTrigger,
+                                         &audioProcessor.scopeTriggerCount);
     pushScopeSettings();
 
     // Seed the analysis result from the processor: closing and reopening the

@@ -529,6 +529,29 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), phaseBefore, 1.0e-7f);
         }
 
+        beginTest ("Parameter value text is human-readable");
+        {
+            // The slider attachments install each parameter's text conversion
+            // as the slider's textFromValueFunction, so raw default formatting
+            // leaked "236.1548004"-style floats into the knob textboxes (and
+            // host automation lanes). Regression-pin the pretty formats.
+            KickLockAudioProcessor processor;
+            auto textFor = [&processor] (const char* id, float value) -> juce::String
+            {
+                auto* param = processor.apvts.getParameter (id);
+                if (param == nullptr)
+                    return "<missing param>";
+                return param->getText (param->convertTo0to1 (value), 24);
+            };
+
+            expectEquals (textFor ("crossover_freq", 236.1548004f), juce::String ("236 Hz"));
+            expectEquals (textFor ("allpass_freq", 50.0f), juce::String ("50 Hz"));
+            expectEquals (textFor ("rotatorQ", 0.7f), juce::String ("0.70"));
+            expectEquals (textFor ("delay_ms", 0.25f), juce::String ("+0.25 ms"));
+            expectEquals (textFor ("delay_ms", -3.5f), juce::String ("-3.50 ms"));
+            expectEquals (textFor ("delay_ms", 0.0f), juce::String ("0.00 ms"));
+        }
+
         beginTest ("Predicted after score stays close to verified after score");
         {
             KickLockAudioProcessor processor;

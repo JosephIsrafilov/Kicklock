@@ -127,9 +127,19 @@ void Oscilloscope::timerCallback()
 
         if (allowTriggeredRefresh)
         {
+            // The watchdog fallback only exists to show SOMETHING before the
+            // first kick is detected. It must (a) require samples to actually
+            // be flowing — a stopped transport is not "no trigger detected",
+            // and rebuilding a static image at 60 Hz just burns CPU — and
+            // (b) never engage once a kick reference is locked: falling back
+            // used to DESTROY the frozen reference whenever no hit arrived
+            // for 2 s (stop, breakdown), which is exactly the "kick doesn't
+            // stay fixed" bug.
             if (refreshTriggeredSnapshot())
                 freeRunTicks = 0;
-            else if (viewMode == ScopeViewMode::Triggered && ++freeRunTicks >= freeRunWatchdogTicks)
+            else if (viewMode == ScopeViewMode::Triggered && anyRead
+                     && kickReferenceState == KickReferenceState::NoReference
+                     && ++freeRunTicks >= freeRunWatchdogTicks)
                 buildFreeRunTriggeredSnapshot();
 
             // The auto-gain smooths toward its target every tick; repaint when
@@ -137,6 +147,16 @@ void Oscilloscope::timerCallback()
             // (the timer otherwise only repaints on a new snapshot).
             if (updateTriggeredAutoGain() && viewMode == ScopeViewMode::Triggered)
                 repaint();
+        }
+
+        // Live triggered sweep: while samples flow and a kick reference is
+        // locked, the bass overlay tracks the ring in real time, so keep
+        // repainting like the scrolling modes do.
+        if (viewMode == ScopeViewMode::Triggered && anyRead && ! isDisplayFrozen()
+            && kickReferenceState == KickReferenceState::Locked
+            && liveSamplesSinceTrigger != nullptr)
+        {
+            repaint();
         }
     }
 
@@ -191,7 +211,9 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     auto plotBounds = panelBounds.reduced (12.0f, 10.0f);
     plotBounds.removeFromTop (12.0f);
-    plotBounds.removeFromBottom (20.0f);
+    // The footer gets its own strip BELOW the plot so it can never collide
+    // with the grid's time labels drawn along the plot's bottom edge.
+    const auto footerStrip = plotBounds.removeFromBottom (20.0f);
 
     const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
                                                       timeZoom, gridDivision, tempoAvailable, bpm);
@@ -210,7 +232,10 @@ void Oscilloscope::paint (juce::Graphics& g)
         return;
     }
 
-    rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode));
+    // Free-run neither shades phase relation nor draws Δ markers, so skip the
+    // envelope-smoothing passes there — two O(n) loops per frame at 60 Hz.
+    rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode),
+                           viewMode != ScopeViewMode::FreeRun);
 
     float peak = 0.0f;
     for (int i = 0; i < visible; ++i)
@@ -239,7 +264,7 @@ void Oscilloscope::paint (juce::Graphics& g)
     if (viewMode != ScopeViewMode::FreeRun)
         drawTransientMarkers (g, plotBounds, visible);
 
-    drawScopeFooter (g, plotBounds, visible);
+    drawScopeFooter (g, footerStrip, visible);
 
     g.setColour (juce::Colours::white.withAlpha (0.9f));
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
@@ -445,6 +470,113 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     };
 
     drawPair (triggeredBass, triggeredKick, 0.95f);
+
+    // Live triggered sweep (ReVision behaviour): the kick reference stays
+    // frozen, and the CURRENT bass is drawn over it in real time, aligned to
+    // the most recent detected kick via the processor's scope-stream trigger
+    // markers. The sweep grows left-to-right as samples arrive after the hit
+    // (samples past "now" simply don't exist yet), so every hit visibly
+    // redraws the bass in place — per-hit checking without waiting for the
+    // capture window to complete.
+    if (liveSamplesSinceTrigger != nullptr
+        && kickReferenceState == KickReferenceState::Locked)
+    {
+        const int sinceTrigger = liveSamplesSinceTrigger->load (std::memory_order_acquire);
+        const double ringRate = sampleRate / (double) juce::jmax (1, decimationFactor);
+
+        if (sinceTrigger >= 0 && sinceTrigger < historyLength - 2 && ringRate > 0.0)
+        {
+            const int triggerRingIndex = writeIndex - 1 - sinceTrigger;
+            const int pointCount = calculateTriggeredRenderPointCount (visible, (int) std::ceil (bounds.getWidth()));
+
+            juce::Path live;
+            live.preallocateSpace (pointCount * 3);
+            bool started = false;
+
+            for (int point = 0; point < pointCount; ++point)
+            {
+                const int k = triggeredRenderSampleIndex (point, pointCount, visible);
+                const double tRelSeconds = (double) ((first + k) - safePreRoll) / rate;
+                const int ringOffset = (int) std::llround (tRelSeconds * ringRate);
+
+                // Stop at "now" — the sweep head. Also never reach further back
+                // than the ring actually holds.
+                if (ringOffset > sinceTrigger)
+                    break;
+                if (sinceTrigger - ringOffset >= historyLength - 2)
+                    continue;
+
+                const int idx = wrapHistoryIndex (triggerRingIndex + ringOffset, historyLength);
+                const float x = bounds.getX() + (float) k * sampleXStep;
+                const float y = midY - juce::jlimit (-1.0f, 1.0f,
+                                                     mainHistory[(size_t) idx] * gain) * halfHeight;
+
+                if (! started)
+                {
+                    live.startNewSubPath (x, y);
+                    started = true;
+                }
+                else
+                {
+                    live.lineTo (x, y);
+                }
+            }
+
+            if (started)
+            {
+                g.setColour (bassColour.brighter (0.35f).withAlpha (0.6f));
+                g.strokePath (live, juce::PathStrokeType (1.3f, juce::PathStrokeType::curved,
+                                                          juce::PathStrokeType::rounded));
+            }
+        }
+    }
+
+    // ReVision-style transient markers: triangles at the kick/bass envelope
+    // peaks plus a Δ ms readout, computed over the visible slice of the
+    // triggered snapshot at its own sample rate.
+    {
+        const int markerSpan = juce::jmin (visible, n - first);
+        const auto markers = findEnvelopePeakMarkers (triggeredBass.data() + first,
+                                                      triggeredKick.data() + first,
+                                                      markerSpan, rate);
+        if (markers.valid && markerSpan > 1)
+        {
+            const float kickX = bounds.getX() + (float) markers.kickPeakIndex * sampleXStep;
+            const float bassX = bounds.getX() + (float) markers.bassPeakIndex * sampleXStep;
+
+            g.setColour (kickColour.withAlpha (0.45f));
+            g.drawLine (kickX, bounds.getY(), kickX, bounds.getBottom(), 1.0f);
+            drawMarkerTriangle (g, kickX, bounds.getY() + 10.0f, kickColour);
+
+            g.setColour (bassColour.withAlpha (0.7f));
+            g.drawLine (bassX, bounds.getY(), bassX, bounds.getBottom(), 1.0f);
+            drawMarkerTriangle (g, bassX, bounds.getY() + 22.0f, bassColour);
+
+            g.setColour (juce::Colours::white.withAlpha (0.92f));
+            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+            const juce::String deltaLabel = juce::String::fromUTF8 ("\xCE\x94 ")
+                                          + (markers.deltaMs >= 0.0f ? "+" : "")
+                                          + juce::String (markers.deltaMs, 2) + " ms";
+            g.drawText (deltaLabel,
+                        juce::Rectangle<int> ((int) (bounds.getCentreX() - 60.0f),
+                                              (int) (bounds.getBottom() - 30.0f),
+                                              120, 14),
+                        juce::Justification::centred);
+        }
+    }
+
+    // Pre-first-kick fallback (raw scrolling input): say so, instead of
+    // letting it read as a broken triggered display.
+    if (kickReferenceState == KickReferenceState::NoReference)
+    {
+        g.setColour (labelColour.withAlpha (0.9f));
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.drawText ("waiting for kick — showing live input",
+                    juce::Rectangle<int> ((int) bounds.getX(), (int) (bounds.getY() + 2.0f),
+                                          (int) bounds.getWidth(), 14),
+                    juce::Justification::centred);
+    }
+
     drawWaveLegend (g, bounds);
 
     g.setColour (labelColour);
@@ -493,35 +625,45 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
 
     if (visibleWindowMs > 0.0f)
     {
-        for (float t = 0.0f; t <= visibleWindowMs + 0.0001f; t += majorStepMs)
+        // Anchor gridlines to the live ("now") edge so they sit on ROUND ages:
+        // the old loop anchored at the buffer's left edge, producing labels
+        // like "-2925 ms". A line's age = displayScrollMs + distance from the
+        // right edge; draw lines at every multiple of the major step.
+        const float scroll = displayScrollMs;
+        const int firstMajor = (int) std::ceil (scroll / majorStepMs - 1.0e-3f);
+
+        for (int m = firstMajor; ; ++m)
         {
-            const float x = bounds.getX() + bounds.getWidth() * (t / visibleWindowMs);
+            const float age = (float) m * majorStepMs;
+            const float x = bounds.getRight() - bounds.getWidth() * ((age - scroll) / visibleWindowMs);
+            if (x < bounds.getX() - 0.5f)
+                break;
 
             g.setColour (gridMajor);
             g.drawVerticalLine ((int) std::round (x), bounds.getY(), bounds.getBottom());
 
-            if (t + majorStepMs <= visibleWindowMs + 0.0001f)
+            for (int minor = 1; minor <= minorDivisions; ++minor)
             {
-                for (int minor = 1; minor <= minorDivisions; ++minor)
-                {
-                    const float minorT = t + majorStepMs * (float) minor / (float) (minorDivisions + 1);
-                    if (minorT >= visibleWindowMs)
-                        continue;
+                const float minorAge = age + majorStepMs * (float) minor / (float) (minorDivisions + 1);
+                const float minorX = bounds.getRight() - bounds.getWidth() * ((minorAge - scroll) / visibleWindowMs);
+                if (minorX < bounds.getX() - 0.5f || minorX > bounds.getRight() + 0.5f)
+                    continue;
 
-                    const float minorX = bounds.getX() + bounds.getWidth() * (minorT / visibleWindowMs);
-                    g.setColour (gridMinor);
-                    g.drawVerticalLine ((int) std::round (minorX), bounds.getY(), bounds.getBottom());
-                }
+                g.setColour (gridMinor);
+                g.drawVerticalLine ((int) std::round (minorX), bounds.getY(), bounds.getBottom());
             }
 
+            // Right-align each label so it ends at its line and never spills
+            // over the plot edge (or the footer strip below).
             g.setColour (labelColour);
             g.setFont (juce::Font (juce::FontOptions (10.0f)));
-            const float relativeMs = t - visibleWindowMs;
-            g.drawText (formatTimeLabel (relativeMs),
-                        juce::Rectangle<int> ((int) std::round (x + 3.0f),
-                                              (int) std::round (bounds.getBottom() - 16.0f),
-                                              56, 12),
-                        juce::Justification::centredLeft);
+            const int labelRight = (int) std::round (x - 3.0f);
+            if (labelRight - 56 >= (int) bounds.getX())
+                g.drawText (formatTimeLabel (-age),
+                            juce::Rectangle<int> (labelRight - 56,
+                                                  (int) std::round (bounds.getBottom() - 16.0f),
+                                                  56, 12),
+                            juce::Justification::centredRight);
         }
     }
 
@@ -558,13 +700,18 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
 {
     juce::Path whiteTrace;
 
-    const float xStep = bounds.getWidth() / (float) (visible - 1);
+    // Decimate to at most ~2 points per pixel: iterating every sample issued
+    // up to 8192 drawLine calls per frame at 60 Hz — a real CPU hog once the
+    // visible window exceeded the width.
+    const int pointCount = calculateTriggeredRenderPointCount (visible, (int) std::ceil (bounds.getWidth()));
+    const float xStep = bounds.getWidth() / (float) juce::jmax (1, pointCount - 1);
     const float halfHeight = bounds.getHeight() * 0.46f;
     const float lineWidth = juce::jmax (1.0f, xStep + 0.35f);
 
-    for (int i = 0; i < visible; ++i)
+    for (int point = 0; point < pointCount; ++point)
     {
-        const float x = bounds.getX() + (float) i * xStep;
+        const int i = triggeredRenderSampleIndex (point, pointCount, visible);
+        const float x = bounds.getX() + (float) point * xStep;
         const float bass = juce::jlimit (-1.0f, 1.0f, visibleMainBuffer[(size_t) i] * gain);
         const float kick = juce::jlimit (-1.0f, 1.0f, visibleSideBuffer[(size_t) i] * gain);
         const float combined = juce::jlimit (-1.0f, 1.0f,
@@ -588,7 +735,7 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
             g.drawLine (x, midY, x, overlapY, lineWidth);
         }
 
-        if (i == 0)
+        if (point == 0)
             whiteTrace.startNewSubPath (x, combinedY);
         else
             whiteTrace.lineTo (x, combinedY);
@@ -922,15 +1069,18 @@ void Oscilloscope::drawTransientMarkers (juce::Graphics& g,
 }
 
 void Oscilloscope::drawScopeFooter (juce::Graphics& g,
-                                    juce::Rectangle<float> bounds,
+                                    juce::Rectangle<float> footerStrip,
                                     int visible) const
 {
+    // Drawn in the dedicated strip BELOW the plot (see paint()), so it never
+    // collides with the grid's time labels inside the plot.
     const float visibleWindowMs = samplesToMs (visible * decimationFactor, sampleRate);
 
     g.setColour (labelColour);
     g.setFont (juce::Font (juce::FontOptions (10.5f)));
     juce::String footer = "Window "
                         + juce::String ((float) visibleWindowMs, visibleWindowMs >= 10.0 ? 1 : 2) + " ms"
+                + "  |  Zoom " + juce::String (timeZoom, 1) + "x"
                 + "  |  Amp " + juce::String (ampZoom, 1) + "x"
                 + "  |  PDC "
                 + (scopeModeAppliesVisualOffset (viewMode) ? juce::String (visualOffsetSamples) + " smp"
@@ -940,12 +1090,12 @@ void Oscilloscope::drawScopeFooter (juce::Graphics& g,
         footer << "  |  " << juce::String ((float) bpm, 1) << " BPM";
 
     g.drawText (footer,
-                juce::Rectangle<int> ((int) bounds.getX(), (int) (bounds.getBottom() - 14.0f),
-                                      320, 12),
+                footerStrip.toNearestInt().withTrimmedTop (4),
                 juce::Justification::centredLeft);
 }
 
-void Oscilloscope::rebuildVisibleBuffers (int visible, bool applyVisualOffset)
+void Oscilloscope::rebuildVisibleBuffers (int visible, bool applyVisualOffset,
+                                          bool computeSmoothedEnvelope)
 {
     // Free-run passes applyVisualOffset=false so it shows the raw incoming
     // signal; every other mode applies the display-only visual/PDC offset so
@@ -970,10 +1120,14 @@ void Oscilloscope::rebuildVisibleBuffers (int visible, bool applyVisualOffset)
     // so the green/red constructive-destructive shading and the peak markers
     // read from these smoothed traces instead. The smoothing window is derived
     // from the scope's effective sample rate so it tracks ~a low-frequency
-    // period rather than a fixed sample count.
-    const double scopeRate = sampleRate / (double) juce::jmax (1, decimationFactor);
-    smoothScopeEnvelope (visibleMainBuffer.data(), smoothedMainBuffer.data(), visible, scopeRate);
-    smoothScopeEnvelope (visibleSideBuffer.data(), smoothedSideBuffer.data(), visible, scopeRate);
+    // period rather than a fixed sample count. Callers whose mode uses neither
+    // (Free-run) skip the two O(n) passes.
+    if (computeSmoothedEnvelope)
+    {
+        const double scopeRate = sampleRate / (double) juce::jmax (1, decimationFactor);
+        smoothScopeEnvelope (visibleMainBuffer.data(), smoothedMainBuffer.data(), visible, scopeRate);
+        smoothScopeEnvelope (visibleSideBuffer.data(), smoothedSideBuffer.data(), visible, scopeRate);
+    }
 }
 
 void Oscilloscope::reserveTriggeredBuffers()
@@ -1092,10 +1246,10 @@ void Oscilloscope::buildFreeRunTriggeredSnapshot()
     triggeredSnapshotRate = sampleRate / (double) juce::jmax (1, decimationFactor);
     freeRunTicks = freeRunWatchdogTicks;
 
-    // Free-run is a raw scrolling fallback, not a real trigger-aligned
-    // capture — once real triggering resumes, treat the next hit as a fresh
-    // reference rather than keeping whatever was on screen during free-run.
-    kickReferenceState = KickReferenceState::NoReference;
+    // Note: the caller only enters this fallback while no kick reference is
+    // locked (kickReferenceState == NoReference), so the next real hit still
+    // captures a fresh reference — and a reference the user already has is
+    // never destroyed by a gap in the material.
     repaint();
 }
 
