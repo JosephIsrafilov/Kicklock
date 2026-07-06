@@ -517,25 +517,46 @@ public:
                     "stale material should eventually disarm Analyze");
         }
 
-        beginTest ("Scope trigger markers follow detected kicks");
+        beginTest ("Triggered sweep stream follows detected kicks");
         {
             KickLockAudioProcessor processor;
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
 
-            expectEquals (processor.scopeTriggerCount.load(), 0);
+            auto& capture = processor.getTriggeredHitCapture();
 
-            // ~1.2 s of a kick every 400 ms should register several triggers,
-            // and the since-trigger counter (in decimated scope samples) must
-            // point back at most one kick period.
+            // ~1.2 s of a kick every 400 ms should stream several sweep
+            // windows, each opening with a start marker. The stream must begin
+            // exactly at the first hit's window, and the first window must be
+            // complete and contiguous (exactly windowSamples between the first
+            // two markers) — that is what the UI's ReVision-style sweep
+            // assembles sample-by-sample.
             feedLoop (processor, 512, 1.2, 0.5f, 0.3f);
 
-            expectGreaterThan (processor.scopeTriggerCount.load(), 1);
+            std::vector<int> startOffsets;
+            long long total = 0;
+            std::array<float, 512> sweepBass {};
+            std::array<float, 512> sweepKick {};
+            std::array<unsigned char, 512> sweepFlags {};
 
-            const int decimation = processor.getScopeDecimationFactor();
-            const int maxLagDecimated = (int) (kSampleRate * 0.45) / juce::jmax (1, decimation);
-            expectLessThan (processor.scopeSamplesSinceTrigger.load(), maxLagDecimated + 1);
+            while (true)
+            {
+                const int n = capture.readSweepStream (sweepBass.data(), sweepKick.data(),
+                                                       sweepFlags.data(), 512);
+                if (n == 0)
+                    break;
+
+                for (int i = 0; i < n; ++i)
+                    if ((sweepFlags[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
+                        startOffsets.push_back ((int) total + i);
+
+                total += n;
+            }
+
+            expectGreaterThan ((int) startOffsets.size(), 1);
+            expectEquals (startOffsets[0], 0);
+            expectEquals (startOffsets[1] - startOffsets[0], capture.getWindowSamples());
         }
 
         beginTest ("Bass fundamental is tracked through the processor");

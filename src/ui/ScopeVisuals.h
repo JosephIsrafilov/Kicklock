@@ -339,6 +339,47 @@ inline const char* triggeredScopeEmptyText (KickReferenceState state) noexcept
                                                       : "WAITING FOR KICK";
 }
 
+// --- Triggered sweep display helpers (ReVision-style per-hit redraw) --------
+
+// Auto-gain target from a window peak: scale quiet material up so it fills
+// ~88% of the lane, clamped so silence doesn't explode and loud material
+// isn't attenuated below unity.
+inline float scopeAutoGainTargetFromPeak (float peak) noexcept
+{
+    return peak > 1.0e-4f ? std::clamp (0.88f / peak, 1.0f, 40.0f) : 1.0f;
+}
+
+// Retarget hysteresis: the triggered view only re-aims its auto-gain when the
+// new hit's ideal gain differs from the current target by a meaningful ratio.
+// Without this, every hit nudges the gain a percent or two and the whole
+// display "breathes" — which reads as flicker.
+inline bool scopeAutoGainShouldRetarget (float currentTarget, float candidateTarget,
+                                         float ratioTolerance = 0.12f) noexcept
+{
+    if (currentTarget <= 0.0f)
+        return true;
+
+    const float ratio = candidateTarget / currentTarget;
+    return ratio > 1.0f + ratioTolerance || ratio < 1.0f / (1.0f + ratioTolerance);
+}
+
+// Stroke alpha for past-sweep ghosts: index 0 is the most recent (brightest),
+// fading toward 0 for the oldest, like phosphor persistence.
+inline float scopeSweepGhostAlpha (int ghostIndex, int ghostCount) noexcept
+{
+    if (ghostCount <= 0 || ghostIndex < 0 || ghostIndex >= ghostCount)
+        return 0.0f;
+
+    return 0.30f * (float) (ghostCount - ghostIndex) / (float) ghostCount;
+}
+
+// An interrupted sweep is only worth keeping as a ghost if it progressed past
+// its pre-roll — i.e. it actually contains the hit, not just leading context.
+inline bool scopeSweepWorthKeepingAsGhost (int fillSamples, int preRollSamples) noexcept
+{
+    return fillSamples > std::max (0, preRollSamples);
+}
+
 // Deterministic pan: the displayed scroll is always derived from the
 // mouse-down anchor (startScrollMs + how far the mouse has moved since), never
 // integrated frame-to-frame, so a drag can't drift or jump. Grab-and-move

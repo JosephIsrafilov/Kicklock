@@ -327,6 +327,49 @@ public:
             expectEquals (triggeredRenderSampleIndex (0, 1600, 96000), 0);
             expectEquals (triggeredRenderSampleIndex (1599, 1600, 96000), 95999);
         }
+
+        beginTest ("Sweep auto-gain fills the lane from the hit peak, clamped");
+        {
+            expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.88f), 1.0f, 1.0e-5f);
+            expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.44f), 2.0f, 1.0e-5f);
+            expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (2.0f), 1.0f, 1.0e-5f);   // never attenuates below unity
+            expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.001f), 40.0f, 1.0e-4f); // clamped ceiling
+            expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.0f), 1.0f, 1.0e-6f);    // silence stays neutral
+        }
+
+        beginTest ("Sweep auto-gain only retargets past the hysteresis band");
+        {
+            // Near-equal hits must NOT nudge the gain (that reads as flicker);
+            // genuinely louder or quieter material must.
+            expect (! scopeAutoGainShouldRetarget (2.0f, 2.0f));
+            expect (! scopeAutoGainShouldRetarget (2.0f, 2.1f));
+            expect (! scopeAutoGainShouldRetarget (2.0f, 1.85f));
+            expect (scopeAutoGainShouldRetarget (2.0f, 2.5f));
+            expect (scopeAutoGainShouldRetarget (2.0f, 1.5f));
+            expect (scopeAutoGainShouldRetarget (0.0f, 1.0f));   // unseeded target always takes
+        }
+
+        beginTest ("Sweep ghosts fade monotonically, newest brightest");
+        {
+            const int count = 4;
+            for (int i = 1; i < count; ++i)
+                expect (scopeSweepGhostAlpha (i, count) < scopeSweepGhostAlpha (i - 1, count));
+
+            expect (scopeSweepGhostAlpha (0, count) > 0.0f);
+            expect (scopeSweepGhostAlpha (count - 1, count) > 0.0f);
+            expectWithinAbsoluteError (scopeSweepGhostAlpha (count, count), 0.0f, 1.0e-6f);
+            expectWithinAbsoluteError (scopeSweepGhostAlpha (-1, count), 0.0f, 1.0e-6f);
+            expectWithinAbsoluteError (scopeSweepGhostAlpha (0, 0), 0.0f, 1.0e-6f);
+        }
+
+        beginTest ("Interrupted sweeps only ghost once they reach the hit");
+        {
+            const int preRoll = 960;
+            expect (! scopeSweepWorthKeepingAsGhost (0, preRoll));
+            expect (! scopeSweepWorthKeepingAsGhost (preRoll, preRoll));
+            expect (scopeSweepWorthKeepingAsGhost (preRoll + 1, preRoll));
+            expect (scopeSweepWorthKeepingAsGhost (1, 0));
+        }
     }
 };
 

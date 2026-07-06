@@ -1041,10 +1041,6 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // without allocating on the audio thread.
     scopeDecimationFactor = juce::jmax (1, (int) (sampleRate / 2048.0));
     scopeDecimationCounter = 0;
-    scopePendingTrigger = false;
-    scopeSinceTriggerCounter = 1 << 28;
-    scopeSamplesSinceTrigger.store (1 << 28, std::memory_order_release);
-    scopeTriggerCount.store (0, std::memory_order_release);
     sidechainReferenceAvailable.store (false);
     tempoAvailable.store (false);
     latestBpm.store (0.0f);
@@ -1223,30 +1219,15 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState (float mainMono, f
     hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
     transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetected);
 
-    if (transientDetected)
-        scopePendingTrigger = true;
-
-    // Decimate the scope feed only: the meter still sees every sample,
-    // but the UI keeps a slower, longer history for the musical grid. Trigger
-    // markers ride along in decimated-sample units so the scope can locate the
-    // last kick inside its ring history for the live triggered sweep.
+    // Decimate the scope feed only: the meter still sees every sample, but the
+    // UI keeps a slower, longer history for the musical grid. The triggered
+    // view no longer needs trigger markers here — it assembles the
+    // HitCaptureBuffer's full-rate progressive sweep stream instead, which is
+    // sample-accurate by construction.
     if (++scopeDecimationCounter >= scopeDecimationFactor)
     {
         scopeDecimationCounter = 0;
         scopeFifo.pushSample (mainMono, meteredSidechainMono);
-
-        if (scopePendingTrigger)
-        {
-            scopePendingTrigger = false;
-            scopeSinceTriggerCounter = 0;
-            scopeTriggerCount.fetch_add (1, std::memory_order_relaxed);
-        }
-        else if (scopeSinceTriggerCounter < (1 << 28))
-        {
-            ++scopeSinceTriggerCounter;
-        }
-
-        scopeSamplesSinceTrigger.store (scopeSinceTriggerCounter, std::memory_order_release);
     }
 }
 

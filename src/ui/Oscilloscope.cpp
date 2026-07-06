@@ -49,7 +49,7 @@ namespace
     }
 }
 
-Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, const HitCaptureBuffer& hitCaptureToRead)
+Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, HitCaptureBuffer& hitCaptureToRead)
     : fifo (fifoToRead),
       hitCapture (hitCaptureToRead),
       mainHistory ((size_t) historyLength, 0.0f),
@@ -72,7 +72,7 @@ void Oscilloscope::setTimebase (double newSampleRate, int newDecimationFactor) n
     {
         sampleRate = resolvedSampleRate;
         decimationFactor = resolvedDecimation;
-        reserveTriggeredBuffers();
+        ensureSweepBuffersSized();
         repaint();
     }
 }
@@ -135,43 +135,39 @@ void Oscilloscope::timerCallback()
 
     const bool relockPending = kickReferenceState == KickReferenceState::RelockPending;
 
-    if (viewMode == ScopeViewMode::Triggered || relockPending)
-    {
-        const bool allowTriggeredRefresh = ! isDisplayFrozen() || relockPending;
+    // Always drain the sweep stream so it can never overflow, but only advance
+    // the on-screen sweep when the display isn't held. An armed re-lock keeps
+    // consuming even while frozen so the new reference can still lock on the
+    // next hit (matching the old snapshot behaviour).
+    const bool consumeSweep = ! isDisplayFrozen() || relockPending;
+    bool triggeredDirty = drainSweepStream (consumeSweep);
 
-        if (allowTriggeredRefresh)
+    if (viewMode == ScopeViewMode::Triggered && consumeSweep)
+    {
+        if (triggeredDirty)
+        {
+            freeRunTicks = 0;
+        }
+        else if (anyRead && kickReferenceState == KickReferenceState::NoReference
+                 && sweepFill == 0
+                 && ++freeRunTicks >= freeRunWatchdogTicks)
         {
             // The watchdog fallback only exists to show SOMETHING before the
             // first kick is detected. It must (a) require samples to actually
-            // be flowing — a stopped transport is not "no trigger detected",
-            // and rebuilding a static image at 60 Hz just burns CPU — and
-            // (b) never engage once a kick reference is locked: falling back
-            // used to DESTROY the frozen reference whenever no hit arrived
-            // for 2 s (stop, breakdown), which is exactly the "kick doesn't
-            // stay fixed" bug.
-            if (refreshTriggeredSnapshot())
-                freeRunTicks = 0;
-            else if (viewMode == ScopeViewMode::Triggered && anyRead
-                     && kickReferenceState == KickReferenceState::NoReference
-                     && ++freeRunTicks >= freeRunWatchdogTicks)
-                buildFreeRunTriggeredSnapshot();
-
-            // The auto-gain smooths toward its target every tick; repaint when
-            // it actually moves so the trace settles smoothly between hits
-            // (the timer otherwise only repaints on a new snapshot).
-            if (updateTriggeredAutoGain() && viewMode == ScopeViewMode::Triggered)
-                repaint();
+            // be flowing — a stopped transport is not "no trigger detected" —
+            // and (b) never engage once a sweep has started or a reference is
+            // locked, so a gap in the material can't destroy the display.
+            buildWaitingFallback();
+            triggeredDirty = true;
         }
 
-        // Live triggered sweep: while samples flow and a kick reference is
-        // locked, the bass overlay tracks the ring in real time, so keep
-        // repainting like the scrolling modes do.
-        if (viewMode == ScopeViewMode::Triggered && anyRead && ! isDisplayFrozen()
-            && kickReferenceState == KickReferenceState::Locked
-            && liveSamplesSinceTrigger != nullptr)
-        {
+        // The auto-gain glides toward its per-hit target every tick; repaint
+        // while it actually moves so the trace settles smoothly between hits.
+        if (glideTriggeredAutoGain())
+            triggeredDirty = true;
+
+        if (triggeredDirty)
             repaint();
-        }
     }
 
     if (viewMode != ScopeViewMode::Triggered && anyRead && ! isDisplayFrozen())
@@ -309,7 +305,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
                                       juce::Rectangle<float> bounds,
                                       float gain)
 {
-    const int n = juce::jmin ((int) triggeredBass.size(), (int) triggeredKick.size());
     const float midY = bounds.getCentreY();
     const float halfHeight = bounds.getHeight() * 0.46f;
 
@@ -319,7 +314,19 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     g.drawHorizontalLine ((int) std::round (midY - halfHeight * 0.5f), bounds.getX(), bounds.getRight());
     g.drawHorizontalLine ((int) std::round (midY + halfHeight * 0.5f), bounds.getX(), bounds.getRight());
 
-    if (n <= 1)
+    // Pick the data source: the live full-rate sweep once hits are flowing,
+    // or the decimated-ring fallback before the first hit so the view is
+    // never blank. Both share the exact same rendering path below.
+    bool anyGhost = false;
+    for (int fill : ghostFill)
+        anyGhost = anyGhost || fill > 1;
+
+    const bool sweepHasContent = sweepFill > 1 || anyGhost || kickReferenceValid;
+    const bool fallbackActive = ! sweepHasContent && (int) fallbackBass.size() > 1;
+
+    const int n = fallbackActive ? (int) fallbackBass.size() : sweepWindowSamples;
+
+    if (n <= 1 || (! sweepHasContent && ! fallbackActive))
     {
         g.setColour (labelColour);
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
@@ -329,16 +336,24 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         return;
     }
 
-    const int safePreRoll = juce::jlimit (0, n - 1, triggeredPreRollSamples);
+    const float* bassData = fallbackActive ? fallbackBass.data() : sweepBass.data();
+    const int bassFillCount = fallbackActive ? n : sweepFill;
+    const float* kickData = fallbackActive ? fallbackKick.data()
+                          : kickReferenceValid ? kickReference.data()
+                                               : sweepKick.data();
+    const int kickFillCount = fallbackActive ? n : (kickReferenceValid ? n : sweepFill);
+    const int preRoll = fallbackActive ? fallbackPreRoll : sweepPreRollSamples;
+    const double rate = fallbackActive ? fallbackRate : sampleRate;
 
-    // Time zoom: select the visible slice of the captured window, keeping the
-    // trigger line at a fixed fractional x. The ms axis uses the snapshot's own
-    // sample rate (full-rate per-hit capture vs the decimated watchdog ring).
+    const int safePreRoll = juce::jlimit (0, n - 1, preRoll);
+
+    // Time zoom: select the visible slice of the capture window, keeping the
+    // trigger line at a fixed fractional x. The ms axis uses the source's own
+    // sample rate (full-rate sweep vs the decimated fallback ring).
     const auto range = computeTriggeredVisibleRange (n, safePreRoll, timeZoom);
     const int first = range.first;
     const int visible = juce::jmax (2, range.visible);
     const int last = first + visible - 1;
-    const double rate = triggeredSnapshotRate;
 
     const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
     const float triggerX = bounds.getX() + (float) (safePreRoll - first) * sampleXStep;
@@ -364,209 +379,74 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     g.setColour (juce::Colours::white.withAlpha (0.65f));
     g.drawVerticalLine ((int) std::round (triggerX), bounds.getY(), bounds.getBottom());
 
-    // Faint decaying "ghost" strokes of the last few bass hits (oldest first,
-    // so the most recent sits brightest just under the live pair). The kick is
-    // frozen, so only past bass positions are worth persisting.
-    auto drawGhostBass = [&] (const std::vector<float>& bass, float alpha)
+    // Faint decaying "ghost" strokes of the last few completed bass sweeps
+    // (oldest first, so the most recent sits brightest just under the live
+    // sweep) — phosphor persistence instead of an abrupt swap, so every hit
+    // visibly redraws in place without blinking.
+    if (! fallbackActive)
+        for (int gi = ghostCount - 1; gi >= 0; --gi)
+            drawTriggeredTrace (g, bounds, ghostBass[(size_t) gi].data(), ghostFill[(size_t) gi],
+                                first, visible, sampleXStep, midY, halfHeight, gain,
+                                bassColour.withAlpha (scopeSweepGhostAlpha (gi, ghostCount)),
+                                1.0f, 0.0f, 0.0f);
+
+    // Kick lane: the locked reference (or, before the first lock completes,
+    // the kick assembling live alongside the sweep).
+    drawTriggeredTrace (g, bounds, kickData, kickFillCount, first, visible, sampleXStep,
+                        midY, halfHeight, gain,
+                        kickColour.withAlpha (kickReferenceValid ? 0.95f : 0.80f),
+                        1.8f, 0.30f, 0.0f);
+
+    // Bass lane: the live sweep, redrawn left-to-right on every hit
+    // (ReVision behaviour). Samples past the sweep head simply don't exist
+    // yet, so the trace grows in real time and never jumps.
+    drawTriggeredTrace (g, bounds, bassData, bassFillCount, first, visible, sampleXStep,
+                        midY, halfHeight, gain,
+                        bassColour.withAlpha (0.98f), 2.2f, 0.34f, 0.16f);
+
+    // Sweep head: while the current hit's window is still filling, a bright
+    // leading edge shows exactly where the live redraw has got to.
+    if (! fallbackActive && sweepFill > 1 && sweepFill < n
+        && ! isDisplayFrozen() && refreshingSweepIsLive())
     {
-        const int available = (int) bass.size();
-        const int ghostFirst = juce::jlimit (0, juce::jmax (0, available - 1), first);
-        const int ghostVisible = juce::jmin (visible, available - ghostFirst);
-        if (ghostVisible <= 1)
-            return;
-
-        juce::Path path;
-        const int pointCount = calculateTriggeredRenderPointCount (ghostVisible, (int) std::ceil (bounds.getWidth()));
-        path.preallocateSpace (pointCount * 3);
-
-        for (int point = 0; point < pointCount; ++point)
+        const int headIndex = sweepFill - 1;
+        if (headIndex >= first && headIndex <= last)
         {
-            const int k = triggeredRenderSampleIndex (point, pointCount, ghostVisible);
-            const float x = bounds.getX() + (float) k * sampleXStep;
-            const float y = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) (ghostFirst + k)] * gain) * halfHeight;
-            if (point == 0)
-                path.startNewSubPath (x, y);
-            else
-                path.lineTo (x, y);
-        }
+            const float headX = bounds.getX() + (float) (headIndex - first) * sampleXStep;
+            const float headY = midY - juce::jlimit (-1.0f, 1.0f,
+                                                     bassData[(size_t) headIndex] * gain) * halfHeight;
 
-        g.setColour (bassColour.withAlpha (alpha));
-        g.strokePath (path, juce::PathStrokeType (1.0f, juce::PathStrokeType::curved,
-                                                  juce::PathStrokeType::rounded));
-    };
-
-    for (int gi = ghostCount - 1; gi >= 0; --gi)
-        drawGhostBass (ghostBass[(size_t) gi], 0.09f * (float) (ghostCount - gi));
-
-    auto drawPair = [&] (const std::vector<float>& bass,
-                         const std::vector<float>& kick,
-                         float alpha)
-    {
-        const int available = juce::jmin ((int) bass.size(), (int) kick.size());
-        const int pairFirst = juce::jlimit (0, juce::jmax (0, available - 1), first);
-        const int pairVisible = juce::jmin (visible, available - pairFirst);
-        if (pairVisible <= 1)
-            return;
-
-        juce::Path bassPath, kickPath, bassFill, kickFill;
-        const int pointCount = calculateTriggeredRenderPointCount (pairVisible, (int) std::ceil (bounds.getWidth()));
-        bassPath.preallocateSpace (pointCount * 3);
-        kickPath.preallocateSpace (pointCount * 3);
-        bassFill.preallocateSpace (pointCount * 3);
-        kickFill.preallocateSpace (pointCount * 3);
-
-        for (int point = 0; point < pointCount; ++point)
-        {
-            const int k = triggeredRenderSampleIndex (point, pointCount, pairVisible);
-            const int idx = pairFirst + k;
-            const float x = bounds.getX() + (float) k * sampleXStep;
-            const float bassY = midY - juce::jlimit (-1.0f, 1.0f, bass[(size_t) idx] * gain) * halfHeight;
-            const float kickY = midY - juce::jlimit (-1.0f, 1.0f, kick[(size_t) idx] * gain) * halfHeight;
-
-            if (point == 0)
-            {
-                bassPath.startNewSubPath (x, bassY);
-                kickPath.startNewSubPath (x, kickY);
-                bassFill.startNewSubPath (x, midY);
-                bassFill.lineTo (x, bassY);
-                kickFill.startNewSubPath (x, midY);
-                kickFill.lineTo (x, kickY);
-            }
-            else
-            {
-                bassPath.lineTo (x, bassY);
-                kickPath.lineTo (x, kickY);
-                bassFill.lineTo (x, bassY);
-                kickFill.lineTo (x, kickY);
-            }
-        }
-
-        const float lastX = bounds.getX() + (float) (pairVisible - 1) * sampleXStep;
-        bassFill.lineTo (lastX, midY);
-        bassFill.closeSubPath();
-        kickFill.lineTo (lastX, midY);
-        kickFill.closeSubPath();
-
-        // Vertical gradient fills — strongest at the waveform extremes, fading
-        // to near-transparent at the midline — give the traces depth without
-        // washing out the grid the way flat alpha fills do. Three stops keep
-        // the lobes below the midline as visible as those above it.
-        {
-            juce::ColourGradient kickGrad (kickColour.withAlpha (alpha * 0.30f), 0.0f, bounds.getY(),
-                                           kickColour.withAlpha (alpha * 0.30f), 0.0f, bounds.getBottom(),
-                                           false);
-            kickGrad.addColour (0.5, kickColour.withAlpha (alpha * 0.03f));
-            g.setGradientFill (kickGrad);
-            g.fillPath (kickFill);
-        }
-
-        g.setColour (kickColour.withAlpha (alpha));
-        g.strokePath (kickPath, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved,
-                                                      juce::PathStrokeType::rounded));
-
-        const float bassAlpha = juce::jmin (1.0f, alpha + 0.04f);
-        {
-            juce::ColourGradient bassGrad (bassColour.withAlpha (bassAlpha * 0.34f), 0.0f, bounds.getY(),
-                                           bassColour.withAlpha (bassAlpha * 0.34f), 0.0f, bounds.getBottom(),
-                                           false);
-            bassGrad.addColour (0.5, bassColour.withAlpha (bassAlpha * 0.04f));
-            g.setGradientFill (bassGrad);
-            g.fillPath (bassFill);
-        }
-
-        // Soft glow under the primary bass stroke lifts it off the background.
-        g.setColour (bassColour.withAlpha (bassAlpha * 0.16f));
-        g.strokePath (bassPath, juce::PathStrokeType (4.5f, juce::PathStrokeType::curved,
-                                                      juce::PathStrokeType::rounded));
-        g.setColour (bassColour.withAlpha (bassAlpha));
-        g.strokePath (bassPath, juce::PathStrokeType (2.2f, juce::PathStrokeType::curved,
-                                                      juce::PathStrokeType::rounded));
-    };
-
-    drawPair (triggeredBass, triggeredKick, 0.95f);
-
-    // Live triggered sweep (ReVision behaviour): the kick reference stays
-    // frozen, and the CURRENT bass is drawn over it in real time, aligned to
-    // the most recent detected kick via the processor's scope-stream trigger
-    // markers. The sweep grows left-to-right as samples arrive after the hit
-    // (samples past "now" simply don't exist yet), so every hit visibly
-    // redraws the bass in place — per-hit checking without waiting for the
-    // capture window to complete.
-    if (liveSamplesSinceTrigger != nullptr
-        && kickReferenceState == KickReferenceState::Locked)
-    {
-        const int sinceTrigger = liveSamplesSinceTrigger->load (std::memory_order_acquire);
-        const double ringRate = sampleRate / (double) juce::jmax (1, decimationFactor);
-
-        if (sinceTrigger >= 0 && sinceTrigger < historyLength - 2 && ringRate > 0.0)
-        {
-            const int triggerRingIndex = writeIndex - 1 - sinceTrigger;
-            const int pointCount = calculateTriggeredRenderPointCount (visible, (int) std::ceil (bounds.getWidth()));
-
-            juce::Path live;
-            live.preallocateSpace (pointCount * 3);
-            bool started = false;
-
-            for (int point = 0; point < pointCount; ++point)
-            {
-                const int k = triggeredRenderSampleIndex (point, pointCount, visible);
-                const double tRelSeconds = (double) ((first + k) - safePreRoll) / rate;
-                const int ringOffset = (int) std::llround (tRelSeconds * ringRate);
-
-                // Stop at "now" — the sweep head. Also never reach further back
-                // than the ring actually holds.
-                if (ringOffset > sinceTrigger)
-                    break;
-                if (sinceTrigger - ringOffset >= historyLength - 2)
-                    continue;
-
-                const int idx = wrapHistoryIndex (triggerRingIndex + ringOffset, historyLength);
-                const float x = bounds.getX() + (float) k * sampleXStep;
-                const float y = midY - juce::jlimit (-1.0f, 1.0f,
-                                                     mainHistory[(size_t) idx] * gain) * halfHeight;
-
-                if (! started)
-                {
-                    live.startNewSubPath (x, y);
-                    started = true;
-                }
-                else
-                {
-                    live.lineTo (x, y);
-                }
-            }
-
-            if (started)
-            {
-                g.setColour (bassColour.brighter (0.35f).withAlpha (0.6f));
-                g.strokePath (live, juce::PathStrokeType (1.3f, juce::PathStrokeType::curved,
-                                                          juce::PathStrokeType::rounded));
-            }
+            g.setColour (bassColour.brighter (0.6f).withAlpha (0.30f));
+            g.drawVerticalLine ((int) std::round (headX), bounds.getY(), bounds.getBottom());
+            g.setColour (bassColour.brighter (0.8f));
+            g.fillEllipse (headX - 2.5f, headY - 2.5f, 5.0f, 5.0f);
         }
     }
 
     // Phase agreement strip: an always-visible cancellation read-out along the
     // bottom of the plot — green where the (envelope-smoothed) kick and bass
-    // low ends push the same way, red where they fight. This is the "can I see
-    // the cancellation?" answer in the HERO view, not just the Phase Delta
-    // mode. Smoothed envelopes (same tested classifier Phase Delta uses) keep
+    // low ends push the same way, red where they fight. Covers only the part
+    // of the window both lanes have actually reached, so it grows with the
+    // sweep. Smoothed envelopes (same tested classifier Phase Delta uses) keep
     // it stable instead of flickering on broadband zero crossings; runs of
     // equal colour merge into single rects so it costs a handful of fills.
     {
-        const int stripSpan = juce::jmin (visible, n - first);
+        const int filled = juce::jmin (bassFillCount, kickFillCount);
+        const int stripSpan = juce::jmin (visible, filled - first);
         if (stripSpan > 1)
         {
-            // Sample the visible slice down to pixel-column resolution FIRST,
-            // then envelope-smooth the columns: the triggered window can exceed
-            // the historyLength-sized scratch buffers at high sample rates
-            // (e.g. 170 ms @ 96 kHz = 16,320 samples), and the strip only needs
-            // per-column values anyway — O(columns), not O(window).
-            const int columns = juce::jlimit (2, historyLength, (int) std::ceil (bounds.getWidth()));
+            // Sample the swept slice down to pixel-column resolution FIRST,
+            // then envelope-smooth the columns: the capture window can exceed
+            // the historyLength-sized scratch buffers at high sample rates,
+            // and the strip only needs per-column values anyway — O(columns),
+            // not O(window).
+            const float stripPixelSpan = (float) (stripSpan - 1) * sampleXStep;
+            const int columns = juce::jlimit (2, historyLength, (int) std::ceil (stripPixelSpan));
             for (int c = 0; c < columns; ++c)
             {
                 const int k = (int) ((long long) c * (stripSpan - 1) / (columns - 1));
-                columnMinScratch[(size_t) c] = triggeredBass[(size_t) (first + k)];
-                columnMaxScratch[(size_t) c] = triggeredKick[(size_t) (first + k)];
+                columnMinScratch[(size_t) c] = bassData[(size_t) (first + k)];
+                columnMaxScratch[(size_t) c] = kickData[(size_t) (first + k)];
             }
 
             const double columnRate = rate * (double) columns / (double) stripSpan;
@@ -591,8 +471,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
                 const auto colour = colourFor (runRelation);
                 if (! colour.isTransparent())
                 {
-                    const float x0 = bounds.getX() + bounds.getWidth() * (float) runStart / (float) columns;
-                    const float x1 = bounds.getX() + bounds.getWidth() * (float) endColumn / (float) columns;
+                    const float x0 = bounds.getX() + stripPixelSpan * (float) runStart / (float) columns;
+                    const float x1 = bounds.getX() + stripPixelSpan * (float) endColumn / (float) columns;
                     g.setColour (colour.withAlpha (0.55f));
                     g.fillRect (juce::Rectangle<float> (x0, stripY, juce::jmax (1.0f, x1 - x0), stripH));
                 }
@@ -625,57 +505,59 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     }
 
     // ReVision-style transient markers: triangles at the kick/bass envelope
-    // peaks plus a timing verdict in producer language ("bass late"), computed
-    // over the visible slice of the triggered snapshot at its own sample rate.
+    // peaks plus a timing verdict in producer language ("bass late"). Computed
+    // ONCE per completed hit (see finishSweep) over the full window, so the
+    // read-out never jitters frame-to-frame and doesn't change with zoom;
+    // here it is only mapped into the visible slice.
+    if (! fallbackActive && sweepMarkers.valid)
     {
-        const int markerSpan = juce::jmin (visible, n - first);
-        const auto markers = findEnvelopePeakMarkers (triggeredBass.data() + first,
-                                                      triggeredKick.data() + first,
-                                                      markerSpan, rate);
-        if (markers.valid && markerSpan > 1)
+        auto drawPeakMarker = [&] (int index, juce::Colour colour, float triangleY, float lineAlpha)
         {
-            const float kickX = bounds.getX() + (float) markers.kickPeakIndex * sampleXStep;
-            const float bassX = bounds.getX() + (float) markers.bassPeakIndex * sampleXStep;
+            if (index < first || index > last)
+                return;
 
-            g.setColour (kickColour.withAlpha (0.45f));
-            g.drawLine (kickX, bounds.getY(), kickX, bounds.getBottom(), 1.0f);
-            drawMarkerTriangle (g, kickX, bounds.getY() + 10.0f, kickColour);
+            const float x = bounds.getX() + (float) (index - first) * sampleXStep;
+            g.setColour (colour.withAlpha (lineAlpha));
+            g.drawLine (x, bounds.getY(), x, bounds.getBottom(), 1.0f);
+            drawMarkerTriangle (g, x, bounds.getY() + triangleY, colour);
+        };
 
-            g.setColour (bassColour.withAlpha (0.7f));
-            g.drawLine (bassX, bounds.getY(), bassX, bounds.getBottom(), 1.0f);
-            drawMarkerTriangle (g, bassX, bounds.getY() + 22.0f, bassColour);
+        drawPeakMarker (sweepMarkers.kickPeakIndex, kickColour, 10.0f, 0.45f);
+        drawPeakMarker (sweepMarkers.bassPeakIndex, bassColour, 22.0f, 0.7f);
 
-            g.setColour (juce::Colours::white.withAlpha (0.92f));
-            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-            const juce::String deltaLabel = juce::String::fromUTF8 ("\xCE\x94 ")
-                                          + (markers.deltaMs >= 0.0f ? "+" : "")
-                                          + juce::String (markers.deltaMs, 2) + " ms · "
-                                          + timingVerdictText (markers.deltaMs);
-            g.drawText (deltaLabel,
-                        juce::Rectangle<int> ((int) (bounds.getCentreX() - 95.0f),
-                                              (int) (bounds.getBottom() - 36.0f),
-                                              190, 14),
-                        juce::Justification::centred);
-        }
+        g.setColour (juce::Colours::white.withAlpha (0.92f));
+        g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+        const juce::String deltaLabel = juce::String::fromUTF8 ("\xCE\x94 ")
+                                      + (sweepMarkers.deltaMs >= 0.0f ? "+" : "")
+                                      + juce::String (sweepMarkers.deltaMs, 2)
+                                      + juce::String::fromUTF8 (" ms \xC2\xB7 ")
+                                      + timingVerdictText (sweepMarkers.deltaMs);
+        g.drawText (deltaLabel,
+                    juce::Rectangle<int> ((int) (bounds.getCentreX() - 95.0f),
+                                          (int) (bounds.getBottom() - 36.0f),
+                                          190, 14),
+                    juce::Justification::centred);
     }
 
     // Always-on status line: the user must never have to guess what the
     // triggered view is showing. Covers every reference state plus whether
     // the input stream is currently alive.
     {
-        const bool receiving = ticksSinceFifoRead < idleAfterTicks;
+        const bool receiving = refreshingSweepIsLive();
         juce::String status;
 
-        if (kickReferenceState == KickReferenceState::NoReference)
-            status = "waiting for kick — showing live input";
+        if (fallbackActive)
+            status = juce::String::fromUTF8 ("waiting for kick \xE2\x80\x94 showing live input");
+        else if (! kickReferenceValid && kickReferenceState == KickReferenceState::NoReference)
+            status = "locking kick reference...";
         else if (kickReferenceState == KickReferenceState::RelockPending)
-            status = "re-lock armed — waiting for next kick";
+            status = juce::String::fromUTF8 ("re-lock armed \xE2\x80\x94 waiting for next kick");
         else if (frozen)
-            status = "kick locked · display frozen";
+            status = juce::String::fromUTF8 ("kick locked \xC2\xB7 display frozen");
         else if (! receiving)
-            status = "kick locked · input idle — showing last capture";
+            status = juce::String::fromUTF8 ("kick locked \xC2\xB7 input idle \xE2\x80\x94 showing last capture");
         else
-            status = juce::String::fromUTF8 ("kick locked · bass live");
+            status = juce::String::fromUTF8 ("kick locked \xC2\xB7 bass live");
 
         g.setColour (labelColour.withAlpha (0.9f));
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
@@ -698,6 +580,70 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     g.drawText ("+" + juce::String (postMs, 0) + " ms",
                 juce::Rectangle<int> ((int) bounds.getRight() - 64, (int) (bounds.getBottom() - 14.0f), 64, 12),
                 juce::Justification::centredRight);
+}
+
+void Oscilloscope::drawTriggeredTrace (juce::Graphics& g, juce::Rectangle<float> bounds,
+                                       const float* data, int fill, int first, int visible,
+                                       float sampleXStep, float midY, float halfHeight, float gain,
+                                       juce::Colour colour, float strokeWidth,
+                                       float fillAlpha, float glowAlpha) const
+{
+    if (data == nullptr || colour.isTransparent())
+        return;
+
+    // Clip the visible slice to the filled prefix; a sweep that hasn't reached
+    // this slice yet simply draws nothing (samples past "now" don't exist).
+    const int drawCount = juce::jmin (visible, fill - first);
+    if (drawCount <= 1)
+        return;
+
+    const int pixelSpan = juce::jmax (2, (int) std::ceil ((float) drawCount * sampleXStep));
+    const int pointCount = calculateTriggeredRenderPointCount (drawCount, pixelSpan);
+
+    juce::Path stroke;
+    stroke.preallocateSpace (pointCount * 3 + 8);
+
+    for (int point = 0; point < pointCount; ++point)
+    {
+        const int k = triggeredRenderSampleIndex (point, pointCount, drawCount);
+        const float x = bounds.getX() + (float) k * sampleXStep;
+        const float y = midY - juce::jlimit (-1.0f, 1.0f, data[(size_t) (first + k)] * gain) * halfHeight;
+
+        if (point == 0)
+            stroke.startNewSubPath (x, y);
+        else
+            stroke.lineTo (x, y);
+    }
+
+    if (fillAlpha > 0.0f)
+    {
+        // Vertical gradient fill — strongest at the waveform extremes, fading
+        // to near-transparent at the midline — gives the trace depth without
+        // washing out the grid the way a flat alpha fill does.
+        juce::Path fillPath (stroke);
+        fillPath.lineTo (bounds.getX() + (float) (drawCount - 1) * sampleXStep, midY);
+        fillPath.lineTo (bounds.getX(), midY);
+        fillPath.closeSubPath();
+
+        juce::ColourGradient gradient (colour.withAlpha (fillAlpha), 0.0f, bounds.getY(),
+                                       colour.withAlpha (fillAlpha), 0.0f, bounds.getBottom(),
+                                       false);
+        gradient.addColour (0.5, colour.withAlpha (fillAlpha * 0.1f));
+        g.setGradientFill (gradient);
+        g.fillPath (fillPath);
+    }
+
+    if (glowAlpha > 0.0f)
+    {
+        // Soft glow under the primary stroke lifts it off the background.
+        g.setColour (colour.withMultipliedAlpha (glowAlpha));
+        g.strokePath (stroke, juce::PathStrokeType (strokeWidth + 2.6f, juce::PathStrokeType::curved,
+                                                    juce::PathStrokeType::rounded));
+    }
+
+    g.setColour (colour);
+    g.strokePath (stroke, juce::PathStrokeType (strokeWidth, juce::PathStrokeType::curved,
+                                                juce::PathStrokeType::rounded));
 }
 
 void Oscilloscope::drawGrid (juce::Graphics& g,
@@ -1239,145 +1185,198 @@ void Oscilloscope::rebuildVisibleBuffers (int visible, bool applyVisualOffset,
     }
 }
 
-void Oscilloscope::reserveTriggeredBuffers()
+void Oscilloscope::ensureSweepBuffersSized()
 {
-    const int required = hitCapture.getWindowSamples();
-    if (required <= 0 || required == reservedTriggeredSamples)
+    const int window = hitCapture.getWindowSamples();
+    if (window <= 0 || window == sweepWindowSamples)
         return;
 
-    auto reserveOne = [required] (std::vector<float>& buffer)
-    {
-        if ((int) buffer.capacity() < required)
-            buffer.reserve ((size_t) required);
-    };
+    // Window geometry changed (sample rate / prepare). Every full-rate buffer
+    // is sized here once, on the message thread, so the drain loop never
+    // reallocates. Previously captured content is meaningless at the new
+    // rate, so the whole triggered state starts over.
+    sweepWindowSamples = window;
+    sweepPreRollSamples = hitCapture.getPreRollSamples();
 
-    reserveOne (triggeredBass);
-    reserveOne (triggeredKick);
-    reserveOne (triggeredScratchBass);
-    reserveOne (triggeredScratchKick);
-
+    sweepBass.assign ((size_t) window, 0.0f);
+    sweepKick.assign ((size_t) window, 0.0f);
+    kickReference.assign ((size_t) window, 0.0f);
     for (auto& buffer : ghostBass)
-        reserveOne (buffer);
-    for (auto& buffer : ghostKick)
-        reserveOne (buffer);
+        buffer.assign ((size_t) window, 0.0f);
+    ghostFill.fill (0);
 
-    reservedTriggeredSamples = required;
-
+    sweepFill = 0;
+    sweepPeak = 0.0f;
+    sweepDiscarding = true;
+    kickReferenceValid = false;
+    kickReferencePeak = 0.0f;
+    sweepMarkers = {};
     kickReferenceState = KickReferenceState::NoReference;
+    fallbackBass.clear();
+    fallbackKick.clear();
 }
 
-void Oscilloscope::relockKickReference() noexcept
+bool Oscilloscope::drainSweepStream (bool consume)
 {
-    kickReferenceState = kickReferenceStateAfterRelock();
-    latestTriggeredSequence = hitCapture.getSequence();
+    std::array<float, scratchSize> bassScratch {};
+    std::array<float, scratchSize> kickScratch {};
+    std::array<unsigned char, scratchSize> flagScratch {};
 
-    triggeredBass.clear();
-    triggeredKick.clear();
-    for (auto& buffer : ghostBass)
-        buffer.clear();
-    for (auto& buffer : ghostKick)
-        buffer.clear();
+    bool dirty = false;
 
-    repaint();
+    while (true)
+    {
+        const int count = hitCapture.readSweepStream (bassScratch.data(), kickScratch.data(),
+                                                      flagScratch.data(), scratchSize);
+        if (count == 0)
+            break;
+
+        ensureSweepBuffersSized();
+
+        if (! consume)
+        {
+            // Display held: keep draining so the stream can't overflow, but
+            // leave the on-screen sweep untouched. Discarding until the next
+            // start marker means releasing the hold can never resume
+            // mid-window with a hidden gap in the trace.
+            sweepDiscarding = true;
+            continue;
+        }
+
+        if (sweepWindowSamples <= 0)
+            continue;
+
+        for (int i = 0; i < count; ++i)
+        {
+            if ((flagScratch[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
+            {
+                beginNewSweep();
+                dirty = true;
+            }
+
+            if (sweepDiscarding || sweepFill >= sweepWindowSamples)
+                continue;
+
+            const float bassValue = bassScratch[(size_t) i];
+            const float kickValue = kickScratch[(size_t) i];
+            sweepBass[(size_t) sweepFill] = bassValue;
+            sweepKick[(size_t) sweepFill] = kickValue;
+            sweepPeak = juce::jmax (sweepPeak, std::abs (bassValue), std::abs (kickValue));
+            ++sweepFill;
+            dirty = true;
+
+            if (sweepFill == sweepWindowSamples)
+                finishSweep();
+        }
+    }
+
+    return dirty;
 }
 
-bool Oscilloscope::refreshTriggeredSnapshot()
+void Oscilloscope::beginNewSweep()
 {
-    const int sequence = hitCapture.getSequence();
-    if (sequence == latestTriggeredSequence)
-        return false;
-
-    reserveTriggeredBuffers();
-
-    int copiedSequence = 0;
-    const int samples = hitCapture.snapshotLatest (triggeredScratchBass, triggeredScratchKick, &copiedSequence);
-    if (samples <= 0)
-        return false;
-
-    if (copiedSequence == latestTriggeredSequence)
-        return false;
-
-    const bool replaceKickReference = kickReferenceShouldReplaceOnCapture (kickReferenceState);
-
-    if (! triggeredBass.empty())
+    // The outgoing sweep becomes the newest ghost if it actually reached the
+    // hit; a stub that never got past its pre-roll would just ghost silence.
+    if (scopeSweepWorthKeepingAsGhost (sweepFill, sweepPreRollSamples))
     {
         for (int i = ghostCount - 1; i > 0; --i)
         {
             ghostBass[(size_t) i].swap (ghostBass[(size_t) (i - 1)]);
-            ghostKick[(size_t) i].swap (ghostKick[(size_t) (i - 1)]);
+            ghostFill[(size_t) i] = ghostFill[(size_t) (i - 1)];
         }
 
-        ghostBass[0].swap (triggeredBass);
-
-        if (replaceKickReference)
-            ghostKick[0].swap (triggeredKick);
+        ghostBass[0].swap (sweepBass);
+        ghostFill[0] = sweepFill;
     }
 
-    triggeredBass.swap (triggeredScratchBass);
+    sweepFill = 0;
+    sweepPeak = 0.0f;
+    sweepDiscarding = false;
 
-    if (replaceKickReference)
+    // A real hit is on screen now — the pre-first-kick fallback is done for
+    // good (it must never replace a captured display again).
+    fallbackBass.clear();
+    fallbackKick.clear();
+}
+
+void Oscilloscope::finishSweep()
+{
+    if (kickReferenceShouldReplaceOnCapture (kickReferenceState))
     {
-        triggeredKick.swap (triggeredScratchKick);
+        kickReference = sweepKick;
+        kickReferenceValid = true;
+
+        float peak = 0.0f;
+        for (float value : kickReference)
+            peak = juce::jmax (peak, std::abs (value));
+        kickReferencePeak = peak;
+
         kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
     }
 
-    triggeredPreRollSamples = hitCapture.getPreRollSamples();
-    latestTriggeredSequence = copiedSequence;
-    // The per-hit window comes from the full-rate HitCaptureBuffer.
-    triggeredSnapshotRate = sampleRate;
-    repaint();
-    return true;
+    // Δ markers are computed ONCE per completed hit over the full window (not
+    // the zoomed slice), so the read-out can't jitter frame-to-frame and
+    // doesn't change with zoom. Bass from this sweep, kick from the reference.
+    sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
+                                            kickReferenceValid ? kickReference.data()
+                                                               : sweepKick.data(),
+                                            sweepWindowSamples, sampleRate);
+
+    // Auto-gain retargets per completed hit — with hysteresis, so near-equal
+    // hits don't make the whole display breathe.
+    const float candidate = scopeAutoGainTargetFromPeak (juce::jmax (sweepPeak, kickReferencePeak));
+    if (scopeAutoGainShouldRetarget (targetDisplayGain, candidate))
+        targetDisplayGain = candidate;
 }
 
-void Oscilloscope::buildFreeRunTriggeredSnapshot()
+bool Oscilloscope::glideTriggeredAutoGain() noexcept
 {
-    reserveTriggeredBuffers();
-
-    const int desiredSamples = juce::jlimit (2, historyLength,
-                                            msToSamples (170.0f, sampleRate) / juce::jmax (1, decimationFactor));
-    triggeredScratchBass.resize ((size_t) desiredSamples);
-    triggeredScratchKick.resize ((size_t) desiredSamples);
-
-    const int start = writeIndex - desiredSamples;
-    for (int i = 0; i < desiredSamples; ++i)
-    {
-        const int idx = wrapHistoryIndex (start + i, historyLength);
-        triggeredScratchBass[(size_t) i] = mainHistory[(size_t) idx];
-        triggeredScratchKick[(size_t) i] = sidechainHistory[(size_t) idx];
-    }
-
-    triggeredBass.swap (triggeredScratchBass);
-    triggeredKick.swap (triggeredScratchKick);
-    triggeredPreRollSamples = juce::jlimit (0, desiredSamples - 1,
-                                            msToSamples (20.0f, sampleRate) / juce::jmax (1, decimationFactor));
-    // The fallback fills from the DECIMATED scope ring, so the ms axis must use
-    // the decimated rate or the labels/grid come out ~decimation× too dense.
-    triggeredSnapshotRate = sampleRate / (double) juce::jmax (1, decimationFactor);
-    freeRunTicks = freeRunWatchdogTicks;
-
-    // Note: the caller only enters this fallback while no kick reference is
-    // locked (kickReferenceState == NoReference), so the next real hit still
-    // captures a fresh reference — and a reference the user already has is
-    // never destroyed by a gap in the material.
-    repaint();
-}
-
-bool Oscilloscope::updateTriggeredAutoGain() noexcept
-{
-    float peak = 0.0f;
-    for (size_t i = 0; i < triggeredBass.size() && i < triggeredKick.size(); ++i)
-    {
-        peak = juce::jmax (peak, std::abs (triggeredBass[i]));
-        peak = juce::jmax (peak, std::abs (triggeredKick[i]));
-    }
-
-    const float targetGain = peak > 1.0e-4f ? juce::jlimit (1.0f, 40.0f, 0.88f / peak) : 1.0f;
-    const float step = 0.18f * (targetGain - displayGain);
+    const float step = 0.18f * (targetDisplayGain - displayGain);
     displayGain += step;
 
     // Report whether the gain moved enough to be worth a repaint, so the timer
     // can settle the trace between hits without repainting on every idle tick.
     return std::abs (step) > 1.0e-3f;
+}
+
+void Oscilloscope::relockKickReference() noexcept
+{
+    kickReferenceState = kickReferenceStateAfterRelock();
+
+    // Deliberately keeps the current traces on screen while the re-lock waits
+    // for the next hit — the reference swaps in place when the next sweep
+    // completes, so re-locking never blanks or flickers the view.
+    repaint();
+}
+
+void Oscilloscope::buildWaitingFallback()
+{
+    const int desiredSamples = juce::jlimit (2, historyLength,
+                                            msToSamples (170.0f, sampleRate) / juce::jmax (1, decimationFactor));
+    fallbackBass.resize ((size_t) desiredSamples);
+    fallbackKick.resize ((size_t) desiredSamples);
+
+    const int start = writeIndex - desiredSamples;
+    float peak = 0.0f;
+    for (int i = 0; i < desiredSamples; ++i)
+    {
+        const int idx = wrapHistoryIndex (start + i, historyLength);
+        fallbackBass[(size_t) i] = mainHistory[(size_t) idx];
+        fallbackKick[(size_t) i] = sidechainHistory[(size_t) idx];
+        peak = juce::jmax (peak, std::abs (fallbackBass[(size_t) i]),
+                           std::abs (fallbackKick[(size_t) i]));
+    }
+
+    fallbackPreRoll = juce::jlimit (0, desiredSamples - 1,
+                                    msToSamples (20.0f, sampleRate) / juce::jmax (1, decimationFactor));
+    // The fallback fills from the DECIMATED scope ring, so its ms axis must
+    // use the decimated rate or the labels/grid come out ~decimation× wrong.
+    fallbackRate = sampleRate / (double) juce::jmax (1, decimationFactor);
+    freeRunTicks = freeRunWatchdogTicks;
+
+    // No completed hit exists yet to retarget from, so aim the auto-gain at
+    // the live ring content directly (still glided by the timer).
+    targetDisplayGain = scopeAutoGainTargetFromPeak (peak);
 }
 
 void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)

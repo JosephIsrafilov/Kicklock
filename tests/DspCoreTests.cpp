@@ -1177,6 +1177,106 @@ public:
             writer.join();
             expect (! torn.load (std::memory_order_relaxed), "snapshot returned mixed samples from different hit windows");
         }
+
+        beginTest ("Sweep stream delivers pre-roll and capture progressively with a start marker");
+        {
+            HitCaptureBuffer buffer;
+            buffer.prepare (1000.0, 2.0f, 3.0f);   // pre 2, post 3, window 5
+
+            std::array<float, 16> bass {}, kick {};
+            std::array<unsigned char, 16> flags {};
+
+            // Two context samples, then the trigger: the stream must open with
+            // the pre-roll (start-flagged) followed by the trigger sample —
+            // available IMMEDIATELY, before the window completes.
+            buffer.pushSample (1.0f, 11.0f, false);
+            buffer.pushSample (2.0f, 12.0f, false);
+            buffer.pushSample (3.0f, 13.0f, true);
+
+            int n = buffer.readSweepStream (bass.data(), kick.data(), flags.data(), 16);
+            expectEquals (n, 3);
+            expect ((flags[0] & HitCaptureBuffer::sweepStartFlag) != 0, "first pre-roll sample must carry the start marker");
+            expect ((flags[1] & HitCaptureBuffer::sweepStartFlag) == 0);
+            expectWithinAbsoluteError (bass[0], 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (bass[2], 3.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[0], 11.0f, 1.0e-7f);
+            expectWithinAbsoluteError (kick[2], 13.0f, 1.0e-7f);
+
+            // The rest of the window streams as it is captured; nothing after.
+            buffer.pushSample (4.0f, 14.0f, false);
+            buffer.pushSample (5.0f, 15.0f, false);
+            buffer.pushSample (6.0f, 16.0f, false);   // past the window: not streamed
+
+            n = buffer.readSweepStream (bass.data(), kick.data(), flags.data(), 16);
+            expectEquals (n, 2);
+            expectWithinAbsoluteError (bass[0], 4.0f, 1.0e-7f);
+            expectWithinAbsoluteError (bass[1], 5.0f, 1.0e-7f);
+            expect ((flags[0] | flags[1]) == 0, "mid-window samples must not carry markers");
+
+            expectEquals (buffer.readSweepStream (bass.data(), kick.data(), flags.data(), 16), 0);
+        }
+
+        beginTest ("Sweep stream drops whole windows on overflow and resyncs at the next hit");
+        {
+            HitCaptureBuffer buffer;
+            buffer.prepare (1000.0, 40.0f, 40.0f);   // window 80, stream capacity 160
+
+            auto feedWindow = [&buffer] (float base)
+            {
+                buffer.pushSample (base, base + 1000.0f, true);
+                for (int i = 1; i < 80; ++i)
+                    buffer.pushSample (base + (float) i, base + 1000.0f + (float) i, false);
+            };
+
+            // Three windows with no consumer: the third cannot fit and must be
+            // dropped wholesale — no start marker, no torn middle.
+            feedWindow (100.0f);
+            feedWindow (200.0f);
+            feedWindow (300.0f);
+
+            std::vector<int> startOffsets;
+            std::vector<float> drained;
+            std::array<float, 64> bass {}, kick {};
+            std::array<unsigned char, 64> flags {};
+
+            while (true)
+            {
+                const int n = buffer.readSweepStream (bass.data(), kick.data(), flags.data(), 64);
+                if (n == 0)
+                    break;
+
+                for (int i = 0; i < n; ++i)
+                {
+                    if ((flags[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
+                        startOffsets.push_back ((int) drained.size());
+                    drained.push_back (bass[(size_t) i]);
+                }
+            }
+
+            expectEquals ((int) startOffsets.size(), 2);
+            expectEquals (startOffsets[0], 0);
+            expectEquals (startOffsets[1], 80);
+            expect (std::none_of (drained.begin(), drained.end(),
+                                  [] (float v) { return v >= 300.0f; }),
+                    "an overflowed window must be dropped wholesale");
+
+            // With the fifo drained, the next hit streams normally again.
+            feedWindow (400.0f);
+            int total = 0;
+            int starts = 0;
+            while (true)
+            {
+                const int n = buffer.readSweepStream (bass.data(), kick.data(), flags.data(), 64);
+                if (n == 0)
+                    break;
+                for (int i = 0; i < n; ++i)
+                    if ((flags[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
+                        ++starts;
+                total += n;
+            }
+            expectEquals (starts, 1);
+            expectEquals (total, 80);
+        }
     }
 };
 
