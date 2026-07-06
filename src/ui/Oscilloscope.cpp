@@ -711,6 +711,10 @@ void Oscilloscope::reserveTriggeredBuffers()
         reserveOne (buffer);
 
     reservedTriggeredSamples = required;
+
+    // Window length changed size (timebase/decimation changed) — the locked
+    // kick reference no longer matches, so let the next hit re-establish it.
+    kickTraceLocked = false;
 }
 
 bool Oscilloscope::refreshTriggeredSnapshot()
@@ -738,11 +742,25 @@ bool Oscilloscope::refreshTriggeredSnapshot()
         }
 
         ghostBass[0].swap (triggeredBass);
-        ghostKick[0].swap (triggeredKick);
+
+        if (! kickTraceLocked)
+            ghostKick[0].swap (triggeredKick);
     }
 
     triggeredBass.swap (triggeredScratchBass);
-    triggeredKick.swap (triggeredScratchKick);
+
+    // Kick shape is stationary hit-to-hit (same one-shot at a fixed offset
+    // from the trigger point) — lock it to the first captured window so it
+    // holds still on screen and only the bass trace visibly moves each
+    // retrigger. Without this, both traces got replaced on every hit, which
+    // reads as the whole scope "running" at the kick's tempo instead of
+    // showing bass settling against a fixed reference.
+    if (! kickTraceLocked)
+    {
+        triggeredKick.swap (triggeredScratchKick);
+        kickTraceLocked = true;
+    }
+
     triggeredPreRollSamples = hitCapture.getPreRollSamples();
     latestTriggeredSequence = copiedSequence;
     repaint();
@@ -771,6 +789,11 @@ void Oscilloscope::buildFreeRunTriggeredSnapshot()
     triggeredPreRollSamples = juce::jlimit (0, desiredSamples - 1,
                                             msToSamples (20.0f, sampleRate) / juce::jmax (1, decimationFactor));
     freeRunTicks = freeRunWatchdogTicks;
+
+    // Free-run is a raw scrolling fallback, not a real trigger-aligned
+    // capture — once real triggering resumes, treat the next hit as a fresh
+    // reference rather than keeping whatever was on screen during free-run.
+    kickTraceLocked = false;
     repaint();
 }
 

@@ -63,6 +63,13 @@ public:
     void setTimebase (double newSampleRate, int newDecimationFactor) noexcept;
     void setDelayParameter (juce::RangedAudioParameter* parameter) noexcept { delayParameter = parameter; }
 
+    // The kick's captured window is locked to the first hit after each
+    // (re)lock point and held static, since its shape doesn't meaningfully
+    // change hit-to-hit — only the bass trace keeps refreshing on retrigger.
+    // Call this to force re-capturing a fresh kick reference on the next hit
+    // (e.g. if the kick sample/pattern changed and the old reference is stale).
+    void relockKickReference() noexcept { kickTraceLocked = false; }
+
     // Time zoom: 1x shows the whole history, higher values show only the most
     // recent slice stretched across the width. Amplitude zoom multiplies the
     // auto-gain. Both are clamped to sane ranges.
@@ -135,6 +142,7 @@ private:
     std::array<std::vector<float>, ghostCount> ghostKick;
     int latestTriggeredSequence = 0;
     int triggeredPreRollSamples = 0;
+    bool kickTraceLocked = false;
     int reservedTriggeredSamples = 0;
     int freeRunTicks = 0;
     static constexpr int freeRunWatchdogTicks = 18;
