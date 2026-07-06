@@ -184,6 +184,74 @@ inline double calculateVisibleWindowMs (int visibleSamples,
     return samplesToMs (visibleSamples * std::max (1, decimationFactor), sampleRate);
 }
 
+// Effective display-freeze predicate. The manual Freeze button and the
+// temporary mouse-hold inspection are tracked separately so releasing the
+// mouse never clears a freeze the user set on purpose; the display is held
+// whenever either is active.
+inline bool scopeDisplayHeld (bool manualFrozen, bool interactionHoldActive) noexcept
+{
+    return manualFrozen || interactionHoldActive;
+}
+
+// Free-run is a raw live scope: it deliberately IGNORES the display-only
+// visual/PDC offset so it reads as the untouched incoming signal. Every other
+// mode applies the offset so the bass and kick line up for comparison. This is
+// the semantic that makes Free-run and Overlay genuinely different rather than
+// two labels over identical drawing.
+inline bool scopeModeAppliesVisualOffset (ScopeViewMode mode) noexcept
+{
+    return mode != ScopeViewMode::FreeRun;
+}
+
+// Only the triggered view maps a plain horizontal drag to the Delay parameter.
+// Every scrolling view uses drag to inspect/pan the captured history instead,
+// so a click-drag never silently changes audio in those modes.
+inline bool scopeModeUsesDelayDrag (ScopeViewMode mode) noexcept
+{
+    return mode == ScopeViewMode::Triggered;
+}
+
+inline const char* scopeModeCaption (ScopeViewMode mode) noexcept
+{
+    switch (mode)
+    {
+        case ScopeViewMode::FreeRun:    return "FREE-RUN: live raw scope";
+        case ScopeViewMode::Overlay:    return "OVERLAY: aligned bass/kick comparison";
+        case ScopeViewMode::PhaseDelta: return "PHASE DELTA";
+        case ScopeViewMode::Separate:   return "SEPARATE";
+        case ScopeViewMode::Triggered:  return "TRIGGERED";
+    }
+
+    return "";
+}
+
+// Deterministic pan: the displayed scroll is always derived from the
+// mouse-down anchor (startScrollMs + how far the mouse has moved since), never
+// integrated frame-to-frame, so a drag can't drift or jump. Grab-and-move
+// metaphor: dragging the waveform to the right (positive pixels) reveals older
+// material, i.e. scrolls further back in time (larger scrollMs).
+inline float scopeDragToScrollMs (float startScrollMs, float pixelsMoved, float msPerPixel) noexcept
+{
+    return startScrollMs + pixelsMoved * msPerPixel;
+}
+
+// Clamp the display scroll to a valid history range: 0 ms is the latest/live
+// edge, and the maximum is the recorded history duration minus the currently
+// visible window (so the left edge can never fall before the oldest sample).
+inline float clampScopeScrollMs (float scrollMs,
+                                 int historyLength,
+                                 int visibleSamples,
+                                 double sampleRate,
+                                 int decimationFactor) noexcept
+{
+    const int safeDecimation = std::max (1, decimationFactor);
+    const int safeVisible    = std::max (1, visibleSamples);
+    const int maxScrollSamples = std::max (0, historyLength - safeVisible) * safeDecimation;
+    const float maxScrollMs = samplesToMs (maxScrollSamples, sampleRate);
+
+    return std::clamp (scrollMs, 0.0f, maxScrollMs);
+}
+
 inline int wrapHistoryIndex (int index, int historyLength) noexcept
 {
     if (historyLength <= 0)

@@ -171,7 +171,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureCombo (gridCombo, { "1/4", "1/8", "1/16", "1/32", "Bar", "ms" });
     configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Overlay", "Separate" });
     gridCombo.setTooltip ("Sets the scope time grid.");
-    viewCombo.setTooltip ("Chooses triggered or scrolling scope display.");
+    viewCombo.setTooltip ("Scope view: Triggered, Free-run (raw live scope, no offset), "
+                          "Phase Delta, Overlay (aligned bass/kick comparison), or Separate lanes.");
 
     freezeButton.setButtonText ("Freeze");
     freezeButton.setClickingTogglesState (true);
@@ -249,7 +250,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     // --- Centre scope + live match ----------------------------------------
     addAndMakeVisible (oscilloscope);
-    oscilloscope.setTooltip ("Triggered mode: drag left/right to nudge Delay. Shift-drag uses fine steps; double-click resets Delay.");
+    oscilloscope.setTooltip ("Triggered mode: drag left/right to nudge Delay (Shift = fine steps, double-click resets Delay). "
+                             "Free-run / Phase Delta / Overlay / Separate: click-hold to pause the display and drag to scrub "
+                             "earlier/later through the captured waveform; release to resume live. "
+                             "Wheel = time zoom, Shift+wheel = amplitude zoom.");
     addAndMakeVisible (correlationDisplay);
     correlationDisplay.setTooltip ("Live match. Click Details to collapse or expand the detailed meters.");
 

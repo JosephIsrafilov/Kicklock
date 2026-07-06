@@ -104,7 +104,11 @@ void Oscilloscope::timerCallback()
 
         anyRead = true;
 
-        if (! frozen)
+        // Always keep draining the FIFO so it never overflows, but only advance
+        // the displayed history when the display isn't held (manual freeze or a
+        // temporary mouse-hold inspection). Held => the on-screen snapshot stays
+        // put so a drag/scrub has a stable reference underneath it.
+        if (! isDisplayFrozen())
         {
             for (int i = 0; i < count; ++i)
             {
@@ -117,7 +121,7 @@ void Oscilloscope::timerCallback()
 
     if (viewMode == ScopeViewMode::Triggered)
     {
-        if (! frozen)
+        if (! isDisplayFrozen())
         {
             if (refreshTriggeredSnapshot())
                 freeRunTicks = 0;
@@ -127,7 +131,7 @@ void Oscilloscope::timerCallback()
             updateTriggeredAutoGain();
         }
     }
-    else if (anyRead && ! frozen)
+    else if (anyRead && ! isDisplayFrozen())
     {
         repaint();
     }
@@ -162,24 +166,15 @@ void Oscilloscope::paint (juce::Graphics& g)
 
         g.setColour (juce::Colours::white.withAlpha (0.9f));
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-        g.drawText ("TRIGGERED",
+        g.drawText (scopeModeCaption (viewMode),
                     plotBounds.removeFromTop (16.0f).toNearestInt(),
                     juce::Justification::centredLeft);
 
-        if (frozen)
-        {
-            g.setColour (juce::Colours::white.withAlpha (0.85f));
-            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-            g.drawText ("FROZEN",
-                        juce::Rectangle<int> ((int) (panelBounds.getRight() - 76.0f),
-                                              (int) (panelBounds.getY() + 8.0f), 64, 14),
-                        juce::Justification::centredRight);
-        }
-
+        drawHoldIndicator (g, panelBounds);
         return;
     }
 
-    rebuildVisibleBuffers (visible);
+    rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode));
 
     float peak = 0.0f;
     for (int i = 0; i < visible; ++i)
@@ -197,33 +192,42 @@ void Oscilloscope::paint (juce::Graphics& g)
     switch (viewMode)
     {
         case ScopeViewMode::Triggered:  break;
-        case ScopeViewMode::FreeRun:    drawOverlayMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
+        case ScopeViewMode::FreeRun:    drawFreeRunMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::PhaseDelta: drawPhaseDeltaMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::Overlay:    drawOverlayMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
         case ScopeViewMode::Separate:   drawSeparateMode (g, plotBounds, visible, gain); break;
     }
 
-    drawTransientMarkers (g, plotBounds, visible);
+    // Transient markers read the aligned relationship, so they only make sense
+    // in the alignment views — not in the raw Free-run scope.
+    if (viewMode != ScopeViewMode::FreeRun)
+        drawTransientMarkers (g, plotBounds, visible);
+
     drawScopeFooter (g, plotBounds, visible);
 
     g.setColour (juce::Colours::white.withAlpha (0.9f));
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-    g.drawText (viewMode == ScopeViewMode::FreeRun    ? "FREE-RUN"
-               : viewMode == ScopeViewMode::PhaseDelta ? "PHASE DELTA"
-               : viewMode == ScopeViewMode::Overlay    ? "OVERLAY"
-                                                       : "SEPARATE",
+    g.drawText (scopeModeCaption (viewMode),
                 plotBounds.removeFromTop (16.0f).toNearestInt(),
                 juce::Justification::centredLeft);
 
-    if (frozen)
-    {
-        g.setColour (juce::Colours::white.withAlpha (0.85f));
-        g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-        g.drawText ("FROZEN",
-                    juce::Rectangle<int> ((int) (panelBounds.getRight() - 76.0f),
-                                          (int) (panelBounds.getY() + 8.0f), 64, 14),
-                    juce::Justification::centredRight);
-    }
+    drawHoldIndicator (g, panelBounds);
+}
+
+void Oscilloscope::drawHoldIndicator (juce::Graphics& g, juce::Rectangle<float> panelBounds) const
+{
+    // Manual freeze wins the badge; a temporary inspection hold shows HOLD so
+    // the user can tell "I paused this by holding" from "I froze this".
+    const char* text = frozen ? "FROZEN" : interactionHoldActive ? "HOLD" : nullptr;
+    if (text == nullptr)
+        return;
+
+    g.setColour (juce::Colours::white.withAlpha (0.85f));
+    g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+    g.drawText (text,
+                juce::Rectangle<int> ((int) (panelBounds.getRight() - 76.0f),
+                                      (int) (panelBounds.getY() + 8.0f), 64, 14),
+                juce::Justification::centredRight);
 }
 
 void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
@@ -519,6 +523,60 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
     drawWaveLegend (g, bounds);
 }
 
+void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
+                                    juce::Rectangle<float> bounds,
+                                    int visible,
+                                    float gain,
+                                    float midY)
+{
+    // Raw live scope. Unlike Overlay this draws thin unfilled traces (no
+    // alignment fills) and, crucially, the visible buffers were rebuilt with
+    // NO visual/PDC offset applied — see scopeModeAppliesVisualOffset — so it
+    // shows the untouched incoming signals, continuously scrolling with the
+    // newest material at the right edge.
+    const float xStep = bounds.getWidth() / (float) (visible - 1);
+    const float halfHeight = bounds.getHeight() * 0.46f;
+
+    auto strokeTrace = [&] (const std::array<float, historyLength>& source,
+                            juce::Colour colour, float width)
+    {
+        juce::Path path;
+        for (int i = 0; i < visible; ++i)
+        {
+            const float x = bounds.getX() + (float) i * xStep;
+            const float v = juce::jlimit (-1.0f, 1.0f, source[(size_t) i] * gain);
+            const float y = midY - v * halfHeight;
+
+            if (i == 0)
+                path.startNewSubPath (x, y);
+            else
+                path.lineTo (x, y);
+        }
+
+        g.setColour (colour);
+        g.strokePath (path, juce::PathStrokeType (width, juce::PathStrokeType::curved,
+                                                  juce::PathStrokeType::rounded));
+    };
+
+    strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.1f);
+    strokeTrace (visibleMainBuffer, bassColour.withAlpha (0.92f), 1.35f);
+
+    // Live-edge indicator: the right edge is "now". A faint playhead line plus a
+    // small LIVE tag make the newest material obvious and reinforce that this is
+    // a running scope, not a frozen alignment snapshot.
+    const float edgeX = bounds.getRight();
+    g.setColour (juce::Colours::white.withAlpha (0.45f));
+    g.drawVerticalLine ((int) std::round (edgeX), bounds.getY(), bounds.getBottom());
+
+    g.setColour (juce::Colours::white.withAlpha (0.55f));
+    g.setFont (juce::Font (juce::FontOptions (9.0f)).boldened());
+    g.drawText ("LIVE",
+                juce::Rectangle<int> ((int) (edgeX - 36.0f), (int) (bounds.getY() + 2.0f), 34, 10),
+                juce::Justification::centredRight);
+
+    drawWaveLegend (g, bounds);
+}
+
 void Oscilloscope::drawSeparateMode (juce::Graphics& g,
                                      juce::Rectangle<float> bounds,
                                      int visible,
@@ -650,7 +708,9 @@ void Oscilloscope::drawScopeFooter (juce::Graphics& g,
     juce::String footer = "Window "
                         + juce::String ((float) visibleWindowMs, visibleWindowMs >= 10.0 ? 1 : 2) + " ms"
                 + "  |  Amp " + juce::String (ampZoom, 1) + "x"
-                + "  |  PDC " + juce::String (visualOffsetSamples) + " smp";
+                + "  |  PDC "
+                + (scopeModeAppliesVisualOffset (viewMode) ? juce::String (visualOffsetSamples) + " smp"
+                                                           : juce::String ("off (raw)"));
 
     if (tempoAvailable && gridDivision != GridDivision::Milliseconds)
         footer << "  |  " << juce::String ((float) bpm, 1) << " BPM";
@@ -661,8 +721,12 @@ void Oscilloscope::drawScopeFooter (juce::Graphics& g,
                 juce::Justification::centredLeft);
 }
 
-void Oscilloscope::rebuildVisibleBuffers (int visible)
+void Oscilloscope::rebuildVisibleBuffers (int visible, bool applyVisualOffset)
 {
+    // Free-run passes applyVisualOffset=false so it shows the raw incoming
+    // signal; every other mode applies the display-only visual/PDC offset so
+    // bass and kick line up for comparison.
+    const int effectiveOffset = applyVisualOffset ? visualOffsetSamples : 0;
     const int undecimatedScrollSamples = msToSamples(displayScrollMs, sampleRate);
     const int decimatedScrollSamples = undecimatedScrollSamples / std::max(1, decimationFactor);
     const int firstVisible = historyLength - visible - decimatedScrollSamples;
@@ -671,7 +735,7 @@ void Oscilloscope::rebuildVisibleBuffers (int visible)
     {
         const auto indices = resolveRelativeDisplayHistoryIndices (writeIndex, historyLength,
                                                                    firstVisible, i,
-                                                                   visualOffsetSamples,
+                                                                   effectiveOffset,
                                                                    decimationFactor);
         visibleMainBuffer[(size_t) i] = mainHistory[(size_t) indices.bassIndex];
         visibleSideBuffer[(size_t) i] = sidechainHistory[(size_t) indices.kickIndex];
@@ -820,9 +884,54 @@ void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)
     delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (nextValue));
 }
 
+float Oscilloscope::clampDisplayScrollMs (float value) const noexcept
+{
+    const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
+                                                      timeZoom, gridDivision, tempoAvailable, bpm);
+    return clampScopeScrollMs (value, historyLength, visible, sampleRate, decimationFactor);
+}
+
+void Oscilloscope::beginInspectionHold (float mouseX) noexcept
+{
+    // Freeze the displayed snapshot WITHOUT touching the manual Freeze state,
+    // and anchor the pan to this mouse position + the current scroll so the
+    // whole drag is computed deterministically from here.
+    interactionHoldActive = true;
+    panGestureActive = true;
+    dragStartX = mouseX;
+    panStartScrollMs = displayScrollMs;
+    repaint();
+}
+
+void Oscilloscope::updateInspectionPan (float mouseX) noexcept
+{
+    if (! panGestureActive)
+        return;
+
+    const float pixelsMoved = mouseX - dragStartX;
+    const int componentWidth = juce::jmax (1, getWidth());
+    const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
+                                                      timeZoom, gridDivision, tempoAvailable, bpm);
+    const float msPerPixel = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor)
+                           / (float) componentWidth;
+
+    displayScrollMs = clampDisplayScrollMs (scopeDragToScrollMs (panStartScrollMs, pixelsMoved, msPerPixel));
+    repaint();
+}
+
+void Oscilloscope::endInspectionHold() noexcept
+{
+    // Resume live movement. Deliberately does NOT clear `frozen`, so a manual
+    // freeze set before the click stays active after releasing the mouse.
+    interactionHoldActive = false;
+    panGestureActive = false;
+    repaint();
+}
+
 void Oscilloscope::mouseDown (const juce::MouseEvent& e)
 {
-    if (viewMode == ScopeViewMode::Triggered && delayParameter != nullptr && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
+    if (scopeModeUsesDelayDrag (viewMode) && delayParameter != nullptr
+        && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
     {
         dragStartX = e.position.x;
         dragStartDelayMs = delayParameter->convertFrom0to1 (delayParameter->getValue());
@@ -831,32 +940,17 @@ void Oscilloscope::mouseDown (const juce::MouseEvent& e)
     }
     else
     {
-        panGestureActive = true;
-        dragStartX = e.position.x;
-        panStartScrollMs = displayScrollMs;
+        // Non-triggered modes: click-hold pauses the display and starts panning.
+        beginInspectionHold (e.position.x);
     }
 }
 
 void Oscilloscope::mouseDrag (const juce::MouseEvent& e)
 {
     if (delayGestureActive)
-    {
         setDelayFromDrag (e);
-    }
     else if (panGestureActive)
-    {
-        if (viewMode == ScopeViewMode::Triggered)
-            return;
-
-        const float pixelsMoved = e.position.x - dragStartX;
-        const int componentWidth = juce::jmax (1, getWidth());
-        const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
-        const float msPerPixel = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor)
-                               / (float) componentWidth;
-        
-        displayScrollMs = panStartScrollMs - (pixelsMoved * msPerPixel);
-        repaint();
-    }
+        updateInspectionPan (e.position.x);
 }
 
 void Oscilloscope::mouseUp (const juce::MouseEvent&)
@@ -866,7 +960,9 @@ void Oscilloscope::mouseUp (const juce::MouseEvent&)
         delayParameter->endChangeGesture();
         delayGestureActive = false;
     }
-    panGestureActive = false;
+
+    if (interactionHoldActive || panGestureActive)
+        endInspectionHold();
 }
 
 void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
@@ -874,7 +970,8 @@ void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
     displayScrollMs = 0.0f;
     repaint();
 
-    if (viewMode == ScopeViewMode::Triggered && delayParameter != nullptr && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
+    if (scopeModeUsesDelayDrag (viewMode) && delayParameter != nullptr
+        && !e.mods.isRightButtonDown() && !e.mods.isCommandDown())
     {
         delayParameter->beginChangeGesture();
         delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (0.0f));
@@ -908,8 +1005,8 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
         const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
         const float msPerPixel = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor)
                                / (float) componentWidth;
-        
-        displayScrollMs -= wheel.deltaX * 100.0f * msPerPixel;
+
+        displayScrollMs = clampDisplayScrollMs (displayScrollMs - wheel.deltaX * 100.0f * msPerPixel);
         repaint();
     }
 }

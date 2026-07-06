@@ -107,6 +107,82 @@ public:
             expectWithinAbsoluteError (scopeDragPixelsToDelayDeltaMs (4.0f, true), 0.01f, 1.0e-7f);
         }
 
+        beginTest ("Free-run and Overlay use different display semantics");
+        {
+            // Root cause of the old duplication was that FreeRun and Overlay both
+            // called drawOverlayMode, so they were indistinguishable. They must now
+            // differ in a real drawing decision: Free-run ignores the visual/PDC
+            // offset (raw signal) while Overlay applies it (aligned comparison).
+            expect (! scopeModeAppliesVisualOffset (ScopeViewMode::FreeRun));
+            expect (scopeModeAppliesVisualOffset (ScopeViewMode::Overlay));
+            expect (scopeModeAppliesVisualOffset (ScopeViewMode::PhaseDelta));
+            expect (scopeModeAppliesVisualOffset (ScopeViewMode::Separate));
+
+            expectEquals (juce::String (scopeModeCaption (ScopeViewMode::FreeRun)),
+                          juce::String ("FREE-RUN: live raw scope"));
+            expectEquals (juce::String (scopeModeCaption (ScopeViewMode::Overlay)),
+                          juce::String ("OVERLAY: aligned bass/kick comparison"));
+            expect (juce::String (scopeModeCaption (ScopeViewMode::FreeRun))
+                    != juce::String (scopeModeCaption (ScopeViewMode::Overlay)));
+        }
+
+        beginTest ("Scope scroll clamps to the valid history range");
+        {
+            const int history = 8192, visible = 2048, dec = 4;
+            const float maxMs = samplesToMs ((history - visible) * dec, kSampleRate);
+
+            // 0 ms is the live edge — negative scroll is clamped up to it.
+            expectWithinAbsoluteError (clampScopeScrollMs (-50.0f, history, visible, kSampleRate, dec),
+                                       0.0f, 1.0e-6f);
+            // Beyond the oldest sample is clamped down to history-minus-window.
+            expectWithinAbsoluteError (clampScopeScrollMs (maxMs + 500.0f, history, visible, kSampleRate, dec),
+                                       maxMs, 1.0e-3f);
+            // In-range values pass through untouched.
+            expectWithinAbsoluteError (clampScopeScrollMs (maxMs * 0.5f, history, visible, kSampleRate, dec),
+                                       maxMs * 0.5f, 1.0e-3f);
+            // When the visible window covers all history there is no room to scroll.
+            expectWithinAbsoluteError (clampScopeScrollMs (10.0f, history, history, kSampleRate, dec),
+                                       0.0f, 1.0e-6f);
+        }
+
+        beginTest ("Scope drag maps to scroll deterministically and in a stable direction");
+        {
+            const float msPerPixel = 0.5f;
+            const float start = 100.0f;
+
+            // Dragging right (positive pixels) scrolls further back in time.
+            expectWithinAbsoluteError (scopeDragToScrollMs (start, 40.0f, msPerPixel), 120.0f, 1.0e-5f);
+            // Dragging left moves back toward the live edge.
+            expectWithinAbsoluteError (scopeDragToScrollMs (start, -40.0f, msPerPixel), 80.0f, 1.0e-5f);
+            // Zero movement holds position (no drift).
+            expectWithinAbsoluteError (scopeDragToScrollMs (start, 0.0f, msPerPixel), start, 1.0e-6f);
+            // Deterministic: identical inputs give identical output.
+            expectWithinAbsoluteError (scopeDragToScrollMs (start, 12.5f, msPerPixel),
+                                       scopeDragToScrollMs (start, 12.5f, msPerPixel), 0.0f);
+        }
+
+        beginTest ("Display hold combines manual freeze and temporary inspection hold");
+        {
+            // Manual freeze holds the display whether or not a mouse hold is active.
+            expect (scopeDisplayHeld (true, false));
+            expect (scopeDisplayHeld (true, true));
+            // A temporary hold freezes only while active.
+            expect (scopeDisplayHeld (false, true));
+            // Released with no manual freeze -> display resumes live.
+            expect (! scopeDisplayHeld (false, false));
+        }
+
+        beginTest ("Only triggered mode maps horizontal drag to the delay parameter");
+        {
+            // Preserves delay-drag in Triggered (documented in the scope tooltip)
+            // while every scrolling mode uses drag to inspect/pan instead.
+            expect (scopeModeUsesDelayDrag (ScopeViewMode::Triggered));
+            expect (! scopeModeUsesDelayDrag (ScopeViewMode::FreeRun));
+            expect (! scopeModeUsesDelayDrag (ScopeViewMode::PhaseDelta));
+            expect (! scopeModeUsesDelayDrag (ScopeViewMode::Overlay));
+            expect (! scopeModeUsesDelayDrag (ScopeViewMode::Separate));
+        }
+
         beginTest ("Triggered rendering is capped to screen-resolution points");
         {
             expectEquals (calculateTriggeredRenderPointCount (0, 800), 0);

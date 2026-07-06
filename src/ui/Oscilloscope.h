@@ -32,6 +32,12 @@ public:
     void setFrozen (bool shouldFreeze) noexcept { frozen = shouldFreeze; }
     bool isFrozen() const noexcept              { return frozen; }
 
+    // Effective display freeze: manual Freeze button OR a temporary mouse-hold
+    // inspection. Both the timer (whether it advances the history/snapshot) and
+    // paint gate on this, but they are stored separately so ending an
+    // inspection hold never clears a manual freeze the user set on purpose.
+    bool isDisplayFrozen() const noexcept { return scopeDisplayHeld (frozen, interactionHoldActive); }
+
     void setViewMode (ScopeViewMode mode) noexcept
     {
         if (viewMode != mode)
@@ -89,16 +95,27 @@ private:
     void drawPhaseDeltaMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
     void drawTriggeredMode (juce::Graphics&, juce::Rectangle<float>, float);
     void drawOverlayMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
+    void drawFreeRunMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
     void drawSeparateMode (juce::Graphics&, juce::Rectangle<float>, int, float);
     void drawWaveLegend (juce::Graphics&, juce::Rectangle<float>) const;
     void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
-    void rebuildVisibleBuffers (int visible);
+    void drawHoldIndicator (juce::Graphics&, juce::Rectangle<float>) const;
+    void rebuildVisibleBuffers (int visible, bool applyVisualOffset = true);
     bool refreshTriggeredSnapshot();
     void reserveTriggeredBuffers();
     void buildFreeRunTriggeredSnapshot();
     void updateTriggeredAutoGain() noexcept;
     void setDelayFromDrag (const juce::MouseEvent&);
+
+    // Temporary mouse-hold inspection. beginInspectionHold pauses the display
+    // (without touching the manual Freeze state) and anchors the pan; update
+    // InspectionPan recomputes displayScrollMs deterministically from that
+    // anchor; endInspectionHold resumes live movement.
+    void beginInspectionHold (float mouseX) noexcept;
+    void updateInspectionPan (float mouseX) noexcept;
+    void endInspectionHold() noexcept;
+    float clampDisplayScrollMs (float value) const noexcept;
 
     static constexpr int historyLength = 8192;
     static constexpr int scratchSize   = 256;
@@ -111,7 +128,8 @@ private:
     std::vector<float> sidechainHistory;
     int writeIndex = 0;   // next slot to overwrite (oldest sample)
 
-    bool  frozen      = false;
+    bool  frozen               = false;   // manual Freeze button
+    bool  interactionHoldActive = false;  // temporary mouse-hold inspection
     float displayGain = 1.0f;   // smoothed auto-gain applied to both traces
     float timeZoom    = 1.0f;   // horizontal zoom (1..16)
     float ampZoom     = 1.0f;   // vertical zoom (1..8)
