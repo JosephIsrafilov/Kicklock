@@ -352,7 +352,10 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // sample rate (full-rate sweep vs the decimated fallback ring).
     const auto range = computeTriggeredVisibleRange (n, safePreRoll, timeZoom);
     const int first = range.first;
-    const int visible = juce::jmax (2, range.visible);
+    const int visible = range.visible;
+    if (visible <= 1)
+        return;
+
     const int last = first + visible - 1;
 
     const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
@@ -571,12 +574,9 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
 
     g.setColour (labelColour);
     g.setFont (juce::Font (juce::FontOptions (10.5f)));
-    g.drawText ("-" + juce::String (preMs, 0) + " ms",
-                juce::Rectangle<int> ((int) bounds.getX(), (int) (bounds.getBottom() - 14.0f), 64, 12),
-                juce::Justification::centredLeft);
     g.drawText ("0",
-                juce::Rectangle<int> ((int) triggerX - 18, (int) (bounds.getBottom() - 14.0f), 36, 12),
-                juce::Justification::centred);
+                juce::Rectangle<int> ((int) bounds.getX(), (int) (bounds.getBottom() - 14.0f), 36, 12),
+                juce::Justification::centredLeft);
     g.drawText ("+" + juce::String (postMs, 0) + " ms",
                 juce::Rectangle<int> ((int) bounds.getRight() - 64, (int) (bounds.getBottom() - 14.0f), 64, 12),
                 juce::Justification::centredRight);

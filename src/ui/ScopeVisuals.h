@@ -131,12 +131,10 @@ inline bool scopeShouldRenderMinMaxBand (int visibleSamples, int pixelWidth) noe
     return pixelWidth > 0 && visibleSamples > pixelWidth * 3;
 }
 
-// Time-zoom for the triggered scope. Unlike the scrolling views, the triggered
-// view draws a fixed captured window rather than the rolling history, so its
-// zoom has to select a sub-slice of that window here. At zoom 1 the whole
-// captured window (n samples) is shown; higher zoom narrows to a slice centred
-// so the trigger sample keeps the SAME fractional x-position it had at 1x —
-// i.e. the wheel magnifies around the trigger line, not the buffer start.
+// Time-zoom for the triggered scope. The capture still stores pre-roll for
+// stable triggering, but the displayed window starts at the trigger sample so
+// the kick reference sits on the left 0 ms edge and the visible time axis reads
+// forward from the hit.
 inline TriggeredVisibleRange computeTriggeredVisibleRange (int n, int preRoll, float timeZoom) noexcept
 {
     TriggeredVisibleRange range;
@@ -149,18 +147,12 @@ inline TriggeredVisibleRange computeTriggeredVisibleRange (int n, int preRoll, f
     }
 
     const float zoom = std::max (1.0f, timeZoom);
-    int visible = (int) std::lround ((double) n / (double) zoom);
-    visible = std::clamp (visible, 2, n);
-
     const int clampedPreRoll = std::clamp (preRoll, 0, n - 1);
-    const double triggerFraction = (double) clampedPreRoll / (double) (n - 1);
+    const int postTriggerSamples = n - clampedPreRoll;
+    int visible = (int) std::lround ((double) postTriggerSamples / (double) zoom);
+    visible = std::clamp (visible, std::min (2, postTriggerSamples), postTriggerSamples);
 
-    // Keep the trigger at triggerFraction of the visible window's width, then
-    // clamp so the slice never runs off either end of the captured buffer.
-    int first = clampedPreRoll - (int) std::lround (triggerFraction * (double) (visible - 1));
-    first = std::clamp (first, 0, n - visible);
-
-    range.first = first;
+    range.first = clampedPreRoll;
     range.visible = visible;
     return range;
 }

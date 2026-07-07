@@ -128,25 +128,24 @@ public:
                                        10.0f, 1.0e-5f);
         }
 
-        beginTest ("Triggered visible range zooms around the trigger line");
+        beginTest ("Triggered visible range starts at the trigger line");
         {
-            // Zoom 1 shows the whole captured window.
+            // Zoom 1 shows the post-trigger part of the captured window. The
+            // pre-roll is still captured, but no longer displayed on the left.
             const auto whole = computeTriggeredVisibleRange (1000, 200, 1.0f);
-            expectEquals (whole.first, 0);
-            expectEquals (whole.visible, 1000);
+            expectEquals (whole.first, 200);
+            expectEquals (whole.visible, 800);
 
-            // Zoom 2 shows half the window, keeping the trigger at the same
-            // fractional x-position it had at 1x (invariant, not the buffer start).
+            // Zoom 2 keeps the trigger pinned to the left edge and narrows the
+            // post-trigger window.
             const auto zoomed = computeTriggeredVisibleRange (1000, 200, 2.0f);
-            expectEquals (zoomed.visible, 500);
-            const float fraction1x = 200.0f / 999.0f;
-            const float fractionZoom = (float) (200 - zoomed.first) / (float) (zoomed.visible - 1);
-            expectWithinAbsoluteError (fractionZoom, fraction1x, 0.01f);
+            expectEquals (zoomed.first, 200);
+            expectEquals (zoomed.visible, 400);
 
-            // A trigger near the end clamps the slice to the buffer's end edge
-            // rather than running past it.
+            // A trigger near the end clamps to the remaining post-trigger span.
             const auto nearEnd = computeTriggeredVisibleRange (1000, 999, 4.0f);
-            expectEquals (nearEnd.visible, 250);
+            expectEquals (nearEnd.first, 999);
+            expectEquals (nearEnd.visible, 1);
             expectEquals (nearEnd.first + nearEnd.visible, 1000);
 
             // Degenerate windows never produce a negative or out-of-range slice.
