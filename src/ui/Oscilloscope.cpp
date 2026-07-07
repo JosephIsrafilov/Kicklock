@@ -360,9 +360,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         return;
 
     const int last = first + visible - 1;
-    const int kickFirst = first;
-    const int bassFirst = fallbackActive ? first : 0;
-    const int bassLast = bassFirst + visible - 1;
 
     const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
     const float triggerX = bounds.getX() + (float) (safePreRoll - first) * sampleXStep;
@@ -395,13 +392,13 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     if (! fallbackActive)
         for (int gi = ghostCount - 1; gi >= 0; --gi)
             drawTriggeredTrace (g, bounds, ghostBass[(size_t) gi].data(), ghostFill[(size_t) gi],
-                                bassFirst, visible, sampleXStep, midY, halfHeight, gain,
+                                first, visible, sampleXStep, midY, halfHeight, gain,
                                 bassColour.withAlpha (scopeSweepGhostAlpha (gi, ghostCount)),
                                 1.0f, 0.0f, 0.0f);
 
     // Kick lane: the locked reference (or, before the first lock completes,
     // the kick assembling live alongside the sweep).
-    drawTriggeredTrace (g, bounds, kickData, kickFillCount, kickFirst, visible, sampleXStep,
+    drawTriggeredTrace (g, bounds, kickData, kickFillCount, first, visible, sampleXStep,
                         midY, halfHeight, gain,
                         kickColour.withAlpha (kickReferenceValid ? 0.95f : 0.80f),
                         1.8f, 0.30f, 0.0f);
@@ -409,7 +406,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // Bass lane: the live sweep, redrawn left-to-right on every hit
     // (ReVision behaviour). Samples past the sweep head simply don't exist
     // yet, so the trace grows in real time and never jumps.
-    drawTriggeredTrace (g, bounds, bassData, bassFillCount, bassFirst, visible, sampleXStep,
+    drawTriggeredTrace (g, bounds, bassData, bassFillCount, first, visible, sampleXStep,
                         midY, halfHeight, gain,
                         bassColour.withAlpha (0.98f), 2.2f, 0.34f, 0.16f);
 
@@ -419,9 +416,9 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         && ! isDisplayFrozen() && refreshingSweepIsLive())
     {
         const int headIndex = sweepFill - 1;
-        if (headIndex >= bassFirst && headIndex <= bassLast)
+        if (headIndex >= first && headIndex <= last)
         {
-            const float headX = bounds.getX() + (float) (headIndex - bassFirst) * sampleXStep;
+            const float headX = bounds.getX() + (float) (headIndex - first) * sampleXStep;
             const float headY = midY - juce::jlimit (-1.0f, 1.0f,
                                                      bassData[(size_t) headIndex] * gain) * halfHeight;
 
@@ -440,9 +437,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // it stable instead of flickering on broadband zero crossings; runs of
     // equal colour merge into single rects so it costs a handful of fills.
     {
-        const int bassAvailable = bassFillCount - bassFirst;
-        const int kickAvailable = kickFillCount - kickFirst;
-        const int stripSpan = juce::jmin (visible, bassAvailable, kickAvailable);
+        const int filled = juce::jmin (bassFillCount, kickFillCount);
+        const int stripSpan = juce::jmin (visible, filled - first);
         if (stripSpan > 1)
         {
             // Sample the swept slice down to pixel-column resolution FIRST,
@@ -455,8 +451,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
             for (int c = 0; c < columns; ++c)
             {
                 const int k = (int) ((long long) c * (stripSpan - 1) / (columns - 1));
-                columnMinScratch[(size_t) c] = bassData[(size_t) (bassFirst + k)];
-                columnMaxScratch[(size_t) c] = kickData[(size_t) (kickFirst + k)];
+                columnMinScratch[(size_t) c] = bassData[(size_t) (first + k)];
+                columnMaxScratch[(size_t) c] = kickData[(size_t) (first + k)];
             }
 
             const double columnRate = rate * (double) columns / (double) stripSpan;
@@ -523,12 +519,10 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     {
         auto drawPeakMarker = [&] (int index, juce::Colour colour, float triangleY, float lineAlpha)
         {
-            const int markerFirst = colour == bassColour ? bassFirst : kickFirst;
-            const int markerLast = markerFirst + visible - 1;
-            if (index < markerFirst || index > markerLast)
+            if (index < first || index > last)
                 return;
 
-            const float x = bounds.getX() + (float) (index - markerFirst) * sampleXStep;
+            const float x = bounds.getX() + (float) (index - first) * sampleXStep;
             g.setColour (colour.withAlpha (lineAlpha));
             g.drawLine (x, bounds.getY(), x, bounds.getBottom(), 1.0f);
             drawMarkerTriangle (g, x, bounds.getY() + triangleY, colour);
@@ -584,8 +578,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     g.setColour (labelColour);
     g.setFont (juce::Font (juce::FontOptions (10.5f)));
     g.drawText ("0",
-                juce::Rectangle<int> ((int) bounds.getX(), (int) (bounds.getBottom() - 14.0f), 36, 12),
-                juce::Justification::centredLeft);
+                juce::Rectangle<int> ((int) triggerX - 18, (int) (bounds.getBottom() - 14.0f), 36, 12),
+                juce::Justification::centred);
     g.drawText ("+" + juce::String (postMs, 0) + " ms",
                 juce::Rectangle<int> ((int) bounds.getRight() - 64, (int) (bounds.getBottom() - 14.0f), 64, 12),
                 juce::Justification::centredRight);

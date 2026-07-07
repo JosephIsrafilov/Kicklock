@@ -128,24 +128,26 @@ public:
                                        10.0f, 1.0e-5f);
         }
 
-        beginTest ("Triggered visible range starts at the trigger line");
+        beginTest ("Triggered visible range keeps pre-roll context before the trigger line");
         {
-            // Zoom 1 shows the post-trigger part of the captured window. The
-            // pre-roll is still captured, but no longer displayed on the left.
+            // Zoom 1 shows the whole captured window. The pre-roll remains
+            // visible so the trigger line is slightly inside the left edge.
             const auto whole = computeTriggeredVisibleRange (1000, 200, 1.0f);
-            expectEquals (whole.first, 200);
-            expectEquals (whole.visible, 800);
+            expectEquals (whole.first, 0);
+            expectEquals (whole.visible, 1000);
 
-            // Zoom 2 keeps the trigger pinned to the left edge and narrows the
-            // post-trigger window.
+            // Zoom 2 keeps the trigger at the same fractional position it had
+            // in the full capture, not glued to the left edge.
             const auto zoomed = computeTriggeredVisibleRange (1000, 200, 2.0f);
-            expectEquals (zoomed.first, 200);
-            expectEquals (zoomed.visible, 400);
+            expectEquals (zoomed.visible, 500);
+            const float fraction1x = 200.0f / 999.0f;
+            const float fractionZoom = (float) (200 - zoomed.first) / (float) (zoomed.visible - 1);
+            expectWithinAbsoluteError (fractionZoom, fraction1x, 0.01f);
 
-            // A trigger near the end clamps to the remaining post-trigger span.
+            // A trigger near the end clamps the slice to the buffer's end edge
+            // rather than running past it.
             const auto nearEnd = computeTriggeredVisibleRange (1000, 999, 4.0f);
-            expectEquals (nearEnd.first, 999);
-            expectEquals (nearEnd.visible, 1);
+            expectEquals (nearEnd.visible, 250);
             expectEquals (nearEnd.first + nearEnd.visible, 1000);
 
             // Degenerate windows never produce a negative or out-of-range slice.

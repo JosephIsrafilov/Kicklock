@@ -131,10 +131,11 @@ inline bool scopeShouldRenderMinMaxBand (int visibleSamples, int pixelWidth) noe
     return pixelWidth > 0 && visibleSamples > pixelWidth * 3;
 }
 
-// Time-zoom for the triggered scope. The capture still stores pre-roll for
-// stable triggering, but the displayed window starts at the trigger sample so
-// the kick reference sits on the left 0 ms edge and the visible time axis reads
-// forward from the hit.
+// Time-zoom for the triggered scope. The capture includes a short pre-roll, and
+// the display keeps that pre-roll visible so the trigger/0 line is slightly
+// inside the left edge, like a hardware/pro plugin scope. The -pre-roll label is
+// intentionally not drawn; the visible context is useful, the negative label is
+// not.
 inline TriggeredVisibleRange computeTriggeredVisibleRange (int n, int preRoll, float timeZoom) noexcept
 {
     TriggeredVisibleRange range;
@@ -147,12 +148,16 @@ inline TriggeredVisibleRange computeTriggeredVisibleRange (int n, int preRoll, f
     }
 
     const float zoom = std::max (1.0f, timeZoom);
-    const int clampedPreRoll = std::clamp (preRoll, 0, n - 1);
-    const int postTriggerSamples = n - clampedPreRoll;
-    int visible = (int) std::lround ((double) postTriggerSamples / (double) zoom);
-    visible = std::clamp (visible, std::min (2, postTriggerSamples), postTriggerSamples);
+    int visible = (int) std::lround ((double) n / (double) zoom);
+    visible = std::clamp (visible, 2, n);
 
-    range.first = clampedPreRoll;
+    const int clampedPreRoll = std::clamp (preRoll, 0, n - 1);
+    const double triggerFraction = (double) clampedPreRoll / (double) (n - 1);
+
+    int first = clampedPreRoll - (int) std::lround (triggerFraction * (double) (visible - 1));
+    first = std::clamp (first, 0, n - visible);
+
+    range.first = first;
     range.visible = visible;
     return range;
 }
