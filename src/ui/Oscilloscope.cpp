@@ -176,7 +176,10 @@ void Oscilloscope::vblankCallback()
             buildWaitingFallback();
             triggeredDirty = true;
         }
+    }
 
+    if (viewMode == ScopeViewMode::Triggered)
+    {
         // The auto-gain glides toward its per-hit target every tick; repaint
         // while it actually moves so the trace settles smoothly between hits.
         if (glideTriggeredAutoGain())
@@ -190,28 +193,40 @@ void Oscilloscope::vblankCallback()
     {
         bool viewChanged = false;
 
-        if (! isDisplayFrozen())
-        {
-            const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
-                                                              timeZoom, gridDivision, tempoAvailable, bpm);
+        const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
+                                                          timeZoom, gridDivision, tempoAvailable, bpm);
 
+        const bool isGliding = std::abs (targetTimeZoom - timeZoom) > 1.0e-3f || std::abs (targetAmpZoom - ampZoom) > 1.0e-3f;
+        const bool scrollChanged = displayScrollMs != lastDisplayScrollMs;
+
+        if (! isDisplayFrozen() || panGestureActive || isGliding || scrollChanged)
+        {
             rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode),
                                    viewMode != ScopeViewMode::FreeRun);
 
-            float peak = 0.0f;
-            for (int i = 0; i < visible; ++i)
+            if (! isDisplayFrozen())
             {
-                peak = juce::jmax (peak, std::abs (visibleMainBuffer[(size_t) i]));
-                peak = juce::jmax (peak, std::abs (visibleSideBuffer[(size_t) i]));
+                float peak = 0.0f;
+                for (int i = 0; i < visible; ++i)
+                {
+                    peak = juce::jmax (peak, std::abs (visibleMainBuffer[(size_t) i]));
+                    peak = juce::jmax (peak, std::abs (visibleSideBuffer[(size_t) i]));
+                }
+
+                const float candidateGain = scopeAutoGainTargetFromPeak (peak);
+                if (scopeAutoGainShouldRetarget (targetDisplayGain, candidateGain))
+                    targetDisplayGain = candidateGain;
+
+                if (anyRead)
+                    viewChanged = true;
             }
-
-            const float candidateGain = scopeAutoGainTargetFromPeak (peak);
-            if (scopeAutoGainShouldRetarget (targetDisplayGain, candidateGain))
-                targetDisplayGain = candidateGain;
-
-            if (anyRead)
+            else
+            {
                 viewChanged = true;
+            }
         }
+
+        lastDisplayScrollMs = displayScrollMs;
 
         const float oldGain = displayGain;
         displayGain = scopeGlideAutoGain (displayGain, targetDisplayGain > 0.0f ? targetDisplayGain : 1.0f);
@@ -221,11 +236,6 @@ void Oscilloscope::vblankCallback()
         if (viewChanged)
             repaint();
     }
-
-    // Glide the live zoom values toward the wheel targets (~80 ms settle at
-    // 60 Hz) so zooming animates instead of stepping per wheel notch. While a
-    // held/scrolled view is gliding, compensate the scroll so the time under
-    // the cursor stays fixed; a live view keeps its right ("now") edge anchored.
     if (std::abs (targetTimeZoom - timeZoom) > 1.0e-3f || std::abs (targetAmpZoom - ampZoom) > 1.0e-3f)
     {
         const int oldVisible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
@@ -867,12 +877,11 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
         if (visibleWindowMs > 0.0f)
         {
             const float scroll = displayScrollMs;
-            const int firstMajor = (int) std::ceil (scroll / majorStepMs - 1.0e-3f);
 
-            for (int m = firstMajor; ; ++m)
+            for (int m = 0; ; ++m)
             {
-                const float age = (float) m * majorStepMs;
-                const float x = bounds.getRight() - bounds.getWidth() * ((age - scroll) / visibleWindowMs);
+                const float screenAge = (float) m * majorStepMs;
+                const float x = bounds.getRight() - bounds.getWidth() * (screenAge / visibleWindowMs);
                 if (x < bounds.getX() - 0.5f)
                     break;
 
@@ -881,8 +890,8 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
 
                 for (int minor = 1; minor <= minorDivisions; ++minor)
                 {
-                    const float minorAge = age + majorStepMs * (float) minor / (float) (minorDivisions + 1);
-                    const float minorX = bounds.getRight() - bounds.getWidth() * ((minorAge - scroll) / visibleWindowMs);
+                    const float minorAge = screenAge + majorStepMs * (float) minor / (float) (minorDivisions + 1);
+                    const float minorX = bounds.getRight() - bounds.getWidth() * (minorAge / visibleWindowMs);
                     if (minorX < bounds.getX() - 0.5f || minorX > bounds.getRight() + 0.5f)
                         continue;
 
@@ -894,11 +903,14 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
                 gCache.setFont (juce::Font (juce::FontOptions (10.0f)));
                 const int labelRight = (int) std::round (x - 3.0f);
                 if (labelRight - 56 >= (int) bounds.getX())
-                    gCache.drawText (formatTimeLabel (-age),
+                {
+                    const float absoluteAge = screenAge + scroll;
+                    gCache.drawText (formatTimeLabel (-absoluteAge),
                                      juce::Rectangle<int> (labelRight - 56,
                                                            (int) std::round (bounds.getBottom() - 16.0f),
                                                            56, 12),
                                      juce::Justification::centredRight);
+                }
             }
         }
 

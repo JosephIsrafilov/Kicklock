@@ -334,6 +334,7 @@ private:
     float dragStartDelayMs = 0.0f;
 
     float displayScrollMs = 0.0f;
+    float lastDisplayScrollMs = -1.0f;
     bool panGestureActive = false;
     float panStartScrollMs = 0.0f;
     int panStartVisualOffsetSamples = 0;
