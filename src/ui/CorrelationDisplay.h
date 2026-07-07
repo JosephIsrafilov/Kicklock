@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <cmath>
 
 #include "../dsp/PhaseBands.h"
 
@@ -19,12 +20,14 @@ public:
                         std::atomic<float>& broadbandPercentToRead,
                         std::array<std::atomic<float>, PhaseBands::numBands>& bandPercentsToRead,
                         std::atomic<float>& appliedBeforePercentToRead,
-                        std::atomic<bool>& matchValidToRead)
+                        std::atomic<bool>& matchValidToRead,
+                        std::atomic<float>& lowEndSubLossDbToRead)
         : weightedPercentRef (weightedPercentToRead),
           lowEndPercentRef (lowEndPercentToRead),
           broadbandPercentRef (broadbandPercentToRead),
           appliedBeforePercentRef (appliedBeforePercentToRead),
-          matchValidRef (matchValidToRead)
+          matchValidRef (matchValidToRead),
+          lowEndSubLossDbRef (lowEndSubLossDbToRead)
     {
         for (int i = 0; i < PhaseBands::numBands; ++i)
             bandRefs[(size_t) i] = &bandPercentsToRead[(size_t) i];
@@ -51,10 +54,15 @@ public:
         auto area = bounds.reduced (10.0f, 6.0f);
         const bool drawDetails = detailsVisible && area.getHeight() >= 86.0f;
 
-        auto top = area.removeFromTop (drawDetails ? 56.0f : area.getHeight());
+        // +16 over the historical 56/area.getHeight() budget, reserved below as
+        // a fixed-height row for the sub-loss-dB headline so the percent
+        // number's own box is unchanged from before that line existed.
+        auto top = area.removeFromTop (drawDetails ? 72.0f : area.getHeight());
         g.setColour (juce::Colour (0xff97a5b2));
         g.setFont (juce::Font (juce::FontOptions (10.5f)).boldened());
         g.drawText ("LIVE MATCH", top.removeFromTop (12.0f).toNearestInt(), juce::Justification::centred);
+
+        auto subLossRow = top.removeFromBottom (16.0f);
 
         // While nothing meaningful is playing, every internal reading is a
         // neutral 50% — printing that reads as "half aligned", which is a lie.
@@ -76,6 +84,16 @@ public:
         g.setFont (juce::Font (juce::FontOptions (drawDetails ? 42.0f : 48.0f)).boldened());
         g.drawText (juce::String ((int) std::round (pct)) + "%",
                     top.toNearestInt(),
+                    juce::Justification::centred);
+
+        // The flagship read-out: the SAME live low-end relationship as the
+        // percent above, reframed as an honest dB cost instead of an abstract
+        // match score — "72% match" doesn't tell a producer how much level
+        // they're losing; "-4.2 dB sub loss" does.
+        g.setColour (colourForLoss (displaySubLossDb));
+        g.setFont (juce::Font (juce::FontOptions (12.5f)).boldened());
+        g.drawText (formatSubLossDb (displaySubLossDb),
+                    subLossRow.toNearestInt(),
                     juce::Justification::centred);
 
         if (displayAppliedBeforePercent >= 0.0f)
@@ -141,6 +159,27 @@ private:
         return juce::Colour (0xff22c55e);
     }
 
+    // Thresholds are looser than colourForMatch's 55/75% because a few dB of
+    // sub loss is routine on real material; only flag it once it is musically
+    // obvious (a producer would actually hear a hollow low end).
+    static juce::Colour colourForLoss (float lossDb) noexcept
+    {
+        if (lossDb <= -6.0f)
+            return juce::Colour (0xffef4444);
+        if (lossDb <= -2.0f)
+            return juce::Colour (0xfff59e0b);
+        return juce::Colour (0xff22c55e);
+    }
+
+    // subLossDb() never reports a gain over the best case, so the value is
+    // always <= 0; round-to-zero avoids ever printing a stray "-0.0".
+    static juce::String formatSubLossDb (float lossDb) noexcept
+    {
+        const float rounded = std::round (lossDb * 10.0f) / 10.0f;
+        const float clean = rounded == 0.0f ? 0.0f : rounded;
+        return juce::String (clean, 1) + " dB sub loss";
+    }
+
     static void drawSummaryCell (juce::Graphics& g,
                                  juce::Rectangle<float> bounds,
                                  const char* label,
@@ -191,11 +230,13 @@ private:
         const float lowTarget = lowEndPercentRef.load();
         const float broadbandTarget = broadbandPercentRef.load();
         const float beforeTarget = appliedBeforePercentRef.load();
+        const float subLossTarget = lowEndSubLossDbRef.load();
 
         displayWeightedPercent += 0.25f * (target - displayWeightedPercent);
         displayLowEndPercent += 0.25f * (lowTarget - displayLowEndPercent);
         displayBroadbandPercent += 0.25f * (broadbandTarget - displayBroadbandPercent);
         displayAppliedBeforePercent = beforeTarget;
+        displaySubLossDb += 0.25f * (subLossTarget - displaySubLossDb);
 
         for (int i = 0; i < PhaseBands::numBands; ++i)
         {
@@ -211,6 +252,7 @@ private:
     std::atomic<float>& broadbandPercentRef;
     std::atomic<float>& appliedBeforePercentRef;
     std::atomic<bool>& matchValidRef;
+    std::atomic<float>& lowEndSubLossDbRef;
     bool displayValid = false;
     int validHoldTicks = 0;
     std::array<std::atomic<float>*, PhaseBands::numBands> bandRefs {};
@@ -219,6 +261,7 @@ private:
     float displayLowEndPercent = 50.0f;
     float displayBroadbandPercent = 50.0f;
     float displayAppliedBeforePercent = -1.0f;
+    float displaySubLossDb = 0.0f;
     std::array<float, PhaseBands::numBands> displayBandPercent { 50.0f, 50.0f, 50.0f, 50.0f };
     bool detailsVisible = true;
     juce::Rectangle<int> detailsToggleBounds;

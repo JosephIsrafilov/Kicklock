@@ -19,6 +19,7 @@
 #include "PitchTracker.h"
 #include "MultiBandCorrelation.h"
 #include "RealtimeMultiBandMeter.h"
+#include "SubLossMeter.h"
 #include "SignalActivityTracker.h"
 #include "PhaseFixEngine.h"
 #include "FrequencyDomainPhaseRefiner.h"

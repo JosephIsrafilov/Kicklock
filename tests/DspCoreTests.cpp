@@ -42,6 +42,70 @@ public:
 static CorrelationMeterTests correlationMeterTestsInstance;
 
 //==============================================================================
+class SubLossMeterTests : public juce::UnitTest
+{
+public:
+    SubLossMeterTests() : juce::UnitTest ("SubLossMeter", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Equal-energy perfect alignment reports no loss");
+        {
+            expectWithinAbsoluteError (subLossDb (1.0, 1.0, 1.0, 1.0), 0.0f, 1.0e-4f);
+        }
+
+        beginTest ("Equal-energy full cancellation loses (almost) everything");
+        {
+            // Ea=Eb=1, r=-1 -> E_now = 1+1-2 = 0: total cancellation, clamped to
+            // the -60 dB floor rather than -infinity.
+            expectWithinAbsoluteError (subLossDb (1.0, 1.0, -1.0, 1.0), -60.0f, 1.0e-4f);
+        }
+
+        beginTest ("Equal-energy zero correlation loses exactly 3.01 dB vs best");
+        {
+            // E_now = 1+1+0 = 2, E_best = 1+1+2 = 4 -> 10*log10(0.5).
+            const float expected = (float) (10.0 * std::log10 (0.5));
+            expectWithinAbsoluteError (subLossDb (1.0, 1.0, 0.0, 1.0), expected, 1.0e-3f);
+        }
+
+        beginTest ("A dominant, quiet second signal can only lose a little");
+        {
+            // Kick (energy 1) far louder than bass (energy 0.01): even full
+            // cancellation barely dents the combined energy, because the kick
+            // alone already carries almost all of it.
+            const float lossDb = subLossDb (1.0, 0.01, -1.0, 1.0);
+            expectGreaterThan (lossDb, -3.0f);
+            expectLessThan (lossDb, 0.0f);
+        }
+
+        beginTest ("Loss is monotonic: worse correlation never reports less loss");
+        {
+            const float atBest    = subLossDb (0.6, 0.4, 1.0, 1.0);
+            const float atNeutral = subLossDb (0.6, 0.4, 0.0, 1.0);
+            const float atWorst   = subLossDb (0.6, 0.4, -1.0, 1.0);
+
+            expectGreaterOrEqual (atBest, atNeutral);
+            expectGreaterOrEqual (atNeutral, atWorst);
+        }
+
+        beginTest ("Silence (zero energy) reports zero loss rather than NaN or -inf");
+        {
+            expectWithinAbsoluteError (subLossDb (0.0, 0.0, 0.0, 1.0), 0.0f, 1.0e-6f);
+            expectWithinAbsoluteError (subLossDb (0.0, 1.0, 0.0, 1.0), 0.0f, 1.0e-6f);
+        }
+
+        beginTest ("Match-percent convention round-trips through correlation");
+        {
+            expectWithinAbsoluteError ((float) correlationFromMatchPercent (100.0f), 1.0f, 1.0e-5f);
+            expectWithinAbsoluteError ((float) correlationFromMatchPercent (0.0f), -1.0f, 1.0e-5f);
+            expectWithinAbsoluteError ((float) correlationFromMatchPercent (50.0f), 0.0f, 1.0e-5f);
+        }
+    }
+};
+
+static SubLossMeterTests subLossMeterTestsInstance;
+
+//==============================================================================
 class FractionalDelayLineTests : public juce::UnitTest
 {
 public:
@@ -1444,3 +1508,55 @@ public:
 };
 
 static LiveMatchValidityTests liveMatchValidityTestsInstance;
+
+//==============================================================================
+// The live meter's dB headline (see SubLossMeter.h): the same SUB+LOW
+// relationship as getLowEndMatchPercent(), reframed as an honest cost instead
+// of an abstract percentage.
+class RealtimeMultiBandMeterSubLossTests : public juce::UnitTest
+{
+public:
+    RealtimeMultiBandMeterSubLossTests() : juce::UnitTest ("RealtimeMultiBandMeterSubLoss", "DSP") {}
+
+    void runTest() override
+    {
+        beginTest ("Silence reports zero loss");
+        {
+            RealtimeMultiBandMeter meter;
+            meter.prepare (kSampleRate, (int) (kSampleRate * 0.25));
+            expectWithinAbsoluteError (meter.getLowEndSubLossDb(), 0.0f, 1.0e-6f);
+        }
+
+        beginTest ("Identical low-end signals settle near zero loss");
+        {
+            RealtimeMultiBandMeter meter;
+            meter.prepare (kSampleRate, (int) (kSampleRate * 0.25));
+
+            const int play = (int) (kSampleRate * 0.5);
+            for (int i = 0; i < play; ++i)
+            {
+                const float v = 0.3f * (float) std::sin (kTwoPi * 60.0 * (double) i / kSampleRate);
+                meter.pushSample (v, v);
+            }
+
+            expectGreaterThan (meter.getLowEndSubLossDb(), -1.0f);
+        }
+
+        beginTest ("Inverted equal-level low-end signals report heavy loss");
+        {
+            RealtimeMultiBandMeter meter;
+            meter.prepare (kSampleRate, (int) (kSampleRate * 0.25));
+
+            const int play = (int) (kSampleRate * 0.5);
+            for (int i = 0; i < play; ++i)
+            {
+                const float v = 0.3f * (float) std::sin (kTwoPi * 60.0 * (double) i / kSampleRate);
+                meter.pushSample (v, -v);
+            }
+
+            expectLessThan (meter.getLowEndSubLossDb(), -10.0f);
+        }
+    }
+};
+
+static RealtimeMultiBandMeterSubLossTests realtimeMultiBandMeterSubLossTestsInstance;

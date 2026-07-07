@@ -84,6 +84,12 @@ public:
     std::atomic<float> liveMultiBandMatchPercent { 50.0f };  // low-end-weighted overall
     std::atomic<float> liveLowEndMatchPercent { 50.0f };     // SUB + LOW only
     std::atomic<float> liveBroadbandMatchPercent { 50.0f };  // even 20 Hz-500 Hz blend
+
+    // Live sub/low-end loss in dB versus the best achievable alignment (see
+    // SubLossMeter.h) — the same SUB+LOW relationship as liveLowEndMatchPercent,
+    // reframed as an honest "how many dB you're throwing away" headline instead
+    // of an abstract percentage.
+    std::atomic<float> liveLowEndSubLossDb { 0.0f };
     std::array<std::atomic<float>, PhaseBands::numBands> liveBandMatchPercent {};
     std::atomic<float> latestAppliedBeforePercent { -1.0f };
 
