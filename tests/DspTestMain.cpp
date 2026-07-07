@@ -2,11 +2,26 @@
 
 int main (int argc, char** argv)
 {
-    juce::UnitTestRunner runner;
+    // Print each test name as it starts so we can see which one crashes
+    // before the runner collects results (crash = no results printed).
+    class FlushingRunner : public juce::UnitTestRunner
+    {
+    protected:
+        void logMessage (const juce::String& msg) override
+        {
+            if (msg.isNotEmpty())
+            {
+                std::cout << msg.toStdString() << std::endl;
+                std::cout.flush();
+            }
+        }
+    };
+
+    FlushingRunner runner;
     runner.setAssertOnFailure (false);
 
     if (argc > 1)
-        runner.runTestsWithName (argv[1]);
+        runner.runTestsInCategory (argv[1]);
     else
         runner.runAllTests();
 

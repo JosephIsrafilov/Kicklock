@@ -1454,7 +1454,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         const float attackMs = duckAttackParam != nullptr ? duckAttackParam->load() : 2.0f;
         const float releaseMs = duckReleaseParam != nullptr ? duckReleaseParam->load() : 50.0f;
         
-        const float sr = getSampleRate();
+        const float sr = (float) getSampleRate();
         const float attackCoeff = std::exp (-1.0f / (attackMs * 0.001f * sr));
         const float releaseCoeff = std::exp (-1.0f / (releaseMs * 0.001f * sr));
         

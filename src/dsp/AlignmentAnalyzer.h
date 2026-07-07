@@ -104,7 +104,6 @@ public:
         const int fftSize  = 1 << fftOrder;
 
         auto& fft = FftPlanCache::get (fftOrder);
-
         // juce::dsp::FFT::performRealOnlyForwardTransform expects the real
         // input packed contiguously in the first fftSize floats of a
         // 2 * fftSize scratch buffer. Writing the samples into every other slot
@@ -125,13 +124,13 @@ public:
         // X * conj(Y) cross-spectrum per user request
         for (int i = 0; i <= fftSize / 2; ++i)
         {
-            const float ar = fftA[2 * i];
-            const float ai = fftA[2 * i + 1];
-            const float br = fftB[2 * i];
-            const float bi = fftB[2 * i + 1];
+            const float ar = fftA[(size_t) (2 * i)];
+            const float ai = fftA[(size_t) (2 * i + 1)];
+            const float br = fftB[(size_t) (2 * i)];
+            const float bi = fftB[(size_t) (2 * i + 1)];
             // (ar + j*ai) * (br - j*bi)
-            fftA[2 * i]     = ar * br + ai * bi;
-            fftA[2 * i + 1] = ai * br - ar * bi;
+            fftA[(size_t) (2 * i)]     = ar * br + ai * bi;
+            fftA[(size_t) (2 * i + 1)] = ai * br - ar * bi;
         }
 
         fft.performRealOnlyInverseTransform (fftA.data());
@@ -153,7 +152,7 @@ public:
         for (int d = -maxLag; d <= maxLag; ++d)
         {
             const int idx = (d >= 0) ? d : (fftSize + d);
-            const double c = (double) fftA[idx] / norm;
+            const double c = (double) fftA[(size_t)idx] / norm;
             const double m = std::abs (c);
             if (m > bestAbs)
             {
@@ -176,7 +175,7 @@ public:
                 continue;
 
             const int idx = (d >= 0) ? d : (fftSize + d);
-            const double c = (double) fftA[idx] / norm;
+            const double c = (double) fftA[(size_t)idx] / norm;
             const double m = std::abs (c);
             if (m < bestAbs * 0.98)
                 continue;
@@ -201,9 +200,9 @@ public:
         {
             const int idxM = (bestLag - 1 >= 0) ? (bestLag - 1) : (fftSize + bestLag - 1);
             const int idxP = (bestLag + 1 >= 0) ? (bestLag + 1) : (fftSize + bestLag + 1);
-            const double ym1 = std::abs ((double) fftA[idxM] / norm);
+            const double ym1 = std::abs ((double) fftA[(size_t)idxM] / norm);
             const double y0  = bestAbs;
-            const double yp1 = std::abs ((double) fftA[idxP] / norm);
+            const double yp1 = std::abs ((double) fftA[(size_t)idxP] / norm);
             const double denom = ym1 - 2.0 * y0 + yp1;
             if (std::abs (denom) > 1.0e-12)
                 refinedLag += 0.5 * (ym1 - yp1) / denom;
@@ -319,6 +318,8 @@ private:
     // maxLag is typically 1 for the rotator search (already coarse-aligned).
     static Peak findPeakFFT (const float* a, const float* b, int window, int maxLag)
     {
+        maxLag = std::clamp(maxLag, 1, window - 1);
+
         double ea = 0.0, eb = 0.0;
         for (int n = 0; n < window; ++n)
         {
@@ -366,8 +367,8 @@ private:
 
         for (int i = 0; i < window; ++i)
         {
-            fftA[i] = a[i];
-            fftB[i] = b[i];
+            fftA[(size_t) i] = a[i];
+            fftB[(size_t) i] = b[i];
         }
 
         fft.performRealOnlyForwardTransform (fftA.data(), true);
@@ -375,12 +376,12 @@ private:
 
         for (int i = 0; i <= fftSize / 2; ++i)
         {
-            const float ar = fftA[2 * i];
-            const float ai = fftA[2 * i + 1];
-            const float br = fftB[2 * i];
-            const float bi = fftB[2 * i + 1];
-            fftA[2 * i]     = ar * br + ai * bi;
-            fftA[2 * i + 1] = ai * br - ar * bi;
+            const float ar = fftA[(size_t) (2 * i)];
+            const float ai = fftA[(size_t) (2 * i + 1)];
+            const float br = fftB[(size_t) (2 * i)];
+            const float bi = fftB[(size_t) (2 * i + 1)];
+            fftA[(size_t) (2 * i)]     = ar * br + ai * bi;
+            fftA[(size_t) (2 * i + 1)] = ai * br - ar * bi;
         }
 
         fft.performRealOnlyInverseTransform (fftA.data());
@@ -388,7 +389,7 @@ private:
         for (int d = -maxLag; d <= maxLag; ++d)
         {
             const int idx = (d >= 0) ? d : (fftSize + d);
-            const double c = (double) fftA[idx] / norm;
+            const double c = (double) fftA[(size_t)idx] / norm;
             const double m = std::abs (c);
             if (m > peak.abs_)
             {

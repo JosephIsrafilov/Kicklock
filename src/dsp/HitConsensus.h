@@ -98,7 +98,7 @@ public:
         const int numPoints = (int)std::ceil((maxDelay - minDelay) / step) + 1 + 20; // Padding
         const float startGrid = minDelay - 10.0f * step;
         
-        std::vector<float> density(numPoints, 0.0f);
+        std::vector<float> density((size_t)numPoints, 0.0f);
         for (int i = 0; i < numPoints; ++i)
         {
             float x = startGrid + (float)i * step;

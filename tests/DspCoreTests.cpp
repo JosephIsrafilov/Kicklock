@@ -1300,8 +1300,11 @@ public:
                     startOffsets.push_back (i);
 
             expectEquals ((int) startOffsets.size(), 2);
-            expectEquals (startOffsets[0], 0);
-            expectLessThan (startOffsets[1] - startOffsets[0], buffer.getWindowSamples());
+            if (startOffsets.size() >= 2)
+            {
+                expectEquals (startOffsets[0], 0);
+                expectLessThan (startOffsets[1] - startOffsets[0], buffer.getWindowSamples());
+            }
         }
     }
 };

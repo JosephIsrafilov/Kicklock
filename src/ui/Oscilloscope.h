@@ -231,6 +231,7 @@ private:
     // per pixel column; historyLength safely exceeds any plausible width).
     std::array<float, historyLength> columnMinScratch {};
     std::array<float, historyLength> columnMaxScratch {};
+    std::vector<float> cleanBassScratch;
     
     // Cached static layers
     std::unique_ptr<juce::VBlankAttachment> vblankAttachment;
@@ -244,8 +245,9 @@ private:
         bool separateMode = false;
         GridDivision division = GridDivision::Milliseconds;
         bool operator!=(const GridCacheKey& o) const {
-            return visibleWindowMs != o.visibleWindowMs || scrollMs != o.scrollMs ||
-                   bpm != o.bpm || boundsW != o.boundsW || boundsH != o.boundsH ||
+            return std::abs(visibleWindowMs - o.visibleWindowMs) > 1.0e-5f ||
+                   std::abs(scrollMs - o.scrollMs) > 1.0e-5f ||
+                   std::abs(bpm - o.bpm) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH ||
                    tempoAvailable != o.tempoAvailable || separateMode != o.separateMode ||
                    division != o.division;
         }
@@ -261,7 +263,7 @@ private:
         int boundsW = 0, boundsH = 0;
         bool operator!=(const KickRefCacheKey& o) const {
             return fill != o.fill || first != o.first || visible != o.visible ||
-                   gain != o.gain || timeZoom != o.timeZoom || boundsW != o.boundsW || boundsH != o.boundsH;
+                   std::abs(gain - o.gain) > 1.0e-5f || std::abs(timeZoom - o.timeZoom) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH;
         }
     } kickRefKey;
 
@@ -275,8 +277,8 @@ private:
         int newestGhostId = -1;
         bool hideTails = false;
         bool operator!=(const GhostsCacheKey& o) const {
-            return first != o.first || visible != o.visible || gain != o.gain ||
-                   timeZoom != o.timeZoom || boundsW != o.boundsW || boundsH != o.boundsH ||
+            return first != o.first || visible != o.visible || std::abs(gain - o.gain) > 1.0e-5f ||
+                   std::abs(timeZoom - o.timeZoom) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH ||
                    newestGhostId != o.newestGhostId || hideTails != o.hideTails;
         }
     } ghostsKey;

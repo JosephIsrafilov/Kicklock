@@ -457,6 +457,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
             const float v = std::abs(src[i]);
             if (v <= minEnv) { minEnv = v; tailEndIndex = i; }
         }
+        if (cleanBassScratch.size() < (size_t)fill)
+            cleanBassScratch.resize((size_t)fill, 0.0f);
         for (int i = 0; i < fill; ++i)
             cleanBassScratch[(size_t) i] = (i < tailEndIndex) ? 0.0f : src[i];
         return cleanBassScratch.data();
@@ -1315,7 +1317,7 @@ void Oscilloscope::strokeMinMaxBand (juce::Graphics& g, juce::Rectangle<float> b
 
 void Oscilloscope::drawTransientMarkers (juce::Graphics& g,
                                          juce::Rectangle<float> bounds,
-                                         int visible) const
+                                         int visible)
 {
     // P7: markers sit on the amplitude ENVELOPE peak (rectify + centered smooth)
     // rather than the raw broadband peak sample, so the Δ-ms read-out reflects
