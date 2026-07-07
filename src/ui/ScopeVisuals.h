@@ -461,6 +461,29 @@ inline bool scopeKickReferenceCaptureIsValid (float kickPeak) noexcept
     return kickPeak > 1.0e-4f;
 }
 
+inline bool triggeredMarkersBelongToFrame (unsigned long long markersHitId,
+                                           unsigned long long frameHitId,
+                                           int frameFill,
+                                           int windowSamples) noexcept
+{
+    return frameHitId != 0
+        && markersHitId == frameHitId
+        && windowSamples > 0
+        && frameFill >= windowSamples;
+}
+
+inline bool triggeredReferenceSharesFrameGeometry (int referenceTriggerSample,
+                                                   int liveTriggerSample,
+                                                   int windowSamples) noexcept
+{
+    return windowSamples > 1
+        && referenceTriggerSample >= 0
+        && liveTriggerSample >= 0
+        && referenceTriggerSample < windowSamples
+        && liveTriggerSample < windowSamples
+        && referenceTriggerSample == liveTriggerSample;
+}
+
 // Deterministic pan: the displayed scroll is always derived from the
 // mouse-down anchor (startScrollMs + how far the mouse has moved since), never
 // integrated frame-to-frame, so a drag can't drift or jump. Grab-and-move

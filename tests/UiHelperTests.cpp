@@ -193,6 +193,45 @@ public:
                           n - range.visible);
         }
 
+        beginTest ("Triggered frame ownership prevents stale marker reuse");
+        {
+            expect (triggeredMarkersBelongToFrame (2, 2, 1024, 1024));
+            expect (! triggeredMarkersBelongToFrame (1, 2, 1024, 1024));
+            expect (! triggeredMarkersBelongToFrame (2, 2, 512, 1024));
+            expect (! triggeredMarkersBelongToFrame (0, 0, 1024, 1024));
+        }
+
+        beginTest ("Triggered reference and live frame must share trigger geometry");
+        {
+            expect (triggeredReferenceSharesFrameGeometry (128, 128, 1024));
+            expect (! triggeredReferenceSharesFrameGeometry (128, 120, 1024));
+            expect (! triggeredReferenceSharesFrameGeometry (1024, 1024, 1024));
+            expect (! triggeredReferenceSharesFrameGeometry (128, 128, 1));
+        }
+
+        beginTest ("Triggered delta follows the currently displayed hit frame");
+        {
+            const int window = 1024;
+            const int trigger = 128;
+            std::vector<float> kick (window, 0.0f);
+            std::vector<float> bass1 (window, 0.0f);
+            std::vector<float> bass2 (window, 0.0f);
+
+            kick[(size_t) trigger] = 1.0f;
+            bass1[(size_t) (trigger + 256)] = 1.0f;
+            bass2[(size_t) (trigger + 128)] = 1.0f;
+
+            const auto markers1 = findEnvelopePeakMarkers (bass1.data(), kick.data(), window, kSampleRate, 0);
+            const auto markers2 = findEnvelopePeakMarkers (bass2.data(), kick.data(), window, kSampleRate, 0);
+
+            expect (markers1.valid);
+            expect (markers2.valid);
+            expectEquals (markers1.bassPeakIndex, trigger + 256);
+            expectEquals (markers2.bassPeakIndex, trigger + 128);
+            expectWithinAbsoluteError (markers1.deltaMs, samplesToMs (256, kSampleRate), 1.0e-5f);
+            expectWithinAbsoluteError (markers2.deltaMs, samplesToMs (128, kSampleRate), 1.0e-5f);
+        }
+
         beginTest ("Visual offset shifts the display index by decimated samples");
         {
             const int unshifted = resolveDisplayHistoryIndex (100, 2048, 1800, 12, 0, 4);

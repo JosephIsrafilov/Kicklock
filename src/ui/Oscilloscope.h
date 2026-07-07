@@ -235,9 +235,15 @@ private:
     float kickReferencePeak = 0.0f;
     float targetDisplayGain = 0.0f;  // sticky auto-gain target; 0 = unseeded
     ScopePeakMarkers sweepMarkers;   // cached at sweep completion (full-window indices)
+    unsigned long long nextSweepHitId = 1;
+    unsigned long long sweepHitId = 0;
+    unsigned long long pendingRelockHitId = 0;
+    unsigned long long kickReferenceHitId = 0;
+    unsigned long long sweepMarkersHitId = 0;
     int sweepWindowSamples = 0;
     int sweepPreRollSamples = 0;
     int sweepTriggerSample = 0;       // visual 0 ms: first meaningful kick onset
+    int kickReferenceTriggerSample = 0;
     KickReferenceState kickReferenceState = KickReferenceState::NoReference;
 
     // Pre-first-kick fallback: the decimated ring shown live so the triggered

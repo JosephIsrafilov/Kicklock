@@ -352,10 +352,27 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
                           : kickReferenceValid ? kickReference.data()
                                                : sweepKick.data();
     const int kickFillCount = fallbackActive ? n : (kickReferenceValid ? n : sweepFill);
-    const int preRoll = fallbackActive ? fallbackPreRoll : sweepTriggerSample;
+    const int liveTriggerSample = fallbackActive ? fallbackPreRoll : sweepTriggerSample;
+    const int preRoll = fallbackActive ? fallbackPreRoll
+                      : kickReferenceValid ? kickReferenceTriggerSample
+                                           : liveTriggerSample;
     const double rate = fallbackActive ? fallbackRate : sampleRate;
 
     const int triggerSample = juce::jlimit (0, n - 1, preRoll);
+    const bool referenceCompatible = fallbackActive
+                                  || ! kickReferenceValid
+                                  || triggeredReferenceSharesFrameGeometry (kickReferenceTriggerSample,
+                                                                            liveTriggerSample, n);
+
+    if (! referenceCompatible)
+    {
+        g.setColour (labelColour);
+        g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+        g.drawText ("WAITING FOR COMPATIBLE TRIGGER FRAME",
+                    bounds.withSizeKeepingCentre (280.0f, 18.0f).toNearestInt(),
+                    juce::Justification::centred);
+        return;
+    }
 
     // Time zoom: select the visible slice of the capture window, keeping the
     // visual 0 ms line at a fixed fractional x. The ms axis uses the source's own
@@ -522,7 +539,11 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // ONCE per completed hit (see finishSweep) over the full window, so the
     // read-out never jitters frame-to-frame and doesn't change with zoom;
     // here it is only mapped into the visible slice.
-    if (! fallbackActive && sweepMarkers.valid)
+    if (! fallbackActive
+        && referenceCompatible
+        && sweepMarkers.valid
+        && triggeredMarkersBelongToFrame (sweepMarkersHitId, sweepHitId,
+                                          sweepFill, sweepWindowSamples))
     {
         auto drawPeakMarker = [&] (int index, juce::Colour colour, float triangleY, float lineAlpha)
         {
@@ -1208,6 +1229,7 @@ void Oscilloscope::ensureSweepBuffersSized()
     sweepWindowSamples = window;
     sweepPreRollSamples = hitCapture.getPreRollSamples();
     sweepTriggerSample = juce::jlimit (0, window - 1, sweepPreRollSamples);
+    kickReferenceTriggerSample = sweepTriggerSample;
 
     sweepBass.assign ((size_t) window, 0.0f);
     sweepKick.assign ((size_t) window, 0.0f);
@@ -1228,6 +1250,11 @@ void Oscilloscope::ensureSweepBuffersSized()
     kickReferencePeak = 0.0f;
     targetDisplayGain = 0.0f;
     sweepMarkers = {};
+    nextSweepHitId = 1;
+    sweepHitId = 0;
+    pendingRelockHitId = 0;
+    kickReferenceHitId = 0;
+    sweepMarkersHitId = 0;
     kickReferenceState = KickReferenceState::NoReference;
     fallbackBass.clear();
     fallbackKick.clear();
@@ -1325,9 +1352,17 @@ void Oscilloscope::beginNewSweep()
 {
     promoteCurrentSweepToGhost();
 
+    std::fill (sweepBass.begin(), sweepBass.end(), 0.0f);
+    std::fill (sweepKick.begin(), sweepKick.end(), 0.0f);
     sweepFill = 0;
     sweepPeak = 0.0f;
     sweepDiscarding = false;
+    sweepHitId = nextSweepHitId++;
+    sweepTriggerSample = kickReferenceValid ? kickReferenceTriggerSample
+                                            : juce::jlimit (0, juce::jmax (0, sweepWindowSamples - 1),
+                                                            sweepPreRollSamples);
+    sweepMarkers = {};
+    sweepMarkersHitId = 0;
 
     // A real hit is on screen now — the pre-first-kick fallback is done for
     // good (it must never replace a captured display again).
@@ -1337,9 +1372,12 @@ void Oscilloscope::beginNewSweep()
 
 void Oscilloscope::beginPendingRelockSweep()
 {
+    std::fill (pendingRelockBass.begin(), pendingRelockBass.end(), 0.0f);
+    std::fill (pendingRelockKick.begin(), pendingRelockKick.end(), 0.0f);
     pendingRelockFill = 0;
     pendingRelockPeak = 0.0f;
     pendingRelockDiscarding = false;
+    pendingRelockHitId = nextSweepHitId++;
 }
 
 void Oscilloscope::promoteCurrentSweepToGhost()
@@ -1372,6 +1410,7 @@ void Oscilloscope::finishSweep()
             std::copy (sweepKick.begin(), sweepKick.end(), kickReference.begin());
             kickReferenceValid = true;
             kickReferencePeak = peak;
+            kickReferenceHitId = sweepHitId;
             kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
         }
     }
@@ -1384,11 +1423,16 @@ void Oscilloscope::finishSweep()
     sweepTriggerSample = findTriggeredKickOnsetIndex (triggerSource,
                                                       sweepWindowSamples,
                                                       sweepPreRollSamples);
+    if (kickReferenceValid && kickReferenceHitId == sweepHitId)
+        kickReferenceTriggerSample = sweepTriggerSample;
+    else if (kickReferenceValid)
+        sweepTriggerSample = kickReferenceTriggerSample;
 
     sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
                                             kickReferenceValid ? kickReference.data()
                                                                : sweepKick.data(),
                                             sweepWindowSamples, sampleRate);
+    sweepMarkersHitId = sweepHitId;
 
     // Auto-gain retargets per completed hit — with hysteresis, so near-equal
     // hits don't make the whole display breathe.
@@ -1408,6 +1452,7 @@ void Oscilloscope::finishPendingRelockSweep()
         pendingRelockFill = 0;
         pendingRelockPeak = 0.0f;
         pendingRelockDiscarding = true;
+        pendingRelockHitId = 0;
         return;
     }
 
@@ -1418,18 +1463,22 @@ void Oscilloscope::finishPendingRelockSweep()
     sweepFill = sweepWindowSamples;
     sweepPeak = pendingRelockPeak;
     sweepDiscarding = true;
+    sweepHitId = pendingRelockHitId;
 
     std::copy (sweepKick.begin(), sweepKick.end(), kickReference.begin());
     kickReferenceValid = true;
     kickReferencePeak = kickPeak;
+    kickReferenceHitId = sweepHitId;
     kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
     sweepTriggerSample = findTriggeredKickOnsetIndex (kickReference.data(),
                                                       sweepWindowSamples,
                                                       sweepPreRollSamples);
+    kickReferenceTriggerSample = sweepTriggerSample;
 
     sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
                                             kickReference.data(),
                                             sweepWindowSamples, sampleRate);
+    sweepMarkersHitId = sweepHitId;
 
     const float candidate = scopeAutoGainTargetFromPeak (juce::jmax (sweepPeak, kickReferencePeak));
     if (scopeAutoGainShouldRetarget (targetDisplayGain, candidate))
@@ -1438,6 +1487,7 @@ void Oscilloscope::finishPendingRelockSweep()
     pendingRelockFill = 0;
     pendingRelockPeak = 0.0f;
     pendingRelockDiscarding = true;
+    pendingRelockHitId = 0;
 }
 
 bool Oscilloscope::glideTriggeredAutoGain() noexcept
