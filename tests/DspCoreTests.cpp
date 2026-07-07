@@ -1277,6 +1277,32 @@ public:
             expectEquals (starts, 1);
             expectEquals (total, 80);
         }
+
+        beginTest ("Sweep stream retriggers before a long window completes");
+        {
+            HitCaptureBuffer buffer;
+            buffer.prepare (1000.0, 2.0f, 5.0f);   // window 7
+
+            buffer.pushSample (1.0f, 11.0f, false);
+            buffer.pushSample (2.0f, 12.0f, false);
+            buffer.pushSample (3.0f, 13.0f, true);
+            buffer.pushSample (4.0f, 14.0f, false);
+            buffer.pushSample (5.0f, 15.0f, false);
+            buffer.pushSample (6.0f, 16.0f, true);  // starts a fresh sweep before the first completes
+
+            std::array<float, 32> bass {}, kick {};
+            std::array<unsigned char, 32> flags {};
+            const int n = buffer.readSweepStream (bass.data(), kick.data(), flags.data(), 32);
+
+            std::vector<int> startOffsets;
+            for (int i = 0; i < n; ++i)
+                if ((flags[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
+                    startOffsets.push_back (i);
+
+            expectEquals ((int) startOffsets.size(), 2);
+            expectEquals (startOffsets[0], 0);
+            expectLessThan (startOffsets[1] - startOffsets[0], buffer.getWindowSamples());
+        }
     }
 };
 

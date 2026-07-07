@@ -232,7 +232,7 @@ private:
     bool kickReferenceValid = false;
     float sweepPeak = 0.0f;          // running |peak| of the current sweep (both lanes)
     float kickReferencePeak = 0.0f;
-    float targetDisplayGain = 1.0f;  // retargeted per completed hit, with hysteresis
+    float targetDisplayGain = 0.0f;  // sticky auto-gain target; 0 = unseeded
     ScopePeakMarkers sweepMarkers;   // cached at sweep completion (full-window indices)
     int sweepWindowSamples = 0;
     int sweepPreRollSamples = 0;

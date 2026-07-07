@@ -1011,7 +1011,10 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // level never returns to silence still re-arm between hits.
     transientDetector.setTriggerRatio (1.35f);
     transientDetector.setHoldoffMs (90.0f);
-    hitCapture.prepare (sampleRate, 20.0f, 150.0f);
+    // Triggered oscilloscope capture: keep 20 ms pre-roll internally for a
+    // stable trigger, but display the post-trigger window from 0..500 ms so
+    // long kicks/808s are visible instead of being cut at ~150 ms.
+    hitCapture.prepare (sampleRate, 20.0f, 500.0f);
     // Bass fundamental tracker for the Pitch Follow mode; fed the low-passed
     // bass in processObservationCapture. 25-300 Hz covers the playable bass
     // range while rejecting octave-up garbage.

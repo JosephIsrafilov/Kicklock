@@ -254,8 +254,11 @@ void Oscilloscope::paint (juce::Graphics& g)
         peak = juce::jmax (peak, std::abs (visibleSideBuffer[(size_t) i]));
     }
 
-    const float targetGain = peak > 1.0e-4f ? juce::jlimit (1.0f, 40.0f, 0.88f / peak) : 1.0f;
-    displayGain += 0.18f * (targetGain - displayGain);
+    const float candidateGain = scopeAutoGainTargetFromPeak (peak);
+    if (scopeAutoGainShouldRetarget (targetDisplayGain, candidateGain))
+        targetDisplayGain = candidateGain;
+
+    displayGain = scopeGlideAutoGain (displayGain, targetDisplayGain > 0.0f ? targetDisplayGain : 1.0f);
     const float gain = displayGain * ampZoom;
 
     drawGrid (g, plotBounds, plotBounds.getCentreY(), viewMode == ScopeViewMode::Separate, visible);
@@ -357,6 +360,9 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         return;
 
     const int last = first + visible - 1;
+    const int kickFirst = first;
+    const int bassFirst = fallbackActive ? first : 0;
+    const int bassLast = bassFirst + visible - 1;
 
     const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
     const float triggerX = bounds.getX() + (float) (safePreRoll - first) * sampleXStep;
@@ -389,13 +395,13 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     if (! fallbackActive)
         for (int gi = ghostCount - 1; gi >= 0; --gi)
             drawTriggeredTrace (g, bounds, ghostBass[(size_t) gi].data(), ghostFill[(size_t) gi],
-                                first, visible, sampleXStep, midY, halfHeight, gain,
+                                bassFirst, visible, sampleXStep, midY, halfHeight, gain,
                                 bassColour.withAlpha (scopeSweepGhostAlpha (gi, ghostCount)),
                                 1.0f, 0.0f, 0.0f);
 
     // Kick lane: the locked reference (or, before the first lock completes,
     // the kick assembling live alongside the sweep).
-    drawTriggeredTrace (g, bounds, kickData, kickFillCount, first, visible, sampleXStep,
+    drawTriggeredTrace (g, bounds, kickData, kickFillCount, kickFirst, visible, sampleXStep,
                         midY, halfHeight, gain,
                         kickColour.withAlpha (kickReferenceValid ? 0.95f : 0.80f),
                         1.8f, 0.30f, 0.0f);
@@ -403,7 +409,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // Bass lane: the live sweep, redrawn left-to-right on every hit
     // (ReVision behaviour). Samples past the sweep head simply don't exist
     // yet, so the trace grows in real time and never jumps.
-    drawTriggeredTrace (g, bounds, bassData, bassFillCount, first, visible, sampleXStep,
+    drawTriggeredTrace (g, bounds, bassData, bassFillCount, bassFirst, visible, sampleXStep,
                         midY, halfHeight, gain,
                         bassColour.withAlpha (0.98f), 2.2f, 0.34f, 0.16f);
 
@@ -413,9 +419,9 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         && ! isDisplayFrozen() && refreshingSweepIsLive())
     {
         const int headIndex = sweepFill - 1;
-        if (headIndex >= first && headIndex <= last)
+        if (headIndex >= bassFirst && headIndex <= bassLast)
         {
-            const float headX = bounds.getX() + (float) (headIndex - first) * sampleXStep;
+            const float headX = bounds.getX() + (float) (headIndex - bassFirst) * sampleXStep;
             const float headY = midY - juce::jlimit (-1.0f, 1.0f,
                                                      bassData[(size_t) headIndex] * gain) * halfHeight;
 
@@ -434,8 +440,9 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // it stable instead of flickering on broadband zero crossings; runs of
     // equal colour merge into single rects so it costs a handful of fills.
     {
-        const int filled = juce::jmin (bassFillCount, kickFillCount);
-        const int stripSpan = juce::jmin (visible, filled - first);
+        const int bassAvailable = bassFillCount - bassFirst;
+        const int kickAvailable = kickFillCount - kickFirst;
+        const int stripSpan = juce::jmin (visible, bassAvailable, kickAvailable);
         if (stripSpan > 1)
         {
             // Sample the swept slice down to pixel-column resolution FIRST,
@@ -448,8 +455,8 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
             for (int c = 0; c < columns; ++c)
             {
                 const int k = (int) ((long long) c * (stripSpan - 1) / (columns - 1));
-                columnMinScratch[(size_t) c] = bassData[(size_t) (first + k)];
-                columnMaxScratch[(size_t) c] = kickData[(size_t) (first + k)];
+                columnMinScratch[(size_t) c] = bassData[(size_t) (bassFirst + k)];
+                columnMaxScratch[(size_t) c] = kickData[(size_t) (kickFirst + k)];
             }
 
             const double columnRate = rate * (double) columns / (double) stripSpan;
@@ -516,10 +523,12 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     {
         auto drawPeakMarker = [&] (int index, juce::Colour colour, float triangleY, float lineAlpha)
         {
-            if (index < first || index > last)
+            const int markerFirst = colour == bassColour ? bassFirst : kickFirst;
+            const int markerLast = markerFirst + visible - 1;
+            if (index < markerFirst || index > markerLast)
                 return;
 
-            const float x = bounds.getX() + (float) (index - first) * sampleXStep;
+            const float x = bounds.getX() + (float) (index - markerFirst) * sampleXStep;
             g.setColour (colour.withAlpha (lineAlpha));
             g.drawLine (x, bounds.getY(), x, bounds.getBottom(), 1.0f);
             drawMarkerTriangle (g, x, bounds.getY() + triangleY, colour);
@@ -1215,6 +1224,7 @@ void Oscilloscope::ensureSweepBuffersSized()
     pendingRelockDiscarding = true;
     kickReferenceValid = false;
     kickReferencePeak = 0.0f;
+    targetDisplayGain = 0.0f;
     sweepMarkers = {};
     kickReferenceState = KickReferenceState::NoReference;
     fallbackBass.clear();
@@ -1421,12 +1431,12 @@ void Oscilloscope::finishPendingRelockSweep()
 
 bool Oscilloscope::glideTriggeredAutoGain() noexcept
 {
-    const float step = 0.18f * (targetDisplayGain - displayGain);
-    displayGain += step;
+    const float before = displayGain;
+    displayGain = scopeGlideAutoGain (displayGain, targetDisplayGain > 0.0f ? targetDisplayGain : 1.0f);
 
     // Report whether the gain moved enough to be worth a repaint, so the timer
     // can settle the trace between hits without repainting on every idle tick.
-    return std::abs (step) > 1.0e-3f;
+    return std::abs (displayGain - before) > 1.0e-3f;
 }
 
 void Oscilloscope::relockKickReference() noexcept

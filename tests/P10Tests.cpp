@@ -556,7 +556,21 @@ public:
 
             expectGreaterThan ((int) startOffsets.size(), 1);
             expectEquals (startOffsets[0], 0);
-            expectEquals (startOffsets[1] - startOffsets[0], capture.getWindowSamples());
+            expectLessThan (startOffsets[1] - startOffsets[0], capture.getWindowSamples());
+            expectGreaterThan (startOffsets[1] - startOffsets[0], (int) (kSampleRate * 0.25));
+        }
+
+        beginTest ("Triggered scope capture shows 500 ms after the kick");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            const auto& capture = processor.getTriggeredHitCapture();
+            expectEquals (capture.getPreRollSamples(), (int) std::round (kSampleRate * 0.020));
+            expectEquals (capture.getWindowSamples() - capture.getPreRollSamples(),
+                          (int) std::round (kSampleRate * 0.500));
         }
 
         beginTest ("Quiet kicks still create triggered sweep windows");

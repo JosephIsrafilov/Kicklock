@@ -341,28 +341,36 @@ inline float scopeAutoGainTargetFromPeak (float peak) noexcept
     return peak > 1.0e-4f ? std::clamp (0.88f / peak, 1.0f, 40.0f) : 1.0f;
 }
 
-// Retarget hysteresis: the triggered view only re-aims its auto-gain when the
-// new hit's ideal gain differs from the current target by a meaningful ratio.
-// Without this, every hit nudges the gain a percent or two and the whole
-// display "breathes" — which reads as flicker.
+// Sticky auto-gain retargeting. A scope must not "breathe" with every kick:
+// once a useful vertical scale has been established, keep it unless the input
+// is genuinely much louder (protect against clipping) or much quieter (new
+// material would otherwise be unreadable). Small hit-to-hit peak differences
+// are deliberately ignored.
 inline bool scopeAutoGainShouldRetarget (float currentTarget, float candidateTarget,
-                                         float ratioTolerance = 0.12f) noexcept
+                                         float louderRatio = 0.70f,
+                                         float quieterRatio = 2.50f) noexcept
 {
     if (currentTarget <= 0.0f)
         return true;
 
     const float ratio = candidateTarget / currentTarget;
-    return ratio > 1.0f + ratioTolerance || ratio < 1.0f / (1.0f + ratioTolerance);
+    return ratio < louderRatio || ratio > quieterRatio;
 }
 
-// Stroke alpha for past-sweep ghosts: index 0 is the most recent (brightest),
-// fading toward 0 for the oldest, like phosphor persistence.
+inline float scopeGlideAutoGain (float currentGain, float targetGain) noexcept
+{
+    const float coeff = targetGain < currentGain ? 0.30f : 0.035f;
+    return currentGain + coeff * (targetGain - currentGain);
+}
+
+// Past-sweep ghosts are disabled for a cleaner realtime oscilloscope read.
+// The current sweep and locked kick reference should be visually authoritative;
+// old faint bass traces looked like level modulation/noise on repeated hits.
 inline float scopeSweepGhostAlpha (int ghostIndex, int ghostCount) noexcept
 {
-    if (ghostCount <= 0 || ghostIndex < 0 || ghostIndex >= ghostCount)
-        return 0.0f;
-
-    return 0.30f * (float) (ghostCount - ghostIndex) / (float) ghostCount;
+    (void) ghostIndex;
+    (void) ghostCount;
+    return 0.0f;
 }
 
 // A ghost trace must be a completed previous bass sweep. Partial windows can

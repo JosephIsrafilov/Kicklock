@@ -336,26 +336,27 @@ public:
             expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.0f), 1.0f, 1.0e-6f);    // silence stays neutral
         }
 
-        beginTest ("Sweep auto-gain only retargets past the hysteresis band");
+        beginTest ("Scope auto-gain stays sticky across normal hit-to-hit peak changes");
         {
-            // Near-equal hits must NOT nudge the gain (that reads as flicker);
-            // genuinely louder or quieter material must.
+            // Near-equal hits must NOT nudge the gain (that reads as visual
+            // auto-zoom). Only genuinely new level ranges retarget it.
             expect (! scopeAutoGainShouldRetarget (2.0f, 2.0f));
-            expect (! scopeAutoGainShouldRetarget (2.0f, 2.1f));
-            expect (! scopeAutoGainShouldRetarget (2.0f, 1.85f));
-            expect (scopeAutoGainShouldRetarget (2.0f, 2.5f));
-            expect (scopeAutoGainShouldRetarget (2.0f, 1.5f));
+            expect (! scopeAutoGainShouldRetarget (2.0f, 2.4f));
+            expect (! scopeAutoGainShouldRetarget (2.0f, 1.5f));
+            expect (scopeAutoGainShouldRetarget (2.0f, 5.2f));
+            expect (scopeAutoGainShouldRetarget (2.0f, 1.2f));
             expect (scopeAutoGainShouldRetarget (0.0f, 1.0f));   // unseeded target always takes
+
+            expectGreaterThan (scopeGlideAutoGain (1.0f, 4.0f), 1.0f);
+            expectLessThan (scopeGlideAutoGain (4.0f, 1.0f), 4.0f);
         }
 
-        beginTest ("Sweep ghosts fade monotonically, newest brightest");
+        beginTest ("Sweep ghosts are not drawn over the current trace");
         {
             const int count = 4;
-            for (int i = 1; i < count; ++i)
-                expect (scopeSweepGhostAlpha (i, count) < scopeSweepGhostAlpha (i - 1, count));
+            for (int i = 0; i < count; ++i)
+                expectWithinAbsoluteError (scopeSweepGhostAlpha (i, count), 0.0f, 1.0e-6f);
 
-            expect (scopeSweepGhostAlpha (0, count) > 0.0f);
-            expect (scopeSweepGhostAlpha (count - 1, count) > 0.0f);
             expectWithinAbsoluteError (scopeSweepGhostAlpha (count, count), 0.0f, 1.0e-6f);
             expectWithinAbsoluteError (scopeSweepGhostAlpha (-1, count), 0.0f, 1.0e-6f);
             expectWithinAbsoluteError (scopeSweepGhostAlpha (0, 0), 0.0f, 1.0e-6f);
