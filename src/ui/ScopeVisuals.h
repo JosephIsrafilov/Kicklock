@@ -162,6 +162,72 @@ inline TriggeredVisibleRange computeTriggeredVisibleRange (int n, int preRoll, f
     return range;
 }
 
+// The audio trigger is envelope/energy based, so it can legitimately fire a
+// few ms after the first visible kick lobe. For the scope axis, 0 ms should sit
+// on the first meaningful kick sample inside the captured pre-roll.
+inline int findTriggeredKickOnsetIndex (const float* kick, int n, int triggerIndex) noexcept
+{
+    if (kick == nullptr || n <= 0)
+        return 0;
+
+    const int trigger = std::clamp (triggerIndex, 0, n - 1);
+    const int searchEnd = std::clamp (trigger + std::max (16, trigger / 2), trigger + 1, n);
+
+    float peak = 0.0f;
+    for (int i = 0; i < searchEnd; ++i)
+        peak = std::max (peak, std::abs (kick[i]));
+
+    if (peak <= 1.0e-5f)
+        return trigger;
+
+    const float threshold = std::max (peak * 0.04f, 1.0e-4f);
+
+    for (int i = 0; i <= trigger; ++i)
+    {
+        const float a0 = std::abs (kick[i]);
+        const float a1 = i + 1 < n ? std::abs (kick[i + 1]) : 0.0f;
+        const float a2 = i + 2 < n ? std::abs (kick[i + 2]) : 0.0f;
+
+        if (a0 >= threshold && (a1 >= threshold * 0.5f || a2 >= threshold * 0.5f))
+            return i;
+    }
+
+    return trigger;
+}
+
+inline float clampTriggeredPanScrollMs (float scrollMs,
+                                        int n,
+                                        int visible,
+                                        int anchoredFirst,
+                                        double sampleRate) noexcept
+{
+    if (sampleRate <= 0.0 || n <= 1 || visible <= 1 || visible >= n)
+        return 0.0f;
+
+    const int maxFirst = std::max (0, n - visible);
+    const int anchor = std::clamp (anchoredFirst, 0, maxFirst);
+    const float minScrollMs = (float) ((double) (anchor - maxFirst) * 1000.0 / sampleRate);
+    const float maxScrollMs = (float) ((double) anchor * 1000.0 / sampleRate);
+
+    return std::clamp (scrollMs, minScrollMs, maxScrollMs);
+}
+
+inline int computeTriggeredPannedFirst (int n,
+                                        int visible,
+                                        int anchoredFirst,
+                                        float scrollMs,
+                                        double sampleRate) noexcept
+{
+    if (n <= 1 || visible <= 1 || visible >= n)
+        return 0;
+
+    const int maxFirst = std::max (0, n - visible);
+    const int panSamples = sampleRate > 0.0
+        ? (int) std::lround ((double) scrollMs * sampleRate / 1000.0)
+        : 0;
+    return std::clamp (anchoredFirst - panSamples, 0, maxFirst);
+}
+
 inline GridDivision gridDivisionFromChoiceIndex (int index) noexcept
 {
     switch (index)

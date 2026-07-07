@@ -47,6 +47,7 @@ public:
         if (viewMode != mode)
         {
             viewMode = mode;
+            displayScrollMs = 0.0f;
             repaint();
         }
     }
@@ -236,6 +237,7 @@ private:
     ScopePeakMarkers sweepMarkers;   // cached at sweep completion (full-window indices)
     int sweepWindowSamples = 0;
     int sweepPreRollSamples = 0;
+    int sweepTriggerSample = 0;       // visual 0 ms: first meaningful kick onset
     KickReferenceState kickReferenceState = KickReferenceState::NoReference;
 
     // Pre-first-kick fallback: the decimated ring shown live so the triggered

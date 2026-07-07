@@ -156,6 +156,43 @@ public:
             expect (tiny.visible <= 1);
         }
 
+        beginTest ("Triggered kick onset moves visual zero to the first kick lobe");
+        {
+            std::vector<float> kick (128, 0.0f);
+            kick[8] = 0.00002f;   // sub-threshold bed/noise
+            kick[20] = -0.08f;
+            kick[21] = -0.16f;
+            kick[22] = -0.25f;
+            kick[40] = 0.90f;     // later detector/body peak
+
+            expectEquals (findTriggeredKickOnsetIndex (kick.data(), (int) kick.size(), 40), 20);
+
+            std::fill (kick.begin(), kick.end(), 0.0f);
+            expectEquals (findTriggeredKickOnsetIndex (kick.data(), (int) kick.size(), 40), 40);
+        }
+
+        beginTest ("Triggered pan moves a zoomed capture without leaving its bounds");
+        {
+            const int n = 1000;
+            const auto range = computeTriggeredVisibleRange (n, 200, 2.0f);
+            expectEquals (range.visible, 500);
+
+            const int firstAtAnchor = computeTriggeredPannedFirst (n, range.visible, range.first, 0.0f, kSampleRate);
+            expectEquals (firstAtAnchor, range.first);
+
+            const float tenSamplesMs = (float) (10.0 * 1000.0 / kSampleRate);
+            expectEquals (computeTriggeredPannedFirst (n, range.visible, range.first, tenSamplesMs, kSampleRate),
+                          juce::jmax (0, range.first - 10));
+            expectEquals (computeTriggeredPannedFirst (n, range.visible, range.first, -tenSamplesMs, kSampleRate),
+                          range.first + 10);
+
+            const float clampedLeft = clampTriggeredPanScrollMs (100000.0f, n, range.visible, range.first, kSampleRate);
+            const float clampedRight = clampTriggeredPanScrollMs (-100000.0f, n, range.visible, range.first, kSampleRate);
+            expectEquals (computeTriggeredPannedFirst (n, range.visible, range.first, clampedLeft, kSampleRate), 0);
+            expectEquals (computeTriggeredPannedFirst (n, range.visible, range.first, clampedRight, kSampleRate),
+                          n - range.visible);
+        }
+
         beginTest ("Visual offset shifts the display index by decimated samples");
         {
             const int unshifted = resolveDisplayHistoryIndex (100, 2048, 1800, 12, 0, 4);

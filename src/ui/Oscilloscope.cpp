@@ -205,6 +205,13 @@ void Oscilloscope::timerCallback()
                 displayScrollMs = clampDisplayScrollMs (displayScrollMs);
             }
         }
+        else
+        {
+            const int n = sweepWindowSamples > 1 ? sweepWindowSamples : hitCapture.getWindowSamples();
+            const int trigger = juce::jlimit (0, juce::jmax (0, n - 1), sweepTriggerSample);
+            const auto range = computeTriggeredVisibleRange (n, trigger, timeZoom);
+            displayScrollMs = clampTriggeredPanScrollMs (displayScrollMs, n, range.visible, range.first, sampleRate);
+        }
 
         repaint();
     }
@@ -345,16 +352,16 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
                           : kickReferenceValid ? kickReference.data()
                                                : sweepKick.data();
     const int kickFillCount = fallbackActive ? n : (kickReferenceValid ? n : sweepFill);
-    const int preRoll = fallbackActive ? fallbackPreRoll : sweepPreRollSamples;
+    const int preRoll = fallbackActive ? fallbackPreRoll : sweepTriggerSample;
     const double rate = fallbackActive ? fallbackRate : sampleRate;
 
-    const int safePreRoll = juce::jlimit (0, n - 1, preRoll);
+    const int triggerSample = juce::jlimit (0, n - 1, preRoll);
 
     // Time zoom: select the visible slice of the capture window, keeping the
-    // trigger line at a fixed fractional x. The ms axis uses the source's own
+    // visual 0 ms line at a fixed fractional x. The ms axis uses the source's own
     // sample rate (full-rate sweep vs the decimated fallback ring).
-    const auto range = computeTriggeredVisibleRange (n, safePreRoll, timeZoom);
-    const int first = range.first;
+    const auto range = computeTriggeredVisibleRange (n, triggerSample, timeZoom);
+    const int first = computeTriggeredPannedFirst (n, range.visible, range.first, displayScrollMs, rate);
     const int visible = range.visible;
     if (visible <= 1)
         return;
@@ -362,10 +369,10 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     const int last = first + visible - 1;
 
     const float sampleXStep = bounds.getWidth() / (float) (visible - 1);
-    const float triggerX = bounds.getX() + (float) (safePreRoll - first) * sampleXStep;
+    const float triggerX = bounds.getX() + (float) (triggerSample - first) * sampleXStep;
 
-    const float preMs = samplesToMs (safePreRoll - first, rate);
-    const float postMs = samplesToMs (last - safePreRoll, rate);
+    const float preMs = samplesToMs (triggerSample - first, rate);
+    const float postMs = samplesToMs (last - triggerSample, rate);
 
     // Zoom-adaptive gridline spacing: a fixed step clutters when zoomed out and
     // starves when zoomed deep; pick the step from the visible span instead.
@@ -1200,6 +1207,7 @@ void Oscilloscope::ensureSweepBuffersSized()
     // rate, so the whole triggered state starts over.
     sweepWindowSamples = window;
     sweepPreRollSamples = hitCapture.getPreRollSamples();
+    sweepTriggerSample = juce::jlimit (0, window - 1, sweepPreRollSamples);
 
     sweepBass.assign ((size_t) window, 0.0f);
     sweepKick.assign ((size_t) window, 0.0f);
@@ -1371,6 +1379,12 @@ void Oscilloscope::finishSweep()
     // Δ markers are computed ONCE per completed hit over the full window (not
     // the zoomed slice), so the read-out can't jitter frame-to-frame and
     // doesn't change with zoom. Bass from this sweep, kick from the reference.
+    const float* triggerSource = kickReferenceValid ? kickReference.data()
+                                                    : sweepKick.data();
+    sweepTriggerSample = findTriggeredKickOnsetIndex (triggerSource,
+                                                      sweepWindowSamples,
+                                                      sweepPreRollSamples);
+
     sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
                                             kickReferenceValid ? kickReference.data()
                                                                : sweepKick.data(),
@@ -1409,6 +1423,9 @@ void Oscilloscope::finishPendingRelockSweep()
     kickReferenceValid = true;
     kickReferencePeak = kickPeak;
     kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
+    sweepTriggerSample = findTriggeredKickOnsetIndex (kickReference.data(),
+                                                      sweepWindowSamples,
+                                                      sweepPreRollSamples);
 
     sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
                                             kickReference.data(),
@@ -1513,6 +1530,19 @@ void Oscilloscope::updateInspectionPan (float mouseX) noexcept
 
     const float pixelsMoved = mouseX - dragStartX;
     const int componentWidth = juce::jmax (1, getWidth());
+
+    if (viewMode == ScopeViewMode::Triggered)
+    {
+        const int n = sweepWindowSamples > 1 ? sweepWindowSamples : hitCapture.getWindowSamples();
+        const int trigger = juce::jlimit (0, juce::jmax (0, n - 1), sweepTriggerSample);
+        const auto range = computeTriggeredVisibleRange (n, trigger, timeZoom);
+        const float msPerPixel = samplesToMs (range.visible, sampleRate) / (float) componentWidth;
+        const float next = scopeDragToScrollMs (panStartScrollMs, pixelsMoved, msPerPixel);
+        displayScrollMs = clampTriggeredPanScrollMs (next, n, range.visible, range.first, sampleRate);
+        repaint();
+        return;
+    }
+
     const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
                                                       timeZoom, gridDivision, tempoAvailable, bpm);
     const float msPerPixel = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor)
@@ -1630,10 +1660,20 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
 
     if (std::abs (wheel.deltaX) > 0.0f && ! shiftWheelAsHorizontal)
     {
-        if (viewMode == ScopeViewMode::Triggered)
-            return;
-
         const int componentWidth = juce::jmax (1, getWidth());
+
+        if (viewMode == ScopeViewMode::Triggered)
+        {
+            const int n = sweepWindowSamples > 1 ? sweepWindowSamples : hitCapture.getWindowSamples();
+            const int trigger = juce::jlimit (0, juce::jmax (0, n - 1), sweepTriggerSample);
+            const auto range = computeTriggeredVisibleRange (n, trigger, timeZoom);
+            const float msPerPixel = samplesToMs (range.visible, sampleRate) / (float) componentWidth;
+            const float next = displayScrollMs - wheel.deltaX * 100.0f * msPerPixel;
+            displayScrollMs = clampTriggeredPanScrollMs (next, n, range.visible, range.first, sampleRate);
+            repaint();
+            return;
+        }
+
         const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor, timeZoom, gridDivision, tempoAvailable, bpm);
         const float msPerPixel = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor)
                                / (float) componentWidth;
