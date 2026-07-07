@@ -55,7 +55,8 @@ Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, HitCaptureBuffer& hitCaptureT
       mainHistory ((size_t) historyLength, 0.0f),
       sidechainHistory ((size_t) historyLength, 0.0f)
 {
-    startTimerHz (60);
+    vblankAttachment = std::make_unique<juce::VBlankAttachment> (this, [this] { vblankCallback(); });
+    startTimerHz (15);
 }
 
 Oscilloscope::~Oscilloscope()
@@ -92,6 +93,21 @@ void Oscilloscope::setTempoInfo (double newBpm, bool available) noexcept
 
 void Oscilloscope::timerCallback()
 {
+    if (isShowing())
+        return;
+
+    std::array<float, scratchSize> mainScratch {};
+    std::array<float, scratchSize> sidechainScratch {};
+    while (fifo.readAvailable (mainScratch.data(), sidechainScratch.data(), scratchSize) > 0) {}
+
+    drainSweepStream (true);
+}
+
+void Oscilloscope::vblankCallback()
+{
+    if (! isShowing())
+        return;
+
     std::array<float, scratchSize> mainScratch {};
     std::array<float, scratchSize> sidechainScratch {};
 
@@ -170,9 +186,40 @@ void Oscilloscope::timerCallback()
             repaint();
     }
 
-    if (viewMode != ScopeViewMode::Triggered && anyRead && ! isDisplayFrozen())
+    if (viewMode != ScopeViewMode::Triggered)
     {
-        repaint();
+        bool viewChanged = false;
+
+        if (! isDisplayFrozen())
+        {
+            const int visible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
+                                                              timeZoom, gridDivision, tempoAvailable, bpm);
+
+            rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode),
+                                   viewMode != ScopeViewMode::FreeRun);
+
+            float peak = 0.0f;
+            for (int i = 0; i < visible; ++i)
+            {
+                peak = juce::jmax (peak, std::abs (visibleMainBuffer[(size_t) i]));
+                peak = juce::jmax (peak, std::abs (visibleSideBuffer[(size_t) i]));
+            }
+
+            const float candidateGain = scopeAutoGainTargetFromPeak (peak);
+            if (scopeAutoGainShouldRetarget (targetDisplayGain, candidateGain))
+                targetDisplayGain = candidateGain;
+
+            if (anyRead)
+                viewChanged = true;
+        }
+
+        const float oldGain = displayGain;
+        displayGain = scopeGlideAutoGain (displayGain, targetDisplayGain > 0.0f ? targetDisplayGain : 1.0f);
+        if (std::abs (oldGain - displayGain) > 1.0e-4f)
+            viewChanged = true;
+
+        if (viewChanged)
+            repaint();
     }
 
     // Glide the live zoom values toward the wheel targets (~80 ms settle at
@@ -249,23 +296,7 @@ void Oscilloscope::paint (juce::Graphics& g)
         return;
     }
 
-    // Free-run neither shades phase relation nor draws Δ markers, so skip the
-    // envelope-smoothing passes there — two O(n) loops per frame at 60 Hz.
-    rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode),
-                           viewMode != ScopeViewMode::FreeRun);
-
-    float peak = 0.0f;
-    for (int i = 0; i < visible; ++i)
-    {
-        peak = juce::jmax (peak, std::abs (visibleMainBuffer[(size_t) i]));
-        peak = juce::jmax (peak, std::abs (visibleSideBuffer[(size_t) i]));
-    }
-
-    const float candidateGain = scopeAutoGainTargetFromPeak (peak);
-    if (scopeAutoGainShouldRetarget (targetDisplayGain, candidateGain))
-        targetDisplayGain = candidateGain;
-
-    displayGain = scopeGlideAutoGain (displayGain, targetDisplayGain > 0.0f ? targetDisplayGain : 1.0f);
+    // Buffers and auto-gain are now managed exclusively by vblankCallback.
     const float gain = displayGain * ampZoom;
 
     drawGrid (g, plotBounds, plotBounds.getCentreY(), viewMode == ScopeViewMode::Separate, visible);
@@ -437,24 +468,75 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // visibly redraws in place without blinking.
     if (! fallbackActive)
     {
-        for (int gi = ghostCount - 1; gi >= 0; --gi)
+        GhostsCacheKey currentGhostsKey;
+        currentGhostsKey.first = first;
+        currentGhostsKey.visible = visible;
+        currentGhostsKey.gain = gain;
+        currentGhostsKey.timeZoom = timeZoom;
+        currentGhostsKey.boundsW = (int) bounds.getWidth();
+        currentGhostsKey.boundsH = (int) bounds.getHeight();
+        currentGhostsKey.newestGhostId = ghostsVersion;
+        currentGhostsKey.hideTails = hideTails;
+
+        if (ghostsKey != currentGhostsKey || ghostsCache.isNull())
         {
-            const float* ghostData = ghostBass[(size_t) gi].data();
-            if (hideTails) ghostData = getCleanTrace (ghostData, ghostFill[(size_t) gi]);
-            
-            drawTriggeredTrace (g, bounds, ghostData, ghostFill[(size_t) gi],
-                                first, visible, sampleXStep, midY, halfHeight, gain,
-                                bassColour.withAlpha (scopeSweepGhostAlpha (gi, ghostCount)),
-                                1.0f, 0.0f, 0.0f);
+            ghostsKey = currentGhostsKey;
+            ghostsCache = juce::Image (juce::Image::ARGB, 
+                                       juce::jmax(1, currentGhostsKey.boundsW),
+                                       juce::jmax(1, currentGhostsKey.boundsH), true);
+            juce::Graphics gCache (ghostsCache);
+            gCache.setOrigin ((int)-bounds.getX(), (int)-bounds.getY());
+
+            for (int gi = ghostCount - 1; gi >= 0; --gi)
+            {
+                const float* ghostData = ghostBass[(size_t) gi].data();
+                if (hideTails) ghostData = getCleanTrace (ghostData, ghostFill[(size_t) gi]);
+                
+                drawTriggeredTrace (gCache, bounds, ghostData, ghostFill[(size_t) gi],
+                                    first, visible, sampleXStep, midY, halfHeight, gain,
+                                    bassColour.withAlpha (scopeSweepGhostAlpha (gi, ghostCount)),
+                                    1.0f, 0.0f, 0.0f);
+            }
         }
+        g.drawImageAt (ghostsCache, (int) bounds.getX(), (int) bounds.getY());
     }
 
     // Kick lane: the locked reference (or, before the first lock completes,
     // the kick assembling live alongside the sweep).
-    drawTriggeredTrace (g, bounds, kickData, kickFillCount, first, visible, sampleXStep,
-                        midY, halfHeight, gain,
-                        kickColour.withAlpha (kickReferenceValid ? 0.95f : 0.80f),
-                        1.8f, 0.30f, 0.0f);
+    if (kickReferenceValid && ! fallbackActive)
+    {
+        KickRefCacheKey currentKickKey;
+        currentKickKey.fill = kickFillCount;
+        currentKickKey.first = first;
+        currentKickKey.visible = visible;
+        currentKickKey.gain = gain;
+        currentKickKey.timeZoom = timeZoom;
+        currentKickKey.boundsW = (int) bounds.getWidth();
+        currentKickKey.boundsH = (int) bounds.getHeight();
+
+        if (kickRefKey != currentKickKey || kickRefCache.isNull())
+        {
+            kickRefKey = currentKickKey;
+            kickRefCache = juce::Image (juce::Image::ARGB, 
+                                        juce::jmax(1, currentKickKey.boundsW),
+                                        juce::jmax(1, currentKickKey.boundsH), true);
+            juce::Graphics gCache (kickRefCache);
+            gCache.setOrigin ((int)-bounds.getX(), (int)-bounds.getY());
+
+            drawTriggeredTrace (gCache, bounds, kickData, kickFillCount, first, visible, sampleXStep,
+                                midY, halfHeight, gain,
+                                kickColour.withAlpha (0.95f),
+                                1.8f, 0.30f, 0.0f);
+        }
+        g.drawImageAt (kickRefCache, (int) bounds.getX(), (int) bounds.getY());
+    }
+    else
+    {
+        drawTriggeredTrace (g, bounds, kickData, kickFillCount, first, visible, sampleXStep,
+                            midY, halfHeight, gain,
+                            kickColour.withAlpha (kickReferenceValid ? 0.95f : 0.80f),
+                            1.8f, 0.30f, 0.0f);
+    }
 
     // Bass lane: the live sweep, redrawn left-to-right on every hit
     // (ReVision behaviour). Samples past the sweep head simply don't exist
@@ -647,56 +729,95 @@ void Oscilloscope::drawTriggeredTrace (juce::Graphics& g, juce::Rectangle<float>
                                        const float* data, int fill, int first, int visible,
                                        float sampleXStep, float midY, float halfHeight, float gain,
                                        juce::Colour colour, float strokeWidth,
-                                       float fillAlpha, float glowAlpha) const
+                                       float fillAlpha, float glowAlpha)
 {
     if (data == nullptr || colour.isTransparent())
         return;
 
-    // Clip the visible slice to the filled prefix; a sweep that hasn't reached
-    // this slice yet simply draws nothing (samples past "now" don't exist).
     const int drawCount = juce::jmin (visible, fill - first);
     if (drawCount <= 1)
         return;
 
     const int pixelSpan = juce::jmax (2, (int) std::ceil ((float) drawCount * sampleXStep));
-    const int pointCount = calculateTriggeredRenderPointCount (drawCount, pixelSpan);
-
     juce::Path stroke;
-    stroke.preallocateSpace (pointCount * 3 + 8);
 
-    for (int point = 0; point < pointCount; ++point)
+    if (drawCount > pixelSpan * 3 && pixelSpan < historyLength)
     {
-        const int k = triggeredRenderSampleIndex (point, pointCount, drawCount);
-        const float x = bounds.getX() + (float) k * sampleXStep;
-        const float y = midY - juce::jlimit (-1.0f, 1.0f, data[(size_t) (first + k)] * gain) * halfHeight;
+        const int numColumns = pixelSpan;
+        buildMinMaxColumns (data + first, 0, drawCount, numColumns,
+                            const_cast<float*>(columnMinScratch.data()), 
+                            const_cast<float*>(columnMaxScratch.data()));
 
-        if (point == 0)
-            stroke.startNewSubPath (x, y);
-        else
-            stroke.lineTo (x, y);
+        stroke.preallocateSpace (numColumns * 6 + 8);
+        const float columnW = (float) drawCount * sampleXStep / (float) numColumns;
+
+        for (int c = 0; c < numColumns; ++c)
+        {
+            const float x = bounds.getX() + ((float) c + 0.5f) * columnW;
+            float yTop = midY - juce::jlimit (-1.0f, 1.0f, columnMaxScratch[(size_t) c] * gain) * halfHeight;
+            float yBot = midY - juce::jlimit (-1.0f, 1.0f, columnMinScratch[(size_t) c] * gain) * halfHeight;
+
+            if (yBot - yTop < 1.2f)
+            {
+                const float mid = 0.5f * (yTop + yBot);
+                yTop = mid - 0.6f;
+                yBot = mid + 0.6f;
+            }
+
+            const_cast<float*>(columnMinScratch.data())[(size_t) c] = yBot;
+            if (c == 0) stroke.startNewSubPath (x, yTop);
+            else stroke.lineTo (x, yTop);
+        }
+
+        for (int c = numColumns - 1; c >= 0; --c)
+        {
+            const float x = bounds.getX() + ((float) c + 0.5f) * columnW;
+            stroke.lineTo (x, columnMinScratch[(size_t) c]);
+        }
+        stroke.closeSubPath();
+
+        // For envelope, fill the body
+        if (fillAlpha > 0.0f)
+        {
+            g.setColour (colour.withAlpha (fillAlpha * 2.0f));
+            g.fillPath (stroke);
+        }
     }
-
-    if (fillAlpha > 0.0f)
+    else
     {
-        // Vertical gradient fill — strongest at the waveform extremes, fading
-        // to near-transparent at the midline — gives the trace depth without
-        // washing out the grid the way a flat alpha fill does.
-        juce::Path fillPath (stroke);
-        fillPath.lineTo (bounds.getX() + (float) (drawCount - 1) * sampleXStep, midY);
-        fillPath.lineTo (bounds.getX(), midY);
-        fillPath.closeSubPath();
+        const int pointCount = calculateTriggeredRenderPointCount (drawCount, pixelSpan);
+        stroke.preallocateSpace (pointCount * 3 + 8);
 
-        juce::ColourGradient gradient (colour.withAlpha (fillAlpha), 0.0f, bounds.getY(),
-                                       colour.withAlpha (fillAlpha), 0.0f, bounds.getBottom(),
-                                       false);
-        gradient.addColour (0.5, colour.withAlpha (fillAlpha * 0.1f));
-        g.setGradientFill (gradient);
-        g.fillPath (fillPath);
+        for (int point = 0; point < pointCount; ++point)
+        {
+            const int k = triggeredRenderSampleIndex (point, pointCount, drawCount);
+            const float x = bounds.getX() + (float) k * sampleXStep;
+            const float y = midY - juce::jlimit (-1.0f, 1.0f, data[(size_t) (first + k)] * gain) * halfHeight;
+
+            if (point == 0)
+                stroke.startNewSubPath (x, y);
+            else
+                stroke.lineTo (x, y);
+        }
+
+        if (fillAlpha > 0.0f)
+        {
+            juce::Path fillPath (stroke);
+            fillPath.lineTo (bounds.getX() + (float) (drawCount - 1) * sampleXStep, midY);
+            fillPath.lineTo (bounds.getX(), midY);
+            fillPath.closeSubPath();
+
+            juce::ColourGradient gradient (colour.withAlpha (fillAlpha), 0.0f, bounds.getY(),
+                                           colour.withAlpha (fillAlpha), 0.0f, bounds.getBottom(),
+                                           false);
+            gradient.addColour (0.5, colour.withAlpha (fillAlpha * 0.1f));
+            g.setGradientFill (gradient);
+            g.fillPath (fillPath);
+        }
     }
 
     if (glowAlpha > 0.0f)
     {
-        // Soft glow under the primary stroke lifts it off the background.
         g.setColour (colour.withMultipliedAlpha (glowAlpha));
         g.strokePath (stroke, juce::PathStrokeType (strokeWidth + 2.6f, juce::PathStrokeType::curved,
                                                     juce::PathStrokeType::rounded));
@@ -711,100 +832,117 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
                              juce::Rectangle<float> bounds,
                              float midY,
                              bool separateMode,
-                             int visible) const
+                             int visible)
 {
     const float visibleWindowMs = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor);
 
-    float majorStepMs = 0.0f;
-    int minorDivisions = 2;
+    GridCacheKey currentKey;
+    currentKey.visibleWindowMs = visibleWindowMs;
+    currentKey.scrollMs = displayScrollMs;
+    currentKey.bpm = (float) bpm;
+    currentKey.boundsW = (int) bounds.getWidth();
+    currentKey.boundsH = (int) bounds.getHeight();
+    currentKey.tempoAvailable = tempoAvailable;
+    currentKey.separateMode = separateMode;
+    currentKey.division = gridDivision;
 
-    if (tempoAvailable && gridDivision != GridDivision::Milliseconds)
+    if (gridKey != currentKey || gridCache.isNull())
     {
-        if (gridDivision == GridDivision::Bar)
+        gridKey = currentKey;
+        gridCache = juce::Image (juce::Image::ARGB, 
+                                 juce::jmax (1, currentKey.boundsW), 
+                                 juce::jmax (1, currentKey.boundsH), 
+                                 true);
+        juce::Graphics gCache (gridCache);
+        gCache.setOrigin ((int)-bounds.getX(), (int)-bounds.getY());
+
+        float majorStepMs = 0.0f;
+        int minorDivisions = 2;
+
+        if (tempoAvailable && gridDivision != GridDivision::Milliseconds)
         {
-            majorStepMs = (float) bpmToQuarterMs (bpm);
-            minorDivisions = 0;
+            if (gridDivision == GridDivision::Bar)
+            {
+                majorStepMs = (float) bpmToQuarterMs (bpm);
+                minorDivisions = 0;
+            }
+            else
+            {
+                majorStepMs = (float) gridDivisionToMs (bpm, gridDivision);
+                minorDivisions = 0;
+            }
+        }
+
+        if (majorStepMs <= 0.0f)
+        {
+            majorStepMs = juce::jmax (0.1f, chooseMajorStepMs (visibleWindowMs));
+            minorDivisions = 2;
+        }
+
+        if (visibleWindowMs > 0.0f)
+        {
+            const float scroll = displayScrollMs;
+            const int firstMajor = (int) std::ceil (scroll / majorStepMs - 1.0e-3f);
+
+            for (int m = firstMajor; ; ++m)
+            {
+                const float age = (float) m * majorStepMs;
+                const float x = bounds.getRight() - bounds.getWidth() * ((age - scroll) / visibleWindowMs);
+                if (x < bounds.getX() - 0.5f)
+                    break;
+
+                gCache.setColour (gridMajor);
+                gCache.drawVerticalLine ((int) std::round (x), bounds.getY(), bounds.getBottom());
+
+                for (int minor = 1; minor <= minorDivisions; ++minor)
+                {
+                    const float minorAge = age + majorStepMs * (float) minor / (float) (minorDivisions + 1);
+                    const float minorX = bounds.getRight() - bounds.getWidth() * ((minorAge - scroll) / visibleWindowMs);
+                    if (minorX < bounds.getX() - 0.5f || minorX > bounds.getRight() + 0.5f)
+                        continue;
+
+                    gCache.setColour (gridMinor);
+                    gCache.drawVerticalLine ((int) std::round (minorX), bounds.getY(), bounds.getBottom());
+                }
+
+                gCache.setColour (labelColour);
+                gCache.setFont (juce::Font (juce::FontOptions (10.0f)));
+                const int labelRight = (int) std::round (x - 3.0f);
+                if (labelRight - 56 >= (int) bounds.getX())
+                    gCache.drawText (formatTimeLabel (-age),
+                                     juce::Rectangle<int> (labelRight - 56,
+                                                           (int) std::round (bounds.getBottom() - 16.0f),
+                                                           56, 12),
+                                     juce::Justification::centredRight);
+            }
+        }
+
+        auto drawHorizontalMarkers = [&] (float centreY, float halfHeight)
+        {
+            gCache.setColour (gridMajor.brighter (0.25f));
+            gCache.drawHorizontalLine ((int) std::round (centreY), bounds.getX(), bounds.getRight());
+
+            gCache.setColour (gridMinor.brighter (0.15f));
+            gCache.drawHorizontalLine ((int) std::round (centreY - halfHeight * 0.5f), bounds.getX(), bounds.getRight());
+            gCache.drawHorizontalLine ((int) std::round (centreY + halfHeight * 0.5f), bounds.getX(), bounds.getRight());
+        };
+
+        if (separateMode)
+        {
+            const float laneHalfHeight = bounds.getHeight() * 0.22f;
+            drawHorizontalMarkers (bounds.getY() + bounds.getHeight() * 0.25f, laneHalfHeight);
+            drawHorizontalMarkers (bounds.getY() + bounds.getHeight() * 0.75f, laneHalfHeight);
+
+            gCache.setColour (gridMajor.withAlpha (0.65f));
+            gCache.drawHorizontalLine ((int) std::round (bounds.getCentreY()), bounds.getX(), bounds.getRight());
         }
         else
         {
-            majorStepMs = (float) gridDivisionToMs (bpm, gridDivision);
-            minorDivisions = 0;
+            drawHorizontalMarkers (midY, bounds.getHeight() * 0.46f);
         }
     }
 
-    if (majorStepMs <= 0.0f)
-    {
-        majorStepMs = juce::jmax (0.1f, chooseMajorStepMs (visibleWindowMs));
-        minorDivisions = 2;
-    }
-
-    if (visibleWindowMs > 0.0f)
-    {
-        // Anchor gridlines to the live ("now") edge so they sit on ROUND ages:
-        // the old loop anchored at the buffer's left edge, producing labels
-        // like "-2925 ms". A line's age = displayScrollMs + distance from the
-        // right edge; draw lines at every multiple of the major step.
-        const float scroll = displayScrollMs;
-        const int firstMajor = (int) std::ceil (scroll / majorStepMs - 1.0e-3f);
-
-        for (int m = firstMajor; ; ++m)
-        {
-            const float age = (float) m * majorStepMs;
-            const float x = bounds.getRight() - bounds.getWidth() * ((age - scroll) / visibleWindowMs);
-            if (x < bounds.getX() - 0.5f)
-                break;
-
-            g.setColour (gridMajor);
-            g.drawVerticalLine ((int) std::round (x), bounds.getY(), bounds.getBottom());
-
-            for (int minor = 1; minor <= minorDivisions; ++minor)
-            {
-                const float minorAge = age + majorStepMs * (float) minor / (float) (minorDivisions + 1);
-                const float minorX = bounds.getRight() - bounds.getWidth() * ((minorAge - scroll) / visibleWindowMs);
-                if (minorX < bounds.getX() - 0.5f || minorX > bounds.getRight() + 0.5f)
-                    continue;
-
-                g.setColour (gridMinor);
-                g.drawVerticalLine ((int) std::round (minorX), bounds.getY(), bounds.getBottom());
-            }
-
-            // Right-align each label so it ends at its line and never spills
-            // over the plot edge (or the footer strip below).
-            g.setColour (labelColour);
-            g.setFont (juce::Font (juce::FontOptions (10.0f)));
-            const int labelRight = (int) std::round (x - 3.0f);
-            if (labelRight - 56 >= (int) bounds.getX())
-                g.drawText (formatTimeLabel (-age),
-                            juce::Rectangle<int> (labelRight - 56,
-                                                  (int) std::round (bounds.getBottom() - 16.0f),
-                                                  56, 12),
-                            juce::Justification::centredRight);
-        }
-    }
-
-    auto drawHorizontalMarkers = [&] (float centreY, float halfHeight)
-    {
-        g.setColour (gridMajor.brighter (0.25f));
-        g.drawHorizontalLine ((int) std::round (centreY), bounds.getX(), bounds.getRight());
-
-        g.setColour (gridMinor.brighter (0.15f));
-        g.drawHorizontalLine ((int) std::round (centreY - halfHeight * 0.5f), bounds.getX(), bounds.getRight());
-        g.drawHorizontalLine ((int) std::round (centreY + halfHeight * 0.5f), bounds.getX(), bounds.getRight());
-    };
-
-    if (separateMode)
-    {
-        const float laneHalfHeight = bounds.getHeight() * 0.22f;
-        drawHorizontalMarkers (bounds.getY() + bounds.getHeight() * 0.25f, laneHalfHeight);
-        drawHorizontalMarkers (bounds.getY() + bounds.getHeight() * 0.75f, laneHalfHeight);
-
-        g.setColour (gridMajor.withAlpha (0.65f));
-        g.drawHorizontalLine ((int) std::round (bounds.getCentreY()), bounds.getX(), bounds.getRight());
-    }
-    else
-    {
-        drawHorizontalMarkers (midY, bounds.getHeight() * 0.46f);
-    }
+    g.drawImageAt (gridCache, (int) bounds.getX(), (int) bounds.getY());
 }
 
 void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
@@ -822,6 +960,8 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
     const float xStep = bounds.getWidth() / (float) juce::jmax (1, pointCount - 1);
     const float halfHeight = bounds.getHeight() * 0.46f;
     const float lineWidth = juce::jmax (1.0f, xStep + 0.35f);
+
+    juce::Path constrPath, destrPath;
 
     for (int point = 0; point < pointCount; ++point)
     {
@@ -843,11 +983,18 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
         // high-frequency zero crossing (P7).
         const auto relation = classifyPhaseRelation (smoothedMainBuffer[(size_t) i],
                                                      smoothedSideBuffer[(size_t) i]);
-        if (relation == PhaseRelation::Constructive || relation == PhaseRelation::Destructive)
+        
+        if (relation == PhaseRelation::Constructive)
         {
-            g.setColour ((relation == PhaseRelation::Constructive ? constructive : destructive)
-                             .withAlpha (0.28f));
-            g.drawLine (x, midY, x, overlapY, lineWidth);
+            const float y = juce::jmin (midY, overlapY);
+            const float h = juce::jmax (1.0f, std::abs (overlapY - midY));
+            constrPath.addRectangle (x - lineWidth * 0.5f, y, lineWidth, h);
+        }
+        else if (relation == PhaseRelation::Destructive)
+        {
+            const float y = juce::jmin (midY, overlapY);
+            const float h = juce::jmax (1.0f, std::abs (overlapY - midY));
+            destrPath.addRectangle (x - lineWidth * 0.5f, y, lineWidth, h);
         }
 
         if (point == 0)
@@ -855,6 +1002,11 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
         else
             whiteTrace.lineTo (x, combinedY);
     }
+
+    g.setColour (constructive.withAlpha (0.28f));
+    g.fillPath (constrPath);
+    g.setColour (destructive.withAlpha (0.28f));
+    g.fillPath (destrPath);
 
     g.setColour (traceColour.withAlpha (0.96f));
     g.strokePath (whiteTrace, juce::PathStrokeType (1.7f, juce::PathStrokeType::curved,
@@ -927,6 +1079,7 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
                                                   juce::PathStrokeType::rounded));
 
     // --- Heatmap (Destructive Interference) ---
+    juce::Path destructivePath;
     for (int i = 0; i < visible; ++i)
     {
         const auto relation = classifyPhaseRelation (smoothedMainBuffer[(size_t) i],
@@ -935,10 +1088,12 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
         if (relation == PhaseRelation::Destructive)
         {
             const float x = bounds.getX() + (float) i * xStep;
-            g.setColour (destructive.withAlpha (0.4f));
-            g.fillRect (x - (xStep * 0.5f), bounds.getY(), xStep * 1.2f, 6.0f);
+            destructivePath.addRectangle (x - (xStep * 0.5f), bounds.getY(), xStep * 1.2f, 6.0f);
         }
     }
+
+    g.setColour (destructive.withAlpha (0.4f));
+    g.fillPath (destructivePath);
 
     drawWaveLegend (g, bounds);
 }
@@ -1426,6 +1581,7 @@ void Oscilloscope::beginPendingRelockSweep()
 
 void Oscilloscope::promoteCurrentSweepToGhost()
 {
+    ++ghostsVersion;
     // The outgoing sweep becomes the newest ghost only if the full previous
     // window completed. Partial/torn prefixes are not trustworthy history.
     if (! scopeSweepWorthKeepingAsGhost (sweepFill, sweepWindowSamples))

@@ -111,12 +111,18 @@ public:
 
 private:
     void timerCallback() override;
-    void drawGrid (juce::Graphics&, juce::Rectangle<float>, float, bool, int) const;
-    void drawPhaseDeltaMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
-    void drawTriggeredMode (juce::Graphics&, juce::Rectangle<float>, float);
-    void drawOverlayMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
-    void drawFreeRunMode (juce::Graphics&, juce::Rectangle<float>, int, float, float);
-    void drawSeparateMode (juce::Graphics&, juce::Rectangle<float>, int, float);
+    void vblankCallback();
+    void drawGrid (juce::Graphics&, juce::Rectangle<float> bounds,
+                   float midY, bool separateMode, int visible);
+    void drawFreeRunMode (juce::Graphics&, juce::Rectangle<float> bounds,
+                          int visible, float gain, float midY);
+    void drawPhaseDeltaMode (juce::Graphics&, juce::Rectangle<float> bounds,
+                             int visible, float gain, float midY);
+    void drawOverlayMode (juce::Graphics&, juce::Rectangle<float> bounds,
+                          int visible, float gain, float midY);
+    void drawSeparateMode (juce::Graphics&, juce::Rectangle<float> bounds,
+                           int visible, float gain);
+    void drawTriggeredMode (juce::Graphics&, juce::Rectangle<float> bounds, float gain);
     void drawWaveLegend (juce::Graphics&, juce::Rectangle<float>) const;
 
     // Per-pixel-column min/max envelope band for a zoomed-out trace: fills the
@@ -127,7 +133,7 @@ private:
                            const float* source, int visible, float gain,
                            float centreY, float halfHeight,
                            juce::Colour colour, float strokeWidth);
-    void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float>, int) const;
+    void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float> bounds, int visible);
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawHoldIndicator (juce::Graphics&, juce::Rectangle<float>) const;
     void rebuildVisibleBuffers (int visible, bool applyVisualOffset = true,
@@ -160,7 +166,7 @@ private:
                              const float* data, int fill, int first, int visible,
                              float sampleXStep, float midY, float halfHeight, float gain,
                              juce::Colour colour, float strokeWidth,
-                             float fillAlpha, float glowAlpha) const;
+                             float fillAlpha, float glowAlpha);
 
     bool refreshingSweepIsLive() const noexcept { return ticksSinceFifoRead < idleAfterTicks; }
     void setDelayFromDrag (const juce::MouseEvent&);
@@ -226,11 +232,61 @@ private:
     std::array<float, historyLength> columnMinScratch {};
     std::array<float, historyLength> columnMaxScratch {};
     
-    // Scratch for Hide Tails (Clean Mode) processing
-    std::array<float, historyLength> cleanBassScratch {};
+    // Cached static layers
+    std::unique_ptr<juce::VBlankAttachment> vblankAttachment;
+    juce::Image gridCache;
+    struct GridCacheKey {
+        float visibleWindowMs = -1.0f;
+        float scrollMs = -1.0f;
+        float bpm = -1.0f;
+        int boundsW = 0, boundsH = 0;
+        bool tempoAvailable = false;
+        bool separateMode = false;
+        GridDivision division = GridDivision::Milliseconds;
+        bool operator!=(const GridCacheKey& o) const {
+            return visibleWindowMs != o.visibleWindowMs || scrollMs != o.scrollMs ||
+                   bpm != o.bpm || boundsW != o.boundsW || boundsH != o.boundsH ||
+                   tempoAvailable != o.tempoAvailable || separateMode != o.separateMode ||
+                   division != o.division;
+        }
+    } gridKey;
+
+    juce::Image kickRefCache;
+    struct KickRefCacheKey {
+        int fill = -1;
+        int first = -1;
+        int visible = -1;
+        float gain = -1.0f;
+        float timeZoom = -1.0f;
+        int boundsW = 0, boundsH = 0;
+        bool operator!=(const KickRefCacheKey& o) const {
+            return fill != o.fill || first != o.first || visible != o.visible ||
+                   gain != o.gain || timeZoom != o.timeZoom || boundsW != o.boundsW || boundsH != o.boundsH;
+        }
+    } kickRefKey;
+
+    juce::Image ghostsCache;
+    struct GhostsCacheKey {
+        int first = -1;
+        int visible = -1;
+        float gain = -1.0f;
+        float timeZoom = -1.0f;
+        int boundsW = 0, boundsH = 0;
+        int newestGhostId = -1;
+        bool hideTails = false;
+        bool operator!=(const GhostsCacheKey& o) const {
+            return first != o.first || visible != o.visible || gain != o.gain ||
+                   timeZoom != o.timeZoom || boundsW != o.boundsW || boundsH != o.boundsH ||
+                   newestGhostId != o.newestGhostId || hideTails != o.hideTails;
+        }
+    } ghostsKey;
+
+    // Cache for Hide Tails (Clean Mode) processing
+    std::vector<float> cleanBassCache;
 
     // --- Triggered sweep state (all full-rate, windowSamples long) ----------
     static constexpr int ghostCount = 4;
+    int ghostsVersion = 0;
     std::vector<float> kickReference;                    // locked kick window
     std::vector<float> sweepBass;                        // current/last bass sweep
     std::vector<float> sweepKick;                        // kick riding with the sweep (pending reference)

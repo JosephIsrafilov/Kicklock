@@ -67,7 +67,7 @@ public:
         if (windowSamples <= 0 || preRollSamples <= 0)
             return;
 
-        if (transientDetected)
+        if (transientDetected && ! capturing)
             startCapture();
 
         if (capturing)

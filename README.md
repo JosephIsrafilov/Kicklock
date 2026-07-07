@@ -14,6 +14,13 @@ shows a trigger-locked oscilloscope plus a live low-end match score.
 - Can Analyze recent kick hits and recommend delay, polarity, frequency, Q, and stage settings.
 - Supports A/B compare slots, Revert after Apply Fix, and four factory presets.
 
+## Downloads
+
+You can download the latest automatically built plugins (VST3 and AU) from the Nightly Release:
+- [⬇️ Download Latest Nightly Build](https://github.com/JosephIsrafilov/Kicklock/releases/tag/nightly)
+
+*(Artifacts are automatically uploaded to this release on every push to the main branch)*
+
 ## Routing
 
 KickLock has two inputs:
