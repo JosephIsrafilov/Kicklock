@@ -32,12 +32,12 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseMagnify (const juce::MouseEvent&, float scaleFactor) override;
 
     void setFrozen (bool shouldFreeze) noexcept { frozen = shouldFreeze; }
     bool isFrozen() const noexcept              { return frozen; }
 
     // Effective display freeze: manual Freeze button OR a temporary mouse-hold
-    // inspection. Both the timer (whether it advances the history/sweep) and
     // paint gate on this, but they are stored separately so ending an
     // inspection hold never clears a manual freeze the user set on purpose.
     bool isDisplayFrozen() const noexcept { return scopeDisplayHeld (frozen, interactionHoldActive); }
@@ -61,14 +61,7 @@ public:
         }
     }
 
-    void setHideTails (bool hide) noexcept
-    {
-        if (hideTails != hide)
-        {
-            hideTails = hide;
-            repaint();
-        }
-    }
+
 
     void setTempoInfo (double bpm, bool available) noexcept;
 
@@ -82,6 +75,7 @@ public:
     }
     void setTimebase (double newSampleRate, int newDecimationFactor) noexcept;
     void setDelayParameter (juce::RangedAudioParameter* parameter) noexcept { delayParameter = parameter; }
+    void setVisualOffsetParameter (juce::RangedAudioParameter* parameter) noexcept { visualOffsetParameter = parameter; }
 
     // The kick's captured window is locked to the first completed hit after
     // each (re)lock point and held static, since its shape doesn't
@@ -210,7 +204,7 @@ private:
     float zoomAnchorFraction = 1.0f;
     ScopeViewMode viewMode = ScopeViewMode::Triggered;
     GridDivision gridDivision = GridDivision::Milliseconds;
-    bool hideTails = false;
+
     int visualOffsetSamples = 0;
     double sampleRate = 44100.0;
     int decimationFactor = 1;
@@ -231,7 +225,7 @@ private:
     // per pixel column; historyLength safely exceeds any plausible width).
     std::array<float, historyLength> columnMinScratch {};
     std::array<float, historyLength> columnMaxScratch {};
-    std::vector<float> cleanBassScratch;
+
     
     // Cached static layers
     std::unique_ptr<juce::VBlankAttachment> vblankAttachment;
@@ -275,16 +269,13 @@ private:
         float timeZoom = -1.0f;
         int boundsW = 0, boundsH = 0;
         int newestGhostId = -1;
-        bool hideTails = false;
         bool operator!=(const GhostsCacheKey& o) const {
             return first != o.first || visible != o.visible || std::abs(gain - o.gain) > 1.0e-5f ||
                    std::abs(timeZoom - o.timeZoom) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH ||
-                   newestGhostId != o.newestGhostId || hideTails != o.hideTails;
+                   newestGhostId != o.newestGhostId;
         }
     } ghostsKey;
 
-    // Cache for Hide Tails (Clean Mode) processing
-    std::vector<float> cleanBassCache;
 
     // --- Triggered sweep state (all full-rate, windowSamples long) ----------
     static constexpr int ghostCount = 4;
@@ -336,6 +327,7 @@ private:
     static constexpr int idleAfterTicks = 30;   // ~0.5 s at 60 Hz
 
     juce::RangedAudioParameter* delayParameter = nullptr;
+    juce::RangedAudioParameter* visualOffsetParameter = nullptr;
 
     bool delayGestureActive = false;
     float dragStartX = 0.0f;
@@ -344,6 +336,7 @@ private:
     float displayScrollMs = 0.0f;
     bool panGestureActive = false;
     float panStartScrollMs = 0.0f;
+    int panStartVisualOffsetSamples = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Oscilloscope)
 };

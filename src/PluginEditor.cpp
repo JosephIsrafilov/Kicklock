@@ -188,15 +188,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     viewCombo.setTooltip ("Scope view: Triggered, Free-run (raw live scope, no offset), "
                           "Phase Delta, Overlay (aligned bass/kick comparison), or Separate lanes.");
 
-    cleanScopeButton.setButtonText ("Clean");
-    cleanScopeButton.setClickingTogglesState (true);
-    cleanScopeButton.setColour (juce::TextButton::buttonColourId, panel);
-    cleanScopeButton.setColour (juce::TextButton::textColourOffId, text);
-    cleanScopeButton.setColour (juce::TextButton::buttonOnColourId, teal);
-    cleanScopeButton.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
-    cleanScopeButton.setTooltip ("Clean mode: Hides tails from previous notes (ReVision style).");
-    cleanScopeButton.onClick = [this] { oscilloscope.setHideTails (cleanScopeButton.getToggleState()); };
-    addAndMakeVisible (cleanScopeButton);
+
 
     freezeButton.setButtonText ("Freeze");
     freezeButton.setClickingTogglesState (true);
@@ -449,6 +441,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
+    oscilloscope.setVisualOffsetParameter (audioProcessor.apvts.getParameter ("visualOffsetSamples"));
     pushScopeSettings();
 
     // Seed the analysis result from the processor: closing and reopening the
@@ -524,7 +517,6 @@ void KickLockAudioProcessorEditor::pushScopeSettings()
     const int viewIdx = viewCombo.getSelectedItemIndex();
     oscilloscope.setViewMode (scopeViewModeFromChoiceIndex (viewIdx));
     oscilloscope.setGridDivision (gridDivisionFromChoiceIndex (gridCombo.getSelectedItemIndex()));
-    cleanScopeButton.setEnabled (viewIdx == 0);
 
     if (const auto* offset = audioProcessor.apvts.getRawParameterValue ("visualOffsetSamples"))
         oscilloscope.setVisualOffsetSamples ((int) std::lround (offset->load()));
@@ -776,7 +768,7 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
     {
         g.setColour (amber);
         g.setFont (juce::Font (juce::FontOptions (11.5f)).boldened());
-        g.drawText ("low end cancelling — try Invert", infoRow,
+        g.drawText ("low end cancelling - try Invert", infoRow,
                     juce::Justification::centredRight);
     }
 
@@ -848,8 +840,7 @@ void KickLockAudioProcessorEditor::resized()
     controls.removeFromLeft (5);
     viewCombo.setBounds (controls.removeFromLeft (96).reduced (0, 3));
     controls.removeFromLeft (5);
-    cleanScopeButton.setBounds (controls.removeFromLeft (48).reduced (0, 2));
-    controls.removeFromLeft (5);
+
     freezeButton.setBounds (controls.removeFromLeft (56).reduced (0, 2));
     controls.removeFromLeft (6);
     relockKickButton.setBounds (controls.removeFromLeft (56).reduced (0, 2));
@@ -921,9 +912,10 @@ void KickLockAudioProcessorEditor::resized()
     constexpr int lowerRowsHeight = 180; // row2 + ducking + advanced header + advanced row + gaps
     const int rowH1 = juce::jlimit (96, 150, manualArea.getHeight() - lowerRowsHeight);
     auto row1 = manualArea.removeFromTop (rowH1);
-    const int knobW = juce::jlimit (84, 132, (manualArea.getWidth() - 32) / 5);
+    const int delayW = juce::jlimit (100, 160, (manualArea.getWidth() - 32) * 2 / 6);
+    const int knobW = juce::jmax (70, (manualArea.getWidth() - delayW - 32) / 4);
 
-    auto delayCell = row1.removeFromLeft (knobW);
+    auto delayCell = row1.removeFromLeft (delayW);
     delayLabel.setBounds (delayCell.removeFromTop (14));
     delaySlider.setBounds (delayCell);
 
@@ -1011,4 +1003,6 @@ void KickLockAudioProcessorEditor::resized()
     audioProcessor.apvts.state.setProperty ("editorWidth", getWidth(), nullptr);
     audioProcessor.apvts.state.setProperty ("editorHeight", getHeight(), nullptr);
     audioProcessor.apvts.state.setProperty ("bottomPanelHeight", bottomPanelHeight, nullptr);
+    
+    repaint();
 }

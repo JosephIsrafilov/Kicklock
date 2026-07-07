@@ -74,7 +74,7 @@ public:
             g.drawText ("--", top.removeFromTop (drawDetails ? 30.0f : 48.0f).toNearestInt(),
                         juce::Justification::centred);
             g.setFont (juce::Font (juce::FontOptions (11.0f)));
-            g.drawText ("no signal — play kick + bass",
+            g.drawText ("no signal - play kick + bass",
                         top.toNearestInt(), juce::Justification::centred);
             detailsToggleBounds = {};   // nothing to expand while silent
             return;

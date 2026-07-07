@@ -284,13 +284,17 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     if (viewMode == ScopeViewMode::Triggered)
     {
-        drawTriggeredMode (g, plotBounds, displayGain * ampZoom);
-
         g.setColour (juce::Colours::white.withAlpha (0.9f));
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
         g.drawText (scopeModeCaption (viewMode),
                     plotBounds.removeFromTop (16.0f).toNearestInt(),
                     juce::Justification::centredLeft);
+
+        {
+            juce::Graphics::ScopedSaveState state (g);
+            g.reduceClipRegion (plotBounds.toNearestInt());
+            drawTriggeredMode (g, plotBounds, displayGain * ampZoom);
+        }
 
         drawHoldIndicator (g, panelBounds);
         return;
@@ -301,19 +305,24 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     drawGrid (g, plotBounds, plotBounds.getCentreY(), viewMode == ScopeViewMode::Separate, visible);
 
-    switch (viewMode)
     {
-        case ScopeViewMode::Triggered:  break;
-        case ScopeViewMode::FreeRun:    drawFreeRunMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
-        case ScopeViewMode::PhaseDelta: drawPhaseDeltaMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
-        case ScopeViewMode::Overlay:    drawOverlayMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
-        case ScopeViewMode::Separate:   drawSeparateMode (g, plotBounds, visible, gain); break;
-    }
+        juce::Graphics::ScopedSaveState state (g);
+        g.reduceClipRegion (plotBounds.toNearestInt());
 
-    // Transient markers read the aligned relationship, so they only make sense
-    // in the alignment views — not in the raw Free-run scope.
-    if (viewMode != ScopeViewMode::FreeRun)
-        drawTransientMarkers (g, plotBounds, visible);
+        switch (viewMode)
+        {
+            case ScopeViewMode::Triggered:  break;
+            case ScopeViewMode::FreeRun:    drawFreeRunMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
+            case ScopeViewMode::PhaseDelta: drawPhaseDeltaMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
+            case ScopeViewMode::Overlay:    drawOverlayMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
+            case ScopeViewMode::Separate:   drawSeparateMode (g, plotBounds, visible, gain); break;
+        }
+
+        // Transient markers read the aligned relationship, so they only make sense
+        // in the alignment views — not in the raw Free-run scope.
+        if (viewMode != ScopeViewMode::FreeRun)
+            drawTransientMarkers (g, plotBounds, visible);
+    }
 
     drawScopeFooter (g, footerStrip, visible);
 
@@ -440,30 +449,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     g.setColour (juce::Colours::white.withAlpha (0.65f));
     g.drawVerticalLine ((int) std::round (triggerX), bounds.getY(), bounds.getBottom());
 
-    auto getCleanTrace = [this](const float* src, int fill) -> const float*
-    {
-        if (fill <= 1 || fill > historyLength) return src;
-        int peakIdx = 0;
-        float peak = 0.0f;
-        for (int i = 0; i < fill; ++i)
-        {
-            const float v = std::abs(src[i]);
-            if (v > peak) { peak = v; peakIdx = i; }
-        }
-        float minEnv = peak;
-        int tailEndIndex = 0;
-        for (int i = 0; i <= peakIdx; ++i)
-        {
-            const float v = std::abs(src[i]);
-            if (v <= minEnv) { minEnv = v; tailEndIndex = i; }
-        }
-        if (cleanBassScratch.size() < (size_t)fill)
-            cleanBassScratch.resize((size_t)fill, 0.0f);
-        for (int i = 0; i < fill; ++i)
-            cleanBassScratch[(size_t) i] = (i < tailEndIndex) ? 0.0f : src[i];
-        return cleanBassScratch.data();
-    };
-
     // Faint decaying "ghost" strokes of the last few completed bass sweeps
     // (oldest first, so the most recent sits brightest just under the live
     // sweep) — phosphor persistence instead of an abrupt swap, so every hit
@@ -478,7 +463,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         currentGhostsKey.boundsW = (int) bounds.getWidth();
         currentGhostsKey.boundsH = (int) bounds.getHeight();
         currentGhostsKey.newestGhostId = ghostsVersion;
-        currentGhostsKey.hideTails = hideTails;
 
         if (ghostsKey != currentGhostsKey || ghostsCache.isNull())
         {
@@ -492,7 +476,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
             for (int gi = ghostCount - 1; gi >= 0; --gi)
             {
                 const float* ghostData = ghostBass[(size_t) gi].data();
-                if (hideTails) ghostData = getCleanTrace (ghostData, ghostFill[(size_t) gi]);
                 
                 drawTriggeredTrace (gCache, bounds, ghostData, ghostFill[(size_t) gi],
                                     first, visible, sampleXStep, midY, halfHeight, gain,
@@ -543,7 +526,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // Bass lane: the live sweep, redrawn left-to-right on every hit
     // (ReVision behaviour). Samples past the sweep head simply don't exist
     // yet, so the trace grows in real time and never jumps.
-    const float* finalBassData = hideTails ? getCleanTrace (bassData, bassFillCount) : bassData;
+    const float* finalBassData = bassData;
     drawTriggeredTrace (g, bounds, finalBassData, bassFillCount, first, visible, sampleXStep,
                         midY, halfHeight, gain,
                         bassColour.withAlpha (0.98f), 2.2f, 0.34f, 0.16f);
@@ -1772,6 +1755,7 @@ void Oscilloscope::beginInspectionHold (float mouseX) noexcept
     panGestureActive = true;
     dragStartX = mouseX;
     panStartScrollMs = displayScrollMs;
+    
     repaint();
 }
 
@@ -1789,8 +1773,10 @@ void Oscilloscope::updateInspectionPan (float mouseX) noexcept
         const int trigger = juce::jlimit (0, juce::jmax (0, n - 1), sweepTriggerSample);
         const auto range = computeTriggeredVisibleRange (n, trigger, timeZoom);
         const float msPerPixel = samplesToMs (range.visible, sampleRate) / (float) componentWidth;
+        
         const float next = scopeDragToScrollMs (panStartScrollMs, pixelsMoved, msPerPixel);
         displayScrollMs = clampTriggeredPanScrollMs (next, n, range.visible, range.first, sampleRate);
+        
         repaint();
         return;
     }
@@ -1810,6 +1796,7 @@ void Oscilloscope::endInspectionHold() noexcept
     // freeze set before the click stays active after releasing the mouse.
     interactionHoldActive = false;
     panGestureActive = false;
+    
     repaint();
 }
 
@@ -1933,6 +1920,20 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
         displayScrollMs = clampDisplayScrollMs (displayScrollMs - wheel.deltaX * 100.0f * msPerPixel);
         repaint();
     }
+}
+
+void Oscilloscope::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
+{
+    if (e.mods.isShiftDown())
+    {
+        targetAmpZoom = juce::jlimit (1.0f, 8.0f, targetAmpZoom * scaleFactor);
+    }
+    else
+    {
+        targetTimeZoom = juce::jlimit (1.0f, 16.0f, targetTimeZoom * scaleFactor);
+        zoomAnchorFraction = e.position.x / (float) juce::jmax (1, getWidth());
+    }
+    repaint();
 }
 
 void Oscilloscope::resized()

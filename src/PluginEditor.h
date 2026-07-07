@@ -118,7 +118,7 @@ private:
     // --- Top bar -----------------------------------------------------------
     juce::ComboBox gridCombo;
     juce::ComboBox viewCombo;
-    juce::ToggleButton cleanScopeButton;
+
     juce::TextButton freezeButton;
     juce::TextButton relockKickButton;
     juce::TextButton analyzeButton;

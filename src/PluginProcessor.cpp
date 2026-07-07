@@ -2062,6 +2062,12 @@ bool KickLockAudioProcessor::applyLatestFix()
         setParameterValueWithGesture ("rotatorStages", (float) juce::jlimit (0, 2, fix.phaseFilterStages - 2));
     }
 
+    {
+        const std::lock_guard<std::mutex> lock (resultMutex);
+        latestFixResult.applyAllowed = false;
+        latestFixResult.optionalApplyAllowed = false;
+    }
+
     if (! bassWindow.empty() && bassWindow.size() == kickWindow.size())
     {
         PhaseFixRenderSettings settings;
