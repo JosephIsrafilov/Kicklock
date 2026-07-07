@@ -61,6 +61,15 @@ public:
         }
     }
 
+    void setHideTails (bool hide) noexcept
+    {
+        if (hideTails != hide)
+        {
+            hideTails = hide;
+            repaint();
+        }
+    }
+
     void setTempoInfo (double bpm, bool available) noexcept;
 
     void setVisualOffsetSamples (int offset) noexcept
@@ -195,6 +204,7 @@ private:
     float zoomAnchorFraction = 1.0f;
     ScopeViewMode viewMode = ScopeViewMode::Triggered;
     GridDivision gridDivision = GridDivision::Milliseconds;
+    bool hideTails = false;
     int visualOffsetSamples = 0;
     double sampleRate = 44100.0;
     int decimationFactor = 1;
@@ -215,6 +225,9 @@ private:
     // per pixel column; historyLength safely exceeds any plausible width).
     std::array<float, historyLength> columnMinScratch {};
     std::array<float, historyLength> columnMaxScratch {};
+    
+    // Scratch for Hide Tails (Clean Mode) processing
+    std::array<float, historyLength> cleanBassScratch {};
 
     // --- Triggered sweep state (all full-rate, windowSamples long) ----------
     static constexpr int ghostCount = 4;

@@ -393,57 +393,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
 
     // Zoom-adaptive gridline spacing: a fixed step clutters when zoomed out and
     // starves when zoomed deep; pick the step from the visible span instead.
-    const float windowMs = juce::jmax (0.1f, preMs + postMs);
-    const float gridStepMs = chooseMajorStepMs (windowMs);
-
-    g.setColour (gridMinor);
-    for (float ms = -std::ceil (preMs / gridStepMs) * gridStepMs;
-         ms <= postMs + 0.001f;
-         ms += gridStepMs)
-    {
-        const float x = triggerX + bounds.getWidth() * (ms / windowMs);
-        if (x >= bounds.getX() && x <= bounds.getRight())
-            g.drawVerticalLine ((int) std::round (x), bounds.getY(), bounds.getBottom());
-    }
-
-    g.setColour (juce::Colours::white.withAlpha (0.65f));
-    g.drawVerticalLine ((int) std::round (triggerX), bounds.getY(), bounds.getBottom());
-
-    // Faint decaying "ghost" strokes of the last few completed bass sweeps
-    // (oldest first, so the most recent sits brightest just under the live
-    // sweep) — phosphor persistence instead of an abrupt swap, so every hit
-    // visibly redraws in place without blinking.
-    if (! fallbackActive)
-        for (int gi = ghostCount - 1; gi >= 0; --gi)
-            drawTriggeredTrace (g, bounds, ghostBass[(size_t) gi].data(), ghostFill[(size_t) gi],
-                                first, visible, sampleXStep, midY, halfHeight, gain,
-                                bassColour.withAlpha (scopeSweepGhostAlpha (gi, ghostCount)),
-                                1.0f, 0.0f, 0.0f);
-
-    // Kick lane: the locked reference (or, before the first lock completes,
-    // the kick assembling live alongside the sweep).
-    drawTriggeredTrace (g, bounds, kickData, kickFillCount, first, visible, sampleXStep,
-                        midY, halfHeight, gain,
-                        kickColour.withAlpha (kickReferenceValid ? 0.95f : 0.80f),
-                        1.8f, 0.30f, 0.0f);
-
-    // Bass lane: the live sweep, redrawn left-to-right on every hit
-    // (ReVision behaviour). Samples past the sweep head simply don't exist
-    // yet, so the trace grows in real time and never jumps.
-    drawTriggeredTrace (g, bounds, bassData, bassFillCount, first, visible, sampleXStep,
-                        midY, halfHeight, gain,
-                        bassColour.withAlpha (0.98f), 2.2f, 0.34f, 0.16f);
-
-    // Sweep head: while the current hit's window is still filling, a bright
-    // leading edge shows exactly where the live redraw has got to.
-    if (! fallbackActive && sweepFill > 1 && sweepFill < n
-        && ! isDisplayFrozen() && refreshingSweepIsLive())
-    {
-        const int headIndex = sweepFill - 1;
-        if (headIndex >= first && headIndex <= last)
-        {
-            const float headX = bounds.getX() + (float) (headIndex - first) * sampleXStep;
-            const float headY = midY - juce::jlimit (-1.0f, 1.0f,
                                                      bassData[(size_t) headIndex] * gain) * halfHeight;
 
             g.setColour (bassColour.brighter (0.6f).withAlpha (0.30f));

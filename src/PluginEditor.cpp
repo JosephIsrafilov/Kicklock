@@ -187,6 +187,16 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     viewCombo.setTooltip ("Scope view: Triggered, Free-run (raw live scope, no offset), "
                           "Phase Delta, Overlay (aligned bass/kick comparison), or Separate lanes.");
 
+    cleanScopeButton.setButtonText ("Clean");
+    cleanScopeButton.setClickingTogglesState (true);
+    cleanScopeButton.setColour (juce::TextButton::buttonColourId, panel);
+    cleanScopeButton.setColour (juce::TextButton::textColourOffId, text);
+    cleanScopeButton.setColour (juce::TextButton::buttonOnColourId, teal);
+    cleanScopeButton.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
+    cleanScopeButton.setTooltip ("Clean mode: Hides tails from previous notes (ReVision style).");
+    cleanScopeButton.onClick = [this] { oscilloscope.setHideTails (cleanScopeButton.getToggleState()); };
+    addAndMakeVisible (cleanScopeButton);
+
     freezeButton.setButtonText ("Freeze");
     freezeButton.setClickingTogglesState (true);
     freezeButton.setColour (juce::TextButton::buttonColourId, panel);
@@ -485,8 +495,10 @@ void KickLockAudioProcessorEditor::configureCombo (juce::ComboBox& combo, const 
 
 void KickLockAudioProcessorEditor::pushScopeSettings()
 {
-    oscilloscope.setViewMode (scopeViewModeFromChoiceIndex (viewCombo.getSelectedItemIndex()));
+    const int viewIdx = viewCombo.getSelectedItemIndex();
+    oscilloscope.setViewMode (scopeViewModeFromChoiceIndex (viewIdx));
     oscilloscope.setGridDivision (gridDivisionFromChoiceIndex (gridCombo.getSelectedItemIndex()));
+    cleanScopeButton.setEnabled (viewIdx == 0);
 
     if (const auto* offset = audioProcessor.apvts.getRawParameterValue ("visualOffsetSamples"))
         oscilloscope.setVisualOffsetSamples ((int) std::lround (offset->load()));
@@ -809,6 +821,8 @@ void KickLockAudioProcessorEditor::resized()
     gridCombo.setBounds (controls.removeFromLeft (68).reduced (0, 3));
     controls.removeFromLeft (5);
     viewCombo.setBounds (controls.removeFromLeft (96).reduced (0, 3));
+    controls.removeFromLeft (5);
+    cleanScopeButton.setBounds (controls.removeFromLeft (48).reduced (0, 2));
     controls.removeFromLeft (5);
     freezeButton.setBounds (controls.removeFromLeft (56).reduced (0, 2));
     controls.removeFromLeft (6);

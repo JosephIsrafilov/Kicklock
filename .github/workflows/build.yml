@@ -1,0 +1,56 @@
+name: Build KickLock
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure CMake
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" == "macOS" ]; then
+          # Build Universal Binary for Intel and Apple Silicon Macs
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+        else
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+        fi
+
+    - name: Build Plugin
+      shell: bash
+      run: cmake --build build --config Release --parallel 4
+
+    - name: Upload VST3 (Windows)
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: KickLock-Windows-VST3
+        path: build/KickLock_artefacts/Release/VST3/KickLock.vst3/
+
+    - name: Upload VST3 (Mac)
+      if: matrix.os == 'macos-14'
+      uses: actions/upload-artifact@v4
+      with:
+        name: KickLock-Mac-VST3
+        path: build/KickLock_artefacts/Release/VST3/KickLock.vst3/
+
+    - name: Upload AU (Mac)
+      if: matrix.os == 'macos-14'
+      uses: actions/upload-artifact@v4
+      with:
+        name: KickLock-Mac-AU
+        path: build/KickLock_artefacts/Release/AU/KickLock.component/
