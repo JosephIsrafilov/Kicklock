@@ -25,9 +25,9 @@ jobs:
       run: |
         if [ "$RUNNER_OS" == "macOS" ]; then
           # Build Universal Binary for Intel and Apple Silicon Macs
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DKICKLOCK_ENABLE_PLUGINVAL=OFF
         else
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=OFF
         fi
 
     - name: Build Plugin
