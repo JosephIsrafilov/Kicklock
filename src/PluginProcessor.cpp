@@ -1518,6 +1518,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const float activeMatch = hasSidechain ? activeMeter.getWeightedMatchPercent() : 50.0f;
     const float activeLowEnd = hasSidechain ? activeMeter.getLowEndMatchPercent() : 50.0f;
     const float activeBroad = hasSidechain ? activeMeter.getBroadbandMatchPercent() : 50.0f;
+    const float activeSubLossDb = hasSidechain ? activeMeter.getLowEndSubLossDb() : 0.0f;
     std::array<float, PhaseBands::numBands> activeBands {};
     for (int band = 0; band < PhaseBands::numBands; ++band)
         activeBands[(size_t) band] = hasSidechain ? activeMeter.getBandMatchPercent (band) : 50.0f;
@@ -1548,6 +1549,7 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     smoothAtomic(liveMultiBandMatchPercent, activeMatch);
     smoothAtomic(liveLowEndMatchPercent, activeLowEnd);
     smoothAtomic(liveBroadbandMatchPercent, activeBroad);
+    smoothAtomic(liveLowEndSubLossDb, activeSubLossDb);
     smoothAtomic(realtimeLowBandMatchPercent, activeLowEnd); // legacy alias (sub/low)
     smoothAtomic(correlationPercent, activeMatch); // legacy headline alias: low-end-weighted, not broadband
     for (int band = 0; band < PhaseBands::numBands; ++band)

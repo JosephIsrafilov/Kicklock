@@ -174,7 +174,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                           p.liveBroadbandMatchPercent,
                           p.liveBandMatchPercent,
                           p.latestAppliedBeforePercent,
-                          p.liveMatchValid),
+                          p.liveMatchValid,
+                          p.liveLowEndSubLossDb),
       splitter ([this] (int h) { bottomPanelHeight = juce::jlimit (100, getHeight() - 100, h); resized(); })
 {
     setLookAndFeel (&lookAndFeel);
@@ -877,7 +878,10 @@ void KickLockAudioProcessorEditor::resized()
     const int scopeBlockHeight = bounds.getHeight() - bottomPanelHeight - scopeLowerGap;
     
     auto scopeBlock = bounds.removeFromTop (scopeBlockHeight);
-    correlationDisplay.setBounds (scopeBlock.removeFromTop (108));
+    // +16 over the historical 108 for the sub-loss-dB headline row (see
+    // CorrelationDisplay::paint) — taken from the scope block, not the bottom
+    // panel, so the manual-alignment layout below is unaffected.
+    correlationDisplay.setBounds (scopeBlock.removeFromTop (124));
     scopeBlock.removeFromTop (6);
     auto scopeArea = scopeBlock;
     oscilloscope.setBounds (scopeArea);

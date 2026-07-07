@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "PhaseBands.h"
+#include "SubLossMeter.h"
 
 // Realtime multi-band phase-match meter (P5, live path).
 //
@@ -123,6 +124,40 @@ public:
     float getBroadbandMatchPercent() const noexcept
     {
         return blend (0, numBands, /*useDecisionWeight*/ false);
+    }
+
+    // Live sub/low-end loss, in dB, versus the best physically achievable
+    // alignment (correlation -> +1). Aggregates the SUB+LOW bands' own running
+    // energy sums into one pair-of-signals loss estimate (see SubLossMeter.h) —
+    // treating the two bands' content as one combined low-end signal, which is
+    // the same approximation getLowEndMatchPercent() already makes when it
+    // blends them by relative energy share. Returns 0 (no loss) while there is
+    // no usable low-end signal, matching the other getters' silent-is-neutral
+    // convention.
+    float getLowEndSubLossDb() const noexcept
+    {
+        double energyA = 0.0, energyB = 0.0, crossAB = 0.0;
+        bool any = false;
+
+        for (int b = 0; b < std::min (PhaseBands::lowEndBandCount, numBands); ++b)
+        {
+            const auto& band = bands[(size_t) b];
+            if (! band.active || band.numValid <= 0)
+                continue;
+
+            energyA += band.sumA2;
+            energyB += band.sumB2;
+            crossAB += band.sumAB;
+            any = true;
+        }
+
+        if (! any || energyA * energyB <= energyGateFloor * energyGateFloor)
+            return 0.0f;
+
+        const double norm = std::sqrt (energyA * energyB);
+        const double correlationNow = std::clamp (crossAB / norm, -1.0, 1.0);
+
+        return subLossDb (energyA, energyB, correlationNow, 1.0);
     }
 
     // True while any band carries enough joint energy for the correlation to
