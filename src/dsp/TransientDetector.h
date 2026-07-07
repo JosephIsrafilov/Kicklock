@@ -153,14 +153,14 @@ private:
     }
 
     double sampleRate = 44100.0;
-    float threshold = 0.004f;
-    float minimumEnergyGate = 0.0004f;
+    float threshold = 1.0e-7f;
+    float minimumEnergyGate = 1.0e-8f;
     float attackTimeMs = 2.0f;
     float releaseTimeMs = 60.0f;
     float slowAttackTimeMs = 240.0f;
     float slowReleaseTimeMs = 750.0f;
     bool slowTimesExplicit = false;
-    float triggerRatio = 3.0f;
+    float triggerRatio = 1.35f;
     float holdoffMs = 90.0f;
     float fastAttackCoeff = 0.0f;
     float fastReleaseCoeff = 0.0f;

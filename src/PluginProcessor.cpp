@@ -1003,13 +1003,13 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
     rawCapture.prepare ((int) (sampleRate * 2.0));
     transientDetector.prepare (sampleRate);
-    transientDetector.setThreshold (0.004f);
-    transientDetector.setMinimumEnergyGate (0.0004f);
+    transientDetector.setThreshold (1.0e-7f);
+    transientDetector.setMinimumEnergyGate (1.0e-8f);
     transientDetector.setAttackReleaseMs (2.0f, 60.0f);
     // Relative detection: fire when the fast peak envelope pulls this many
     // times ahead of the slow body envelope, so long 808s / noisy tails whose
     // level never returns to silence still re-arm between hits.
-    transientDetector.setTriggerRatio (3.0f);
+    transientDetector.setTriggerRatio (1.35f);
     transientDetector.setHoldoffMs (90.0f);
     hitCapture.prepare (sampleRate, 20.0f, 150.0f);
     // Bass fundamental tracker for the Pitch Follow mode; fed the low-passed
@@ -1211,10 +1211,15 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState (float mainMono, f
     processedMeterSidechainDelay.pushSample (0, sidechainMonoRaw);
     const float meteredSidechainMono =
         processedMeterSidechainDelay.popSample (0, (float) getLatencySamples());
-    const bool transientDetected = transientDetector.processSample (meteredSidechainMono);
-
     const float processedBassLow = processedBassLowpass.processSample (0, mainMono);
     const float alignedKickLow = processedKickLowpass.processSample (0, meteredSidechainMono);
+
+    // Trigger mostly from the aligned low/body lane, with a small full-band
+    // sidechain component so sharp kick attacks can re-arm on top of long 808
+    // tails. The captured waveform remains full-band for visual truth.
+    const float triggerKick = 0.80f * alignedKickLow + 0.20f * meteredSidechainMono;
+    const bool transientDetected = transientDetector.processSample (triggerKick);
+
     processedMultiBandMeter.pushSample (processedBassLow, alignedKickLow);
     hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetected);
     transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetected);

@@ -1200,6 +1200,8 @@ void Oscilloscope::ensureSweepBuffersSized()
 
     sweepBass.assign ((size_t) window, 0.0f);
     sweepKick.assign ((size_t) window, 0.0f);
+    pendingRelockBass.assign ((size_t) window, 0.0f);
+    pendingRelockKick.assign ((size_t) window, 0.0f);
     kickReference.assign ((size_t) window, 0.0f);
     for (auto& buffer : ghostBass)
         buffer.assign ((size_t) window, 0.0f);
@@ -1208,6 +1210,9 @@ void Oscilloscope::ensureSweepBuffersSized()
     sweepFill = 0;
     sweepPeak = 0.0f;
     sweepDiscarding = true;
+    pendingRelockFill = 0;
+    pendingRelockPeak = 0.0f;
+    pendingRelockDiscarding = true;
     kickReferenceValid = false;
     kickReferencePeak = 0.0f;
     sweepMarkers = {};
@@ -1248,10 +1253,41 @@ bool Oscilloscope::drainSweepStream (bool consume)
 
         for (int i = 0; i < count; ++i)
         {
+            const bool captureRelockSilently = kickReferenceState == KickReferenceState::RelockPending
+                                            && kickReferenceValid;
+
             if ((flagScratch[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
             {
-                beginNewSweep();
-                dirty = true;
+                if (captureRelockSilently)
+                    beginPendingRelockSweep();
+                else
+                {
+                    beginNewSweep();
+                    dirty = true;
+                }
+            }
+
+            if (captureRelockSilently)
+            {
+                if (pendingRelockDiscarding || pendingRelockFill >= sweepWindowSamples)
+                    continue;
+
+                const float bassValue = bassScratch[(size_t) i];
+                const float kickValue = kickScratch[(size_t) i];
+                pendingRelockBass[(size_t) pendingRelockFill] = bassValue;
+                pendingRelockKick[(size_t) pendingRelockFill] = kickValue;
+                pendingRelockPeak = juce::jmax (pendingRelockPeak,
+                                                std::abs (bassValue),
+                                                std::abs (kickValue));
+                ++pendingRelockFill;
+
+                if (pendingRelockFill == sweepWindowSamples)
+                {
+                    finishPendingRelockSweep();
+                    dirty = true;
+                }
+
+                continue;
             }
 
             if (sweepDiscarding || sweepFill >= sweepWindowSamples)
@@ -1275,19 +1311,7 @@ bool Oscilloscope::drainSweepStream (bool consume)
 
 void Oscilloscope::beginNewSweep()
 {
-    // The outgoing sweep becomes the newest ghost if it actually reached the
-    // hit; a stub that never got past its pre-roll would just ghost silence.
-    if (scopeSweepWorthKeepingAsGhost (sweepFill, sweepPreRollSamples))
-    {
-        for (int i = ghostCount - 1; i > 0; --i)
-        {
-            ghostBass[(size_t) i].swap (ghostBass[(size_t) (i - 1)]);
-            ghostFill[(size_t) i] = ghostFill[(size_t) (i - 1)];
-        }
-
-        ghostBass[0].swap (sweepBass);
-        ghostFill[0] = sweepFill;
-    }
+    promoteCurrentSweepToGhost();
 
     sweepFill = 0;
     sweepPeak = 0.0f;
@@ -1299,19 +1323,45 @@ void Oscilloscope::beginNewSweep()
     fallbackKick.clear();
 }
 
+void Oscilloscope::beginPendingRelockSweep()
+{
+    pendingRelockFill = 0;
+    pendingRelockPeak = 0.0f;
+    pendingRelockDiscarding = false;
+}
+
+void Oscilloscope::promoteCurrentSweepToGhost()
+{
+    // The outgoing sweep becomes the newest ghost only if the full previous
+    // window completed. Partial/torn prefixes are not trustworthy history.
+    if (! scopeSweepWorthKeepingAsGhost (sweepFill, sweepWindowSamples))
+        return;
+
+    for (int i = ghostCount - 1; i > 0; --i)
+    {
+        ghostBass[(size_t) i].swap (ghostBass[(size_t) (i - 1)]);
+        ghostFill[(size_t) i] = ghostFill[(size_t) (i - 1)];
+    }
+
+    ghostBass[0].swap (sweepBass);
+    ghostFill[0] = sweepFill;
+}
+
 void Oscilloscope::finishSweep()
 {
     if (kickReferenceShouldReplaceOnCapture (kickReferenceState))
     {
-        kickReference = sweepKick;
-        kickReferenceValid = true;
-
         float peak = 0.0f;
-        for (float value : kickReference)
+        for (float value : sweepKick)
             peak = juce::jmax (peak, std::abs (value));
-        kickReferencePeak = peak;
 
-        kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
+        if (scopeKickReferenceCaptureIsValid (peak))
+        {
+            std::copy (sweepKick.begin(), sweepKick.end(), kickReference.begin());
+            kickReferenceValid = true;
+            kickReferencePeak = peak;
+            kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
+        }
     }
 
     // Δ markers are computed ONCE per completed hit over the full window (not
@@ -1327,6 +1377,46 @@ void Oscilloscope::finishSweep()
     const float candidate = scopeAutoGainTargetFromPeak (juce::jmax (sweepPeak, kickReferencePeak));
     if (scopeAutoGainShouldRetarget (targetDisplayGain, candidate))
         targetDisplayGain = candidate;
+}
+
+void Oscilloscope::finishPendingRelockSweep()
+{
+    float kickPeak = 0.0f;
+    for (float value : pendingRelockKick)
+        kickPeak = juce::jmax (kickPeak, std::abs (value));
+
+    if (! scopeKickReferenceCaptureIsValid (kickPeak))
+    {
+        pendingRelockFill = 0;
+        pendingRelockPeak = 0.0f;
+        pendingRelockDiscarding = true;
+        return;
+    }
+
+    promoteCurrentSweepToGhost();
+
+    sweepBass.swap (pendingRelockBass);
+    sweepKick.swap (pendingRelockKick);
+    sweepFill = sweepWindowSamples;
+    sweepPeak = pendingRelockPeak;
+    sweepDiscarding = true;
+
+    std::copy (sweepKick.begin(), sweepKick.end(), kickReference.begin());
+    kickReferenceValid = true;
+    kickReferencePeak = kickPeak;
+    kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
+
+    sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
+                                            kickReference.data(),
+                                            sweepWindowSamples, sampleRate);
+
+    const float candidate = scopeAutoGainTargetFromPeak (juce::jmax (sweepPeak, kickReferencePeak));
+    if (scopeAutoGainShouldRetarget (targetDisplayGain, candidate))
+        targetDisplayGain = candidate;
+
+    pendingRelockFill = 0;
+    pendingRelockPeak = 0.0f;
+    pendingRelockDiscarding = true;
 }
 
 bool Oscilloscope::glideTriggeredAutoGain() noexcept

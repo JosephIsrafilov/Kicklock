@@ -559,6 +559,61 @@ public:
             expectEquals (startOffsets[1] - startOffsets[0], capture.getWindowSamples());
         }
 
+        beginTest ("Quiet kicks still create triggered sweep windows");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            // Around -30 dBFS: low enough that absolute full-scale gates miss it,
+            // but still a valid production kick when the user is monitoring quiet.
+            feedLoop (processor, 512, 1.2, (float) std::pow (10.0, -30.0 / 20.0), 0.03f);
+
+            expectGreaterOrEqual (countSweepStarts (processor.getTriggeredHitCapture()), 2);
+        }
+
+        beginTest ("Silence and bass-only input do not create fake triggered sweeps");
+        {
+            KickLockAudioProcessor silence;
+            silence.enableAllBuses();
+            silence.setRateAndBufferSizeDetails (kSampleRate, 512);
+            silence.prepareToPlay (kSampleRate, 512);
+            feedSilence (silence, 512, 1.0);
+            expectEquals (countSweepStarts (silence.getTriggeredHitCapture()), 0);
+
+            KickLockAudioProcessor bassOnly;
+            bassOnly.enableAllBuses();
+            bassOnly.setRateAndBufferSizeDetails (kSampleRate, 512);
+            bassOnly.prepareToPlay (kSampleRate, 512);
+            feedBassOnly (bassOnly, 512, 1.0, 0.35f);
+            expectEquals (countSweepStarts (bassOnly.getTriggeredHitCapture()), 0);
+        }
+
+        beginTest ("Long noisy 808 tails retrigger as separate musical hits");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            const int starts = feedLongNoisyKickLoopAndCountStarts (processor, 512, 4, 0.35, 0.7f, 0.08f);
+
+            expectGreaterOrEqual (starts, 3);
+        }
+
+        beginTest ("Single long noisy 808 tail is not retriggered as fake hits");
+        {
+            KickLockAudioProcessor processor;
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
+            processor.prepareToPlay (kSampleRate, 512);
+
+            const int starts = feedLongNoisyKickLoopAndCountStarts (processor, 512, 1, 0.35, 0.7f, 0.04f);
+
+            expectEquals (starts, 1);
+        }
+
         beginTest ("Bass fundamental is tracked through the processor");
         {
             KickLockAudioProcessor processor;
@@ -663,6 +718,105 @@ private:
             juce::MidiBuffer midi;
             processor.processBlock (buffer, midi);
         }
+    }
+
+    static void feedBassOnly (KickLockAudioProcessor& processor, int blockSize,
+                              double seconds, float bassAmp)
+    {
+        const int totalSamples = (int) (kSampleRate * seconds);
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int sample = start + i;
+                const float bass = bassAmp
+                                 * (float) std::sin (kTwoPi * 70.0 * (double) sample / kSampleRate);
+
+                buffer.setSample (0, i, bass);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, bass);
+            }
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+        }
+    }
+
+    static int feedLongNoisyKickLoopAndCountStarts (KickLockAudioProcessor& processor, int blockSize,
+                                                    int hitCount, double spacingSeconds,
+                                                    float kickAmp, float noiseAmp)
+    {
+        const int spacing = (int) std::round (kSampleRate * spacingSeconds);
+        const int tail = (int) std::round (kSampleRate * 0.55);
+        const int totalSamples = spacing * hitCount + tail;
+        juce::Random rng (0x808);
+        int starts = 0;
+
+        for (int start = 0; start < totalSamples; start += blockSize)
+        {
+            const int numSamples = std::min (blockSize, totalSamples - start);
+            juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
+                                                         processor.getTotalNumOutputChannels()),
+                                             numSamples);
+            buffer.clear();
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const int sample = start + i;
+                float kick = 0.0f;
+
+                for (int hit = 0; hit < hitCount; ++hit)
+                {
+                    const int local = sample - hit * spacing;
+                    if (local < 0 || local >= tail)
+                        continue;
+
+                    const double t = (double) local / kSampleRate;
+                    const float body = (float) (std::sin (kTwoPi * 48.0 * t) * std::exp (-2.8 * t));
+                    const float click = (float) (0.08 * std::sin (kTwoPi * 2200.0 * t) * std::exp (-120.0 * t));
+                    kick += kickAmp * (body + click);
+                }
+
+                kick += noiseAmp * (float) (rng.nextDouble() * 2.0 - 1.0);
+
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, kick);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, kick);
+            }
+
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+            starts += countSweepStarts (processor.getTriggeredHitCapture());
+        }
+
+        return starts;
+    }
+
+    static int countSweepStarts (HitCaptureBuffer& capture)
+    {
+        int starts = 0;
+        std::array<float, 512> sweepBass {};
+        std::array<float, 512> sweepKick {};
+        std::array<unsigned char, 512> sweepFlags {};
+
+        while (true)
+        {
+            const int n = capture.readSweepStream (sweepBass.data(), sweepKick.data(),
+                                                   sweepFlags.data(), 512);
+            if (n == 0)
+                break;
+
+            for (int i = 0; i < n; ++i)
+                if ((sweepFlags[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
+                    ++starts;
+        }
+
+        return starts;
     }
 };
 

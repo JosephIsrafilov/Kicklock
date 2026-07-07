@@ -373,11 +373,21 @@ inline float scopeSweepGhostAlpha (int ghostIndex, int ghostCount) noexcept
     return 0.30f * (float) (ghostCount - ghostIndex) / (float) ghostCount;
 }
 
-// An interrupted sweep is only worth keeping as a ghost if it progressed past
-// its pre-roll — i.e. it actually contains the hit, not just leading context.
-inline bool scopeSweepWorthKeepingAsGhost (int fillSamples, int preRollSamples) noexcept
+// A ghost trace must be a completed previous bass sweep. Partial windows can
+// happen when the display is held or the progressive stream drops a window; if
+// we keep those as ghosts they look like valid old hits even though the tail is
+// missing.
+inline bool scopeSweepWorthKeepingAsGhost (int fillSamples, int windowSamples) noexcept
 {
-    return fillSamples > std::max (0, preRollSamples);
+    return windowSamples > 0 && fillSamples >= windowSamples;
+}
+
+// Minimum completed-window kick energy for replacing the locked reference.
+// This is intentionally far below real production kick levels, but above
+// denormals/noise and blank accidental captures.
+inline bool scopeKickReferenceCaptureIsValid (float kickPeak) noexcept
+{
+    return kickPeak > 1.0e-4f;
 }
 
 // Deterministic pan: the displayed scroll is always derived from the

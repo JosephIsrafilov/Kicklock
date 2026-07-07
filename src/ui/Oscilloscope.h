@@ -135,6 +135,9 @@ private:
     bool drainSweepStream (bool consume);
     void beginNewSweep();
     void finishSweep();
+    void beginPendingRelockSweep();
+    void finishPendingRelockSweep();
+    void promoteCurrentSweepToGhost();
     void ensureSweepBuffersSized();
     void buildWaitingFallback();
     bool glideTriggeredAutoGain() noexcept;
@@ -217,10 +220,15 @@ private:
     std::vector<float> kickReference;                    // locked kick window
     std::vector<float> sweepBass;                        // current/last bass sweep
     std::vector<float> sweepKick;                        // kick riding with the sweep (pending reference)
+    std::vector<float> pendingRelockBass;                // hidden candidate while old ref remains visible
+    std::vector<float> pendingRelockKick;
     std::array<std::vector<float>, ghostCount> ghostBass; // past sweeps, newest first
     std::array<int, ghostCount> ghostFill {};
     int sweepFill = 0;               // samples of the current sweep assembled so far
     bool sweepDiscarding = true;     // waiting for the next hit's start marker
+    int pendingRelockFill = 0;
+    bool pendingRelockDiscarding = true;
+    float pendingRelockPeak = 0.0f;
     bool kickReferenceValid = false;
     float sweepPeak = 0.0f;          // running |peak| of the current sweep (both lanes)
     float kickReferencePeak = 0.0f;

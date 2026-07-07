@@ -362,13 +362,22 @@ public:
             expectWithinAbsoluteError (scopeSweepGhostAlpha (0, 0), 0.0f, 1.0e-6f);
         }
 
-        beginTest ("Interrupted sweeps only ghost once they reach the hit");
+        beginTest ("Only completed sweeps become ghosts");
         {
-            const int preRoll = 960;
-            expect (! scopeSweepWorthKeepingAsGhost (0, preRoll));
-            expect (! scopeSweepWorthKeepingAsGhost (preRoll, preRoll));
-            expect (scopeSweepWorthKeepingAsGhost (preRoll + 1, preRoll));
-            expect (scopeSweepWorthKeepingAsGhost (1, 0));
+            const int window = 8160;
+            expect (! scopeSweepWorthKeepingAsGhost (0, window));
+            expect (! scopeSweepWorthKeepingAsGhost (959, window));
+            expect (! scopeSweepWorthKeepingAsGhost (window - 1, window));
+            expect (scopeSweepWorthKeepingAsGhost (window, window));
+            expect (! scopeSweepWorthKeepingAsGhost (1, 0));
+        }
+
+        beginTest ("Kick reference replacement requires a real completed kick window");
+        {
+            expect (! scopeKickReferenceCaptureIsValid (0.0f));
+            expect (! scopeKickReferenceCaptureIsValid (1.0e-5f));
+            expect (scopeKickReferenceCaptureIsValid ((float) std::pow (10.0, -30.0 / 20.0)));
+            expect (scopeKickReferenceCaptureIsValid (0.7f));
         }
     }
 };
