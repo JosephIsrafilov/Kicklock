@@ -34,23 +34,57 @@ jobs:
       shell: bash
       run: cmake --build build --config Release --parallel 4
 
-    - name: Upload VST3 (Windows)
+    - name: Zip VST3 (Windows)
+      if: matrix.os == 'windows-latest'
+      run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
+
+    - name: Zip VST3 (Mac)
+      if: matrix.os == 'macos-14'
+      run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "KickLock-Mac-VST3.zip"
+
+    - name: Zip AU (Mac)
+      if: matrix.os == 'macos-14'
+      run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/AU/KickLock.component" "KickLock-Mac-AU.zip"
+
+    - name: Upload Windows Artifacts
       if: matrix.os == 'windows-latest'
       uses: actions/upload-artifact@v4
       with:
-        name: KickLock-Windows-VST3
-        path: build/KickLock_artefacts/Release/VST3/KickLock.vst3/
+        name: KickLock-Windows
+        path: KickLock-Windows-VST3.zip
 
-    - name: Upload VST3 (Mac)
+    - name: Upload Mac Artifacts
       if: matrix.os == 'macos-14'
       uses: actions/upload-artifact@v4
       with:
-        name: KickLock-Mac-VST3
-        path: build/KickLock_artefacts/Release/VST3/KickLock.vst3/
+        name: KickLock-Mac
+        path: |
+          KickLock-Mac-VST3.zip
+          KickLock-Mac-AU.zip
 
-    - name: Upload AU (Mac)
-      if: matrix.os == 'macos-14'
-      uses: actions/upload-artifact@v4
-      with:
-        name: KickLock-Mac-AU
-        path: build/KickLock_artefacts/Release/AU/KickLock.component/
+  release:
+    name: Publish Nightly Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create or Update Nightly Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: nightly
+          name: "Nightly Build"
+          body: "Auto-generated nightly build."
+          allowUpdates: true
+          removeArtifacts: true
+          replacesArtifacts: true
+          prerelease: true
+          makeLatest: true
+          artifacts: "artifacts/**/*.zip"
+          token: ${{ secrets.GITHUB_TOKEN }}

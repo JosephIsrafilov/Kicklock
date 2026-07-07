@@ -716,6 +716,10 @@ KickLockAudioProcessor::KickLockAudioProcessor()
     crossoverEnableParamRaw = apvts.getRawParameterValue ("crossover_enable");
     pitchTrackParam = apvts.getRawParameterValue ("pitch_track");
 
+    duckAmountParam = apvts.getRawParameterValue ("duck_amount");
+    duckAttackParam = apvts.getRawParameterValue ("duck_attack");
+    duckReleaseParam = apvts.getRawParameterValue ("duck_release");
+
     for (const auto* id : { "delay_ms", "delayMs",
                             "polarity_invert", "polarityInvert",
                             "allpass_enable", "phaseFilterEnabled",
@@ -1442,6 +1446,36 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const bool processingNeeded = ! neutral;
 
     multibandCore.process (mainBuffer, sidechainBuffer, coreParams, numSamples);
+
+    // Apply Smart Ducking if enabled
+    const float duckAmount = duckAmountParam != nullptr ? duckAmountParam->load() / 100.0f : 0.0f;
+    if (duckAmount > 0.001f && hasSidechain)
+    {
+        const float attackMs = duckAttackParam != nullptr ? duckAttackParam->load() : 2.0f;
+        const float releaseMs = duckReleaseParam != nullptr ? duckReleaseParam->load() : 50.0f;
+        
+        const float sr = getSampleRate();
+        const float attackCoeff = std::exp (-1.0f / (attackMs * 0.001f * sr));
+        const float releaseCoeff = std::exp (-1.0f / (releaseMs * 0.001f * sr));
+        
+        const int mainChannels = mainBuffer.getNumChannels();
+        const int sidechainChannels = sidechainBuffer.getNumChannels();
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float scPeak = 0.0f;
+            for (int ch = 0; ch < sidechainChannels; ++ch)
+                scPeak = std::max (scPeak, std::abs (sidechainBuffer.getSample (ch, i)));
+            
+            const float coeff = scPeak > duckingEnvelope ? attackCoeff : releaseCoeff;
+            duckingEnvelope = coeff * duckingEnvelope + (1.0f - coeff) * scPeak;
+            
+            const float gainReduction = 1.0f - juce::jlimit (0.0f, 1.0f, duckingEnvelope * duckAmount);
+            
+            for (int ch = 0; ch < mainChannels; ++ch)
+                mainBuffer.setSample (ch, i, mainBuffer.getSample (ch, i) * gainReduction);
+        }
+    }
 
     // Shared observation path: transient detector, HitCaptureBuffer, Kick
     // Punch meter, processed multi-band meter, realtime correlation, and the

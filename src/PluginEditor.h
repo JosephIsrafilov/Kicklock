@@ -166,6 +166,15 @@ private:
     juce::Label crossoverEnableLabel;
     juce::Label crossoverLabel;
 
+    // --- Ducking -----------------------------------------------------------
+    juce::Slider duckAmountSlider;
+    juce::Slider duckAttackSlider;
+    juce::Slider duckReleaseSlider;
+    juce::Label duckHeader;
+    juce::Label duckAmountLabel;
+    juce::Label duckAttackLabel;
+    juce::Label duckReleaseLabel;
+
     // --- Advanced ----------------------------------------------------------
     juce::Label advancedHeader;
     juce::ComboBox delayInterpCombo;
@@ -186,6 +195,9 @@ private:
     std::unique_ptr<SliderAttachment> visualOffsetAttachment;
     std::unique_ptr<ButtonAttachment> crossoverEnableAttachment;
     std::unique_ptr<SliderAttachment> crossoverAttachment;
+    std::unique_ptr<SliderAttachment> duckAmountAttachment;
+    std::unique_ptr<SliderAttachment> duckAttackAttachment;
+    std::unique_ptr<SliderAttachment> duckReleaseAttachment;
     std::unique_ptr<ComboAttachment>  gridAttachment;
     std::unique_ptr<ComboAttachment>  viewAttachment;
     std::unique_ptr<ComboAttachment>  delayInterpAttachment;

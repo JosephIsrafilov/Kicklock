@@ -198,6 +198,12 @@ private:
     std::atomic<float>* crossoverEnableParamRaw = nullptr;
     std::atomic<float>* pitchTrackParam = nullptr;
 
+    std::atomic<float>* duckAmountParam = nullptr;
+    std::atomic<float>* duckAttackParam = nullptr;
+    std::atomic<float>* duckReleaseParam = nullptr;
+
+    float duckingEnvelope = 0.0f;
+
     void parameterChanged (const juce::String& parameterID, float newValue) override;
     void markRestoredParameterSources (bool hasDelayMs,
                                        bool hasLegacyDelayMs,

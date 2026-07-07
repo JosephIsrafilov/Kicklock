@@ -926,6 +926,20 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
     g.strokePath (bassPath, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved,
                                                   juce::PathStrokeType::rounded));
 
+    // --- Heatmap (Destructive Interference) ---
+    for (int i = 0; i < visible; ++i)
+    {
+        const auto relation = classifyPhaseRelation (smoothedMainBuffer[(size_t) i],
+                                                     smoothedSideBuffer[(size_t) i]);
+        
+        if (relation == PhaseRelation::Destructive)
+        {
+            const float x = bounds.getX() + (float) i * xStep;
+            g.setColour (destructive.withAlpha (0.4f));
+            g.fillRect (x - (xStep * 0.5f), bounds.getY(), xStep * 1.2f, 6.0f);
+        }
+    }
+
     drawWaveLegend (g, bounds);
 }
 

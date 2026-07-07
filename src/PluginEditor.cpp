@@ -22,7 +22,7 @@ namespace
     constexpr int kDefaultEditorWidth = 1180;
     constexpr int kDefaultEditorHeight = 820;
     constexpr int kMinEditorWidth = 900;
-    constexpr int kMinEditorHeight = 600;
+    constexpr int kMinEditorHeight = 680;
     constexpr int kMaxEditorWidth = 2800;
     constexpr int kMaxEditorHeight = 1900;
 }
@@ -361,6 +361,28 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureControlLabel (crossoverLabel, "Crossover Freq");
     configureControlLabel (crossoverEnableLabel, "Crossover");
 
+    // --- Ducking -----------------------------------------------------------
+    configureSectionLabel (duckHeader, "SMART DUCKING");
+    
+    configureRotary (duckAmountSlider);
+    duckAmountSlider.setTooltip ("Amount of sidechain ducking applied to the bass (based on kick envelope).");
+    duckAmountSlider.setTextValueSuffix ("%");
+    addAndMakeVisible (duckAmountSlider);
+
+    configureRotary (duckAttackSlider);
+    duckAttackSlider.setTooltip ("Attack time for the sidechain envelope follower.");
+    duckAttackSlider.setTextValueSuffix (" ms");
+    addAndMakeVisible (duckAttackSlider);
+
+    configureRotary (duckReleaseSlider);
+    duckReleaseSlider.setTooltip ("Release time for the sidechain envelope follower.");
+    duckReleaseSlider.setTextValueSuffix (" ms");
+    addAndMakeVisible (duckReleaseSlider);
+
+    configureControlLabel (duckAmountLabel, "Amount");
+    configureControlLabel (duckAttackLabel, "Attack");
+    configureControlLabel (duckReleaseLabel, "Release");
+
     // --- Advanced ----------------------------------------------------------
     configureSectionLabel (advancedHeader, "ADVANCED");
     advancedHeader.setColour (juce::Label::textColourId, mutedText.withAlpha (0.7f));
@@ -415,6 +437,9 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     visualOffsetAttachment = std::make_unique<SliderAttachment> (apvts, "visualOffsetSamples", visualOffsetSlider);
     crossoverEnableAttachment = std::make_unique<ButtonAttachment> (apvts, "crossover_enable", crossoverEnableButton);
     crossoverAttachment    = std::make_unique<SliderAttachment> (apvts, "crossover_freq", crossoverSlider);
+    duckAmountAttachment   = std::make_unique<SliderAttachment> (apvts, "duck_amount", duckAmountSlider);
+    duckAttackAttachment   = std::make_unique<SliderAttachment> (apvts, "duck_attack", duckAttackSlider);
+    duckReleaseAttachment  = std::make_unique<SliderAttachment> (apvts, "duck_release", duckReleaseSlider);
     gridAttachment         = std::make_unique<ComboAttachment> (apvts, "gridDivision", gridCombo);
     viewAttachment         = std::make_unique<ComboAttachment> (apvts, "scopeViewMode", viewCombo);
     delayInterpAttachment  = std::make_unique<ComboAttachment> (apvts, "delayInterp", delayInterpCombo);
@@ -889,7 +914,7 @@ void KickLockAudioProcessorEditor::resized()
     // the splitter taller enlarges the knobs instead of just adding dead space
     // below them. The lower rows need a fixed ~94 px; the jlimit keeps the knobs
     // comfortably large without starving those rows at small sizes.
-    constexpr int lowerRowsHeight = 94; // row2 + advanced header + advanced row + gaps
+    constexpr int lowerRowsHeight = 180; // row2 + ducking + advanced header + advanced row + gaps
     const int rowH1 = juce::jlimit (96, 150, manualArea.getHeight() - lowerRowsHeight);
     auto row1 = manualArea.removeFromTop (rowH1);
     const int knobW = juce::jlimit (84, 132, (manualArea.getWidth() - 32) / 5);
@@ -938,6 +963,26 @@ void KickLockAudioProcessorEditor::resized()
     auto pitchCell = row2.removeFromLeft (knobW);
     pitchTrackLabel.setBounds (pitchCell.removeFromTop (14));
     pitchTrackButton.setBounds (pitchCell.removeFromTop (24));
+
+    manualArea.removeFromTop (2);
+    
+    duckHeader.setBounds (manualArea.removeFromTop (16));
+    manualArea.removeFromTop (2);
+    auto duckRow = manualArea.removeFromTop (64); // fixed height for ducking rotaries
+    
+    auto duckAmtCell = duckRow.removeFromLeft (knobW);
+    duckAmountLabel.setBounds (duckAmtCell.removeFromTop (14));
+    duckAmountSlider.setBounds (duckAmtCell);
+
+    duckRow.removeFromLeft (8);
+    auto duckAtkCell = duckRow.removeFromLeft (knobW);
+    duckAttackLabel.setBounds (duckAtkCell.removeFromTop (14));
+    duckAttackSlider.setBounds (duckAtkCell);
+
+    duckRow.removeFromLeft (8);
+    auto duckRelCell = duckRow.removeFromLeft (knobW);
+    duckReleaseLabel.setBounds (duckRelCell.removeFromTop (14));
+    duckReleaseSlider.setBounds (duckRelCell);
 
     manualArea.removeFromTop (2);
     advancedHeader.setBounds (manualArea.removeFromTop (16));
