@@ -8,7 +8,7 @@ enum class ScopeViewMode
     Triggered,
     FreeRun,
     PhaseDelta,
-    Overlay,
+    Spectrum,
     Separate
 };
 
@@ -56,7 +56,7 @@ inline ScopeViewMode scopeViewModeFromChoiceIndex (int index) noexcept
     {
         case 1:  return ScopeViewMode::FreeRun;
         case 2:  return ScopeViewMode::PhaseDelta;
-        case 3:  return ScopeViewMode::Overlay;
+        case 3:  return ScopeViewMode::Spectrum;
         case 4:  return ScopeViewMode::Separate;
         default: return ScopeViewMode::Triggered;
     }
@@ -372,7 +372,7 @@ inline const char* scopeModeCaption (ScopeViewMode mode) noexcept
     switch (mode)
     {
         case ScopeViewMode::FreeRun:    return "FREE-RUN: live raw scope";
-        case ScopeViewMode::Overlay:    return "OVERLAY: aligned bass/kick comparison";
+        case ScopeViewMode::Spectrum:   return "SPECTRUM ANALYZER";
         case ScopeViewMode::PhaseDelta: return "PHASE DELTA";
         case ScopeViewMode::Separate:   return "SEPARATE";
         case ScopeViewMode::Triggered:  return "TRIGGERED";

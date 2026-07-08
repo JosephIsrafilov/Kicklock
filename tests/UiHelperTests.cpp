@@ -266,7 +266,7 @@ public:
             expectEquals ((int) scopeViewModeFromChoiceIndex (0), (int) ScopeViewMode::Triggered);
             expectEquals ((int) scopeViewModeFromChoiceIndex (1), (int) ScopeViewMode::FreeRun);
             expectEquals ((int) scopeViewModeFromChoiceIndex (2), (int) ScopeViewMode::PhaseDelta);
-            expectEquals ((int) scopeViewModeFromChoiceIndex (3), (int) ScopeViewMode::Overlay);
+            expectEquals ((int) scopeViewModeFromChoiceIndex (3), (int) ScopeViewMode::Spectrum);
             expectEquals ((int) scopeViewModeFromChoiceIndex (4), (int) ScopeViewMode::Separate);
         }
 
@@ -277,23 +277,23 @@ public:
             expectWithinAbsoluteError (scopeDragPixelsToDelayDeltaMs (4.0f, true), 0.01f, 1.0e-7f);
         }
 
-        beginTest ("Free-run and Overlay use different display semantics");
+        beginTest ("Free-run and Spectrum use different display semantics");
         {
-            // Root cause of the old duplication was that FreeRun and Overlay both
-            // called drawOverlayMode, so they were indistinguishable. They must now
+            // Root cause of the old duplication was that FreeRun and Spectrum both
+            // called drawSpectrumMode, so they were indistinguishable. They must now
             // differ in a real drawing decision: Free-run ignores the visual/PDC
-            // offset (raw signal) while Overlay applies it (aligned comparison).
+            // offset (raw signal) while Spectrum applies it (aligned comparison).
             expect (! scopeModeAppliesVisualOffset (ScopeViewMode::FreeRun));
-            expect (scopeModeAppliesVisualOffset (ScopeViewMode::Overlay));
+            expect (scopeModeAppliesVisualOffset (ScopeViewMode::Spectrum));
             expect (scopeModeAppliesVisualOffset (ScopeViewMode::PhaseDelta));
             expect (scopeModeAppliesVisualOffset (ScopeViewMode::Separate));
 
             expectEquals (juce::String (scopeModeCaption (ScopeViewMode::FreeRun)),
                           juce::String ("FREE-RUN: live raw scope"));
-            expectEquals (juce::String (scopeModeCaption (ScopeViewMode::Overlay)),
-                          juce::String ("OVERLAY: aligned bass/kick comparison"));
+            expectEquals (juce::String (scopeModeCaption (ScopeViewMode::Spectrum)),
+                          juce::String ("SPECTRUM ANALYZER"));
             expect (juce::String (scopeModeCaption (ScopeViewMode::FreeRun))
-                    != juce::String (scopeModeCaption (ScopeViewMode::Overlay)));
+                    != juce::String (scopeModeCaption (ScopeViewMode::Spectrum)));
         }
 
         beginTest ("Scope scroll clamps to the valid history range");
@@ -349,7 +349,7 @@ public:
             expect (scopeModeUsesDelayDrag (ScopeViewMode::Triggered));
             expect (! scopeModeUsesDelayDrag (ScopeViewMode::FreeRun));
             expect (! scopeModeUsesDelayDrag (ScopeViewMode::PhaseDelta));
-            expect (! scopeModeUsesDelayDrag (ScopeViewMode::Overlay));
+            expect (! scopeModeUsesDelayDrag (ScopeViewMode::Spectrum));
             expect (! scopeModeUsesDelayDrag (ScopeViewMode::Separate));
         }
 
@@ -365,7 +365,7 @@ public:
 
             expect (! scopeWantsDelayDragGesture (ScopeViewMode::FreeRun, true));
             expect (! scopeWantsDelayDragGesture (ScopeViewMode::PhaseDelta, true));
-            expect (! scopeWantsDelayDragGesture (ScopeViewMode::Overlay, true));
+            expect (! scopeWantsDelayDragGesture (ScopeViewMode::Spectrum, true));
             expect (! scopeWantsDelayDragGesture (ScopeViewMode::Separate, true));
         }
 
