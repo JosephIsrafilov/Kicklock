@@ -44,19 +44,19 @@ public:
         {
             expectWithinAbsoluteError ((float) bpmToQuarterMs (120.0), 500.0f, 1.0e-6f);
             expectWithinAbsoluteError ((float) gridDivisionToMs (120.0, GridDivision::Quarter), 500.0f, 1.0e-6f);
-            expectWithinAbsoluteError ((float) gridDivisionToMs (120.0, GridDivision::Eighth), 250.0f, 1.0e-6f);
-            expectWithinAbsoluteError ((float) gridDivisionToMs (120.0, GridDivision::Sixteenth), 125.0f, 1.0e-6f);
+            expectWithinAbsoluteError ((float) gridDivisionToMs (120.0, GridDivision::Half), 1000.0f, 1.0e-6f);
+            expectWithinAbsoluteError ((float) gridDivisionToMs (120.0, GridDivision::Whole), 2000.0f, 1.0e-6f);
             expectWithinAbsoluteError ((float) gridDivisionToMs (120.0, GridDivision::Bar), 2000.0f, 1.0e-6f);
         }
 
         beginTest ("Visible scope samples follow sample rate, decimation, zoom, and grid");
         {
             expectEquals (calculateVisibleScopeSamples (8192, kSampleRate, 24, 1.0f,
-                                                        GridDivision::Sixteenth, true, 120.0),
-                          250);
+                                                        GridDivision::Half, true, 120.0),
+                          2000);
             expectEquals (calculateVisibleScopeSamples (8192, kSampleRate, 24, 2.0f,
-                                                        GridDivision::Sixteenth, true, 120.0),
-                          125);
+                                                        GridDivision::Half, true, 120.0),
+                          1000);
             expectEquals (calculateVisibleScopeSamples (8192, kSampleRate, 24, 2.0f,
                                                         GridDivision::Milliseconds, false, 0.0),
                           4096);

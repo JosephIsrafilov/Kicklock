@@ -990,9 +990,16 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
 
         if (tempoAvailable && gridDivision != GridDivision::Milliseconds)
         {
-            if (gridDivision == GridDivision::Bar)
+            if (gridDivision == GridDivision::Bar || gridDivision == GridDivision::Whole)
             {
+                // Draw grid lines on every beat for 1 Bar views
                 majorStepMs = (float) bpmToQuarterMs (bpm);
+                minorDivisions = 0;
+            }
+            else if (gridDivision == GridDivision::FourBars || gridDivision == GridDivision::EightBars)
+            {
+                // Draw grid lines on every bar for multi-bar views
+                majorStepMs = (float) bpmToQuarterMs (bpm) * 4.0f;
                 minorDivisions = 0;
             }
             else

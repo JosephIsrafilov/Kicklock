@@ -349,6 +349,7 @@ private:
     // from the sample rate.
     int scopeDecimationFactor = 1;
     int scopeDecimationCounter = 0;
+    int rawScopeDecimationCounter = 0;
 
     std::atomic<bool> sidechainReferenceAvailable { false };
     std::atomic<bool> tempoAvailable { false };

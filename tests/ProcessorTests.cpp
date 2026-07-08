@@ -790,6 +790,8 @@ public:
 
                 if (auto* param = processor.apvts.getParameter ("delay_ms"))
                     param->setValueNotifyingHost (param->convertTo0to1 (userDelayMs));
+                if (auto* param = processor.apvts.getParameter ("crossover_enable"))
+                    param->setValueNotifyingHost (1.0f);
 
                 const int numSamples = 8192;
                 const int impulseAt = 2000; // past the 20 ms delay-smoothing settle
@@ -825,7 +827,7 @@ public:
             expectWithinAbsoluteError ((float) atPlus5, (float) headroom, 2.0f);
         }
 
-        beginTest ("Scope FIFO receives paired bass and kick samples");
+        beginTest ("Scope FIFOs receive paired bass and kick samples");
         {
             KickLockAudioProcessor processor;
             processor.enableAllBuses();
@@ -842,13 +844,12 @@ public:
             processor.processBlock (buffer, midi);
 
             std::vector<float> mainOut (4096, 0.0f), sideOut (4096, 0.0f);
-            const int read = processor.scopeFifo.readAvailable (mainOut.data(), sideOut.data(), 4096);
-
-            expectGreaterThan (read, 0);
+            const int scopeRead = processor.scopeFifo.readAvailable (mainOut.data(), sideOut.data(), 4096);
+            expectGreaterThan (scopeRead, 0);
 
             bool bassNonZero = false;
             bool kickNonZero = false;
-            for (int i = 0; i < read; ++i)
+            for (int i = 0; i < scopeRead; ++i)
             {
                 bassNonZero = bassNonZero || std::abs (mainOut[(size_t) i]) > 1.0e-5f;
                 kickNonZero = kickNonZero || std::abs (sideOut[(size_t) i]) > 1.0e-5f;
@@ -856,6 +857,21 @@ public:
 
             expect (bassNonZero, "scope fifo carried no bass");
             expect (kickNonZero, "scope fifo carried no kick");
+
+            std::vector<float> rawMainOut (4096, 0.0f), rawSideOut (4096, 0.0f);
+            const int rawScopeRead = processor.rawScopeFifo.readAvailable (rawMainOut.data(), rawSideOut.data(), 4096);
+            expectGreaterThan (rawScopeRead, 0);
+
+            bool rawBassNonZero = false;
+            bool rawKickNonZero = false;
+            for (int i = 0; i < rawScopeRead; ++i)
+            {
+                rawBassNonZero = rawBassNonZero || std::abs (rawMainOut[(size_t) i]) > 1.0e-5f;
+                rawKickNonZero = rawKickNonZero || std::abs (rawSideOut[(size_t) i]) > 1.0e-5f;
+            }
+
+            expect (rawBassNonZero, "raw scope fifo carried no bass");
+            expect (rawKickNonZero, "raw scope fifo carried no kick");
         }
 
         beginTest ("Manual delay, polarity and phase filter each stay active without Analyze");

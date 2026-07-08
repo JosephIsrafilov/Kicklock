@@ -182,11 +182,11 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     sidechainStatusColour = mutedText;
 
     // --- Top bar controls --------------------------------------------------
-    configureCombo (gridCombo, { "1/4", "1/8", "1/16", "1/32", "Bar", "ms" });
-    configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Overlay", "Separate" });
+    configureCombo (gridCombo, { "1/4", "1/2", "1", "4", "8", "Bar", "ms" });
+    configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Spectrum", "Separate" });
     gridCombo.setTooltip ("Sets the scope time grid.");
     viewCombo.setTooltip ("Scope view: Triggered, Free-run (raw live scope, no offset), "
-                          "Phase Delta, Overlay (aligned bass/kick comparison), or Separate lanes.");
+                          "Phase Delta, Spectrum (aligned bass/kick comparison), or Separate lanes.");
 
 
 

@@ -15,9 +15,10 @@ enum class ScopeViewMode
 enum class GridDivision
 {
     Quarter,
-    Eighth,
-    Sixteenth,
-    ThirtySecond,
+    Half,
+    Whole,
+    FourBars,
+    EightBars,
     Bar,
     Milliseconds
 };
@@ -233,10 +234,11 @@ inline GridDivision gridDivisionFromChoiceIndex (int index) noexcept
     switch (index)
     {
         case 0:  return GridDivision::Quarter;
-        case 1:  return GridDivision::Eighth;
-        case 2:  return GridDivision::Sixteenth;
-        case 3:  return GridDivision::ThirtySecond;
-        case 4:  return GridDivision::Bar;
+        case 1:  return GridDivision::Half;
+        case 2:  return GridDivision::Whole;
+        case 3:  return GridDivision::FourBars;
+        case 4:  return GridDivision::EightBars;
+        case 5:  return GridDivision::Bar;
         default: return GridDivision::Milliseconds;
     }
 }
@@ -255,9 +257,10 @@ inline double gridDivisionToMs (double bpm, GridDivision division) noexcept
     switch (division)
     {
         case GridDivision::Quarter:      return quarterMs;
-        case GridDivision::Eighth:       return quarterMs * 0.5;
-        case GridDivision::Sixteenth:    return quarterMs * 0.25;
-        case GridDivision::ThirtySecond: return quarterMs * 0.125;
+        case GridDivision::Half:         return quarterMs * 2.0;
+        case GridDivision::Whole:        return quarterMs * 4.0;
+        case GridDivision::FourBars:     return quarterMs * 16.0;
+        case GridDivision::EightBars:    return quarterMs * 32.0;
         case GridDivision::Bar:          return quarterMs * 4.0;
         case GridDivision::Milliseconds: return 0.0;
     }

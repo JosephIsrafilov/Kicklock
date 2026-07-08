@@ -150,6 +150,8 @@ namespace
             p->setValueNotifyingHost (p->convertTo0to1 (settings.phaseFilterQ));
         if (auto* p = processor.apvts.getParameter ("rotatorStages"))
             p->setValueNotifyingHost (p->convertTo0to1 ((float) juce::jlimit (0, 2, settings.phaseFilterStages - 2)));
+        if (auto* p = processor.apvts.getParameter ("crossover_enable"))
+            p->setValueNotifyingHost (1.0f);
     }
 
     std::vector<float> renderRuntime (const std::vector<float>& bass,
