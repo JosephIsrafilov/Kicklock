@@ -546,6 +546,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         currentKickKey.timeZoom = timeZoom;
         currentKickKey.boundsW = (int) bounds.getWidth();
         currentKickKey.boundsH = (int) bounds.getHeight();
+        currentKickKey.hitId = kickReferenceHitId;
 
         if (kickRefKey != currentKickKey || kickRefCache.isNull())
         {

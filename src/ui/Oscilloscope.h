@@ -256,11 +256,13 @@ private:
         float gain = -1.0f;
         float timeZoom = -1.0f;
         int boundsW = 0, boundsH = 0;
+        unsigned long long hitId = 0;
         bool operator!=(const KickRefCacheKey& o) const {
             return fill != o.fill || first != o.first || visible != o.visible ||
-                   std::abs(gain - o.gain) > 1.0e-5f || std::abs(timeZoom - o.timeZoom) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH;
+                   std::abs(gain - o.gain) > 1.0e-5f || std::abs(timeZoom - o.timeZoom) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH || hitId != o.hitId;
         }
     } kickRefKey;
+
 
     juce::Image ghostsCache;
     struct GhostsCacheKey {
