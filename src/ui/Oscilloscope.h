@@ -106,8 +106,8 @@ public:
 private:
     void timerCallback() override;
     void vblankCallback();
-    void drawGrid (juce::Graphics&, juce::Rectangle<float> bounds,
-                   float midY, bool separateMode, int visible);
+    void drawGrid (juce::Graphics& g, juce::Rectangle<float> bounds,
+                   float midY, bool separateMode, int visible, float gain);
     void drawFreeRunMode (juce::Graphics&, juce::Rectangle<float> bounds,
                           int visible, float gain, float midY);
     void drawPhaseDeltaMode (juce::Graphics&, juce::Rectangle<float> bounds,
@@ -238,12 +238,13 @@ private:
         bool tempoAvailable = false;
         bool separateMode = false;
         GridDivision division = GridDivision::Milliseconds;
+        float gain = -1.0f;
         bool operator!=(const GridCacheKey& o) const {
             return std::abs(visibleWindowMs - o.visibleWindowMs) > 1.0e-5f ||
                    std::abs(scrollMs - o.scrollMs) > 1.0e-5f ||
                    std::abs(bpm - o.bpm) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH ||
                    tempoAvailable != o.tempoAvailable || separateMode != o.separateMode ||
-                   division != o.division;
+                   division != o.division || std::abs(gain - o.gain) > 1.0e-3f;
         }
     } gridKey;
 

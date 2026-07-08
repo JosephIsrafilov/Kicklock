@@ -47,6 +47,48 @@ namespace
         g.setColour (colour);
         g.fillPath (triangle);
     }
+
+    void drawYAxisGrid (juce::Graphics& g, juce::Rectangle<float> bounds, float centreY, float halfHeight, float gain,
+                        juce::Colour gridMajor, juce::Colour gridMinor, juce::Colour labelColour)
+    {
+        g.setColour (gridMajor.brighter (0.25f));
+        g.drawHorizontalLine ((int) std::round (centreY), bounds.getX(), bounds.getRight());
+
+        const float dbLevels[] = { 0.0f, -3.0f, -6.0f, -12.0f, -18.0f };
+        g.setFont (juce::Font (juce::FontOptions (9.5f)));
+
+        for (float db : dbLevels)
+        {
+            const float linear = std::pow (10.0f, db / 20.0f);
+            const float scaled = linear * gain;
+            
+            if (scaled > 1.08f) continue;
+
+            const float yTop = centreY - scaled * halfHeight;
+            const float yBot = centreY + scaled * halfHeight;
+
+            juce::String label = (db == 0.0f ? "0" : juce::String (db, 0)) + " dB";
+            
+            if (db == 0.0f)
+                g.setColour (gridMinor.brighter (0.4f));
+            else
+                g.setColour (gridMinor.brighter (0.15f));
+
+            if (scaled > 0.05f)
+            {
+                g.drawHorizontalLine ((int) std::round (yTop), bounds.getX(), bounds.getRight());
+                g.drawHorizontalLine ((int) std::round (yBot), bounds.getX(), bounds.getRight());
+
+                g.setColour (labelColour.withAlpha(0.6f));
+                g.drawText (label, 
+                            juce::Rectangle<int> ((int) bounds.getRight() - 34, (int) std::round (yTop) - 12, 30, 12),
+                            juce::Justification::centredRight);
+                g.drawText (label, 
+                            juce::Rectangle<int> ((int) bounds.getRight() - 34, (int) std::round (yBot), 30, 12),
+                            juce::Justification::centredRight);
+            }
+        }
+    }
 }
 
 Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, HitCaptureBuffer& hitCaptureToRead)
@@ -313,7 +355,7 @@ void Oscilloscope::paint (juce::Graphics& g)
     // Buffers and auto-gain are now managed exclusively by vblankCallback.
     const float gain = displayGain * ampZoom;
 
-    drawGrid (g, plotBounds, plotBounds.getCentreY(), viewMode == ScopeViewMode::Separate, visible);
+    drawGrid (g, plotBounds, plotBounds.getCentreY(), viewMode == ScopeViewMode::Separate, visible, gain);
 
     {
         juce::Graphics::ScopedSaveState state (g);
@@ -368,11 +410,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     const float midY = bounds.getCentreY();
     const float halfHeight = bounds.getHeight() * 0.46f;
 
-    g.setColour (gridMajor.brighter (0.25f));
-    g.drawHorizontalLine ((int) std::round (midY), bounds.getX(), bounds.getRight());
-    g.setColour (gridMinor.brighter (0.15f));
-    g.drawHorizontalLine ((int) std::round (midY - halfHeight * 0.5f), bounds.getX(), bounds.getRight());
-    g.drawHorizontalLine ((int) std::round (midY + halfHeight * 0.5f), bounds.getX(), bounds.getRight());
+    drawYAxisGrid (g, bounds, midY, halfHeight, gain, gridMajor, gridMinor, labelColour);
 
     // Pick the data source: the live full-rate sweep once hits are flowing,
     // or the decimated-ring fallback before the first hit so the view is
@@ -827,7 +865,8 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
                              juce::Rectangle<float> bounds,
                              float midY,
                              bool separateMode,
-                             int visible)
+                             int visible,
+                             float gain)
 {
     const float visibleWindowMs = (float) calculateVisibleWindowMs (visible, sampleRate, decimationFactor);
 
@@ -916,12 +955,7 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
 
         auto drawHorizontalMarkers = [&] (float centreY, float halfHeight)
         {
-            gCache.setColour (gridMajor.brighter (0.25f));
-            gCache.drawHorizontalLine ((int) std::round (centreY), bounds.getX(), bounds.getRight());
-
-            gCache.setColour (gridMinor.brighter (0.15f));
-            gCache.drawHorizontalLine ((int) std::round (centreY - halfHeight * 0.5f), bounds.getX(), bounds.getRight());
-            gCache.drawHorizontalLine ((int) std::round (centreY + halfHeight * 0.5f), bounds.getX(), bounds.getRight());
+            drawYAxisGrid (gCache, bounds, centreY, halfHeight, gain, gridMajor, gridMinor, labelColour);
         };
 
         if (separateMode)
@@ -1074,61 +1108,11 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
     const float xStep = bounds.getWidth() / (float) (visible - 1);
     const float halfHeight = bounds.getHeight() * 0.46f;
 
-    // Heavily zoomed out, render min/max envelope bands (the midline fills
-    // would be visual mud at that density anyway); zoomed in, keep the filled
-    // polyline aesthetic.
-    if (scopeShouldRenderMinMaxBand (visible, (int) bounds.getWidth()))
-    {
-        strokeMinMaxBand (g, bounds, visibleSideBuffer.data(), visible, gain,
-                          midY, halfHeight, kickColour.withAlpha (0.92f), 1.6f);
-        strokeMinMaxBand (g, bounds, visibleMainBuffer.data(), visible, gain,
-                          midY, halfHeight, bassColour.withAlpha (0.96f), 2.0f);
-        drawWaveLegend (g, bounds);
-        return;
-    }
+    drawTriggeredTrace (g, bounds, visibleSideBuffer.data(), visible, 0, visible, xStep,
+                        midY, halfHeight, gain, kickColour.withAlpha (0.92f), 1.6f, 0.15f, 0.05f);
 
-    juce::Path bassPath, kickPath, bassFill, kickFill;
-
-    auto buildPaths = [&] (const std::array<float, historyLength>& source,
-                           juce::Path& stroke, juce::Path& fill)
-    {
-        for (int i = 0; i < visible; ++i)
-        {
-            const float x = bounds.getX() + (float) i * xStep;
-            const float v = juce::jlimit (-1.0f, 1.0f, source[(size_t) i] * gain);
-            const float y = midY - v * halfHeight;
-
-            if (i == 0)
-            {
-                stroke.startNewSubPath (x, y);
-                fill.startNewSubPath (x, midY);
-                fill.lineTo (x, y);
-            }
-            else
-            {
-                stroke.lineTo (x, y);
-                fill.lineTo (x, y);
-            }
-        }
-
-        fill.lineTo (bounds.getRight(), midY);
-        fill.closeSubPath();
-    };
-
-    buildPaths (visibleSideBuffer, kickPath, kickFill);
-    buildPaths (visibleMainBuffer, bassPath, bassFill);
-
-    g.setColour (kickColour.withAlpha (0.14f));
-    g.fillPath (kickFill);
-    g.setColour (kickColour.withAlpha (0.92f));
-    g.strokePath (kickPath, juce::PathStrokeType (1.25f, juce::PathStrokeType::curved,
-                                                  juce::PathStrokeType::rounded));
-
-    g.setColour (bassColour.withAlpha (0.18f));
-    g.fillPath (bassFill);
-    g.setColour (bassColour.withAlpha (0.96f));
-    g.strokePath (bassPath, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved,
-                                                  juce::PathStrokeType::rounded));
+    drawTriggeredTrace (g, bounds, visibleMainBuffer.data(), visible, 0, visible, xStep,
+                        midY, halfHeight, gain, bassColour.withAlpha (0.96f), 2.0f, 0.20f, 0.10f);
 
     // --- Heatmap (Destructive Interference) ---
     juce::Path destructivePath;
@@ -1144,7 +1128,9 @@ void Oscilloscope::drawOverlayMode (juce::Graphics& g,
         }
     }
 
-    g.setColour (destructive.withAlpha (0.4f));
+    juce::ColourGradient destrGrad (destructive.withAlpha (0.6f), bounds.getCentreX(), bounds.getY(),
+                                    destructive.withAlpha (0.0f), bounds.getCentreX(), bounds.getY() + 12.0f, false);
+    g.setGradientFill (destrGrad);
     g.fillPath (destructivePath);
 
     drawWaveLegend (g, bounds);
@@ -1164,53 +1150,23 @@ void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
     const float xStep = bounds.getWidth() / (float) (visible - 1);
     const float halfHeight = bounds.getHeight() * 0.46f;
 
-    // Zoomed out (several samples per pixel), point-sampled polylines alias
-    // and "boil" as the history scrolls; render stable min/max envelope bands
-    // instead. Zoomed in, a polyline is smoother-looking and cheaper.
-    const bool useBand = scopeShouldRenderMinMaxBand (visible, (int) bounds.getWidth());
+    drawTriggeredTrace (g, bounds, visibleSideBuffer.data(), visible, 0, visible, xStep,
+                        midY, halfHeight, gain, kickColour.withAlpha (0.90f), 1.6f, 0.15f, 0.05f);
 
-    auto strokeTrace = [&] (const std::array<float, historyLength>& source,
-                            juce::Colour colour, float width)
-    {
-        if (useBand)
-        {
-            strokeMinMaxBand (g, bounds, source.data(), visible, gain, midY, halfHeight, colour, width);
-            return;
-        }
-
-        juce::Path path;
-        for (int i = 0; i < visible; ++i)
-        {
-            const float x = bounds.getX() + (float) i * xStep;
-            const float v = juce::jlimit (-1.0f, 1.0f, source[(size_t) i] * gain);
-            const float y = midY - v * halfHeight;
-
-            if (i == 0)
-                path.startNewSubPath (x, y);
-            else
-                path.lineTo (x, y);
-        }
-
-        g.setColour (colour);
-        g.strokePath (path, juce::PathStrokeType (width, juce::PathStrokeType::curved,
-                                                  juce::PathStrokeType::rounded));
-    };
-
-    strokeTrace (visibleSideBuffer, kickColour.withAlpha (0.85f), 1.6f);
-
-    strokeTrace (visibleMainBuffer, bassColour.withAlpha (0.92f), 2.0f);
+    drawTriggeredTrace (g, bounds, visibleMainBuffer.data(), visible, 0, visible, xStep,
+                        midY, halfHeight, gain, bassColour.withAlpha (0.96f), 2.0f, 0.20f, 0.10f);
 
     // Live-edge indicator: the right edge is "now". A faint playhead line plus a
     // small LIVE tag make the newest material obvious and reinforce that this is
     // a running scope, not a frozen alignment snapshot.
     const float edgeX = bounds.getRight();
-    g.setColour (juce::Colours::white.withAlpha (0.45f));
+    g.setColour (juce::Colours::white.withAlpha (0.75f));
     g.drawVerticalLine ((int) std::round (edgeX), bounds.getY(), bounds.getBottom());
 
-    g.setColour (juce::Colours::white.withAlpha (0.55f));
-    g.setFont (juce::Font (juce::FontOptions (9.0f)).boldened());
+    g.setColour (juce::Colours::white.withAlpha (0.85f));
+    g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
     g.drawText ("LIVE",
-                juce::Rectangle<int> ((int) (edgeX - 36.0f), (int) (bounds.getY() + 2.0f), 34, 10),
+                juce::Rectangle<int> ((int) (edgeX - 36.0f), (int) (bounds.getY() + 2.0f), 34, 12),
                 juce::Justification::centredRight);
 
     drawWaveLegend (g, bounds);
@@ -1225,70 +1181,28 @@ void Oscilloscope::drawSeparateMode (juce::Graphics& g,
     const float laneHalfHeight = bounds.getHeight() * 0.22f;
     const float bassCentreY = bounds.getY() + bounds.getHeight() * 0.25f;
     const float kickCentreY = bounds.getY() + bounds.getHeight() * 0.75f;
-    const bool useBand = scopeShouldRenderMinMaxBand (visible, (int) bounds.getWidth());
 
-    auto drawLane = [&] (const std::array<float, historyLength>& source,
-                         float centreY,
-                         juce::Colour colour,
-                         const juce::String& label)
-    {
-        if (useBand)
-        {
-            strokeMinMaxBand (g, bounds, source.data(), visible, gain,
-                              centreY, laneHalfHeight, colour.withAlpha (0.95f), 1.35f);
+    drawTriggeredTrace (g, bounds, visibleMainBuffer.data(), visible, 0, visible, xStep,
+                        bassCentreY, laneHalfHeight, gain, bassColour.withAlpha(0.96f), 1.6f, 0.15f, 0.08f);
 
-            g.setColour (colour.withAlpha (0.8f));
-            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-            g.drawText (label,
-                        juce::Rectangle<int> ((int) bounds.getX(),
-                                              (int) (centreY - laneHalfHeight - 14.0f),
-                                              48, 12),
-                        juce::Justification::centredLeft);
-            return;
-        }
+    g.setColour (bassColour.withAlpha (0.9f));
+    g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+    g.drawText ("BASS",
+                juce::Rectangle<int> ((int) bounds.getX() + 4,
+                                      (int) (bassCentreY - laneHalfHeight - 16.0f),
+                                      48, 12),
+                juce::Justification::centredLeft);
 
-        juce::Path stroke;
-        juce::Path fill;
+    drawTriggeredTrace (g, bounds, visibleSideBuffer.data(), visible, 0, visible, xStep,
+                        kickCentreY, laneHalfHeight, gain, kickColour.withAlpha(0.96f), 1.6f, 0.15f, 0.08f);
 
-        for (int i = 0; i < visible; ++i)
-        {
-            const float x = bounds.getX() + (float) i * xStep;
-            const float v = juce::jlimit (-1.0f, 1.0f, source[(size_t) i] * gain);
-            const float y = centreY - v * laneHalfHeight;
-
-            if (i == 0)
-            {
-                stroke.startNewSubPath (x, y);
-                fill.startNewSubPath (x, centreY);
-                fill.lineTo (x, y);
-            }
-            else
-            {
-                stroke.lineTo (x, y);
-                fill.lineTo (x, y);
-            }
-        }
-
-        fill.lineTo (bounds.getRight(), centreY);
-        fill.closeSubPath();
-
-        g.setColour (colour.withAlpha (0.14f));
-        g.fillPath (fill);
-        g.setColour (colour.withAlpha (0.95f));
-        g.strokePath (stroke, juce::PathStrokeType (1.35f, juce::PathStrokeType::curved,
-                                                    juce::PathStrokeType::rounded));
-
-        g.setColour (colour.withAlpha (0.8f));
-        g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-        g.drawText (label,
-                    juce::Rectangle<int> ((int) bounds.getX(),
-                                          (int) (centreY - laneHalfHeight - 14.0f),
-                                          48, 12),
-                    juce::Justification::centredLeft);
-    };
-
-    drawLane (visibleMainBuffer, bassCentreY, bassColour, "BASS");
-    drawLane (visibleSideBuffer, kickCentreY, kickColour, "KICK");
+    g.setColour (kickColour.withAlpha (0.9f));
+    g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+    g.drawText ("KICK",
+                juce::Rectangle<int> ((int) bounds.getX() + 4,
+                                      (int) (kickCentreY - laneHalfHeight - 16.0f),
+                                      48, 12),
+                juce::Justification::centredLeft);
 }
 
 void Oscilloscope::drawWaveLegend (juce::Graphics& g, juce::Rectangle<float> bounds) const
