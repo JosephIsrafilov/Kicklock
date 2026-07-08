@@ -409,7 +409,7 @@ inline const char* triggeredScopeEmptyText (KickReferenceState state) noexcept
 // isn't attenuated below unity.
 inline float scopeAutoGainTargetFromPeak (float peak) noexcept
 {
-    return peak > 1.0e-4f ? std::clamp (0.88f / peak, 1.0f, 40.0f) : 1.0f;
+    return peak > 1.0e-4f ? std::clamp (0.88f / peak, 0.05f, 40.0f) : 1.0f;
 }
 
 // Sticky auto-gain retargeting. A scope must not "breathe" with every kick:

@@ -54,7 +54,7 @@ namespace
         g.setColour (gridMajor.brighter (0.25f));
         g.drawHorizontalLine ((int) std::round (centreY), bounds.getX(), bounds.getRight());
 
-        const float dbLevels[] = { 0.0f, -3.0f, -6.0f, -12.0f, -18.0f };
+        const float dbLevels[] = { 24.0f, 18.0f, 12.0f, 6.0f, 3.0f, 0.0f, -3.0f, -6.0f, -12.0f, -18.0f };
         g.setFont (juce::Font (juce::FontOptions (9.5f)));
 
         for (float db : dbLevels)
@@ -67,19 +67,28 @@ namespace
             const float yTop = centreY - scaled * halfHeight;
             const float yBot = centreY + scaled * halfHeight;
 
-            juce::String label = (db == 0.0f ? "0" : juce::String (db, 0)) + " dB";
+            juce::String label = (db > 0.0f ? "+" : "") + (db == 0.0f ? "0" : juce::String (db, 0)) + " dB";
             
-            if (db == 0.0f)
-                g.setColour (gridMinor.brighter (0.4f));
-            else
-                g.setColour (gridMinor.brighter (0.15f));
+            juce::Colour lineCol = gridMinor.brighter (0.15f);
+            juce::Colour textCol = labelColour.withAlpha(0.6f);
+
+            if (db > 0.0f)
+            {
+                lineCol = destructive.withAlpha(0.2f);
+                textCol = destructive.withAlpha(0.9f);
+            }
+            else if (db == 0.0f)
+            {
+                lineCol = gridMinor.brighter (0.4f);
+            }
 
             if (scaled > 0.05f)
             {
+                g.setColour (lineCol);
                 g.drawHorizontalLine ((int) std::round (yTop), bounds.getX(), bounds.getRight());
                 g.drawHorizontalLine ((int) std::round (yBot), bounds.getX(), bounds.getRight());
 
-                g.setColour (labelColour.withAlpha(0.6f));
+                g.setColour (textCol);
                 g.drawText (label, 
                             juce::Rectangle<int> ((int) bounds.getRight() - 34, (int) std::round (yTop) - 12, 30, 12),
                             juce::Justification::centredRight);
@@ -248,16 +257,8 @@ void Oscilloscope::vblankCallback()
 
             if (! isDisplayFrozen())
             {
-                float peak = 0.0f;
-                for (int i = 0; i < visible; ++i)
-                {
-                    peak = juce::jmax (peak, std::abs (visibleMainBuffer[(size_t) i]));
-                    peak = juce::jmax (peak, std::abs (visibleSideBuffer[(size_t) i]));
-                }
-
-                const float candidateGain = scopeAutoGainTargetFromPeak (peak);
-                if (scopeAutoGainShouldRetarget (targetDisplayGain, candidateGain))
-                    targetDisplayGain = candidateGain;
+                // Non-triggered modes behave like a normal oscilloscope: no auto-gain.
+                targetDisplayGain = 1.0f;
 
                 if (anyRead)
                     viewChanged = true;

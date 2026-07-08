@@ -409,7 +409,7 @@ public:
         {
             expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.88f), 1.0f, 1.0e-5f);
             expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.44f), 2.0f, 1.0e-5f);
-            expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (2.0f), 1.0f, 1.0e-5f);   // never attenuates below unity
+            expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (2.0f), 0.44f, 1.0e-5f);
             expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.001f), 40.0f, 1.0e-4f); // clamped ceiling
             expectWithinAbsoluteError (scopeAutoGainTargetFromPeak (0.0f), 1.0f, 1.0e-6f);    // silence stays neutral
         }
