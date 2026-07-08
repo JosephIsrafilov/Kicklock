@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "LinkwitzRileyCrossover.h"
+#include "DynamicTransientEQ.h"
 
 class MultibandPhaseCore
 {
@@ -41,6 +42,7 @@ public:
         highDelay.prepare (spec);
 
         initialiseAllpassFilters();
+        transientEQ.prepare(sampleRate, maxBlock, numChannels);
 
         smoothedCrossover.reset (sampleRate, 0.030);
         smoothedDelay.reset (sampleRate, 0.020);
@@ -60,6 +62,8 @@ public:
         for (auto& channel : allpassFilters)
             for (auto& stage : channel)
                 stage.reset();
+        
+        transientEQ.reset();
 
         smoothedCrossover.setCurrentAndTargetValue (150.0f);
         smoothedDelay.setCurrentAndTargetValue (0.0f);
@@ -87,8 +91,6 @@ public:
                   const Params& params,
                   int n)
     {
-        juce::ignoreUnused (sidechain);
-
         currentCrossoverEnabled = params.crossoverEnabled;
         smoothedCrossover.setTargetValue (juce::jlimit (40.0f, 500.0f, params.crossoverHz));
 
@@ -150,7 +152,7 @@ public:
         while (offset < n)
         {
             const int chunk = juce::jmin (scratchSamples, n - offset);
-            processChunk (main, offset, chunk);
+            processChunk (main, sidechain, offset, chunk);
             offset += chunk;
         }
     }
@@ -208,6 +210,7 @@ private:
     }
 
     void processChunk (juce::AudioBuffer<float>& main,
+                       const juce::AudioBuffer<float>& sidechain,
                        int offset,
                        int n)
     {
@@ -236,6 +239,14 @@ private:
                 highBuffer.clear (ch, 0, n);
             }
         }
+        
+        // Transient Q-Enhancement on High-Band
+        // Extract the chunk of the sidechain to pass to transientEQ
+        sidechainScratch.setSize(sidechain.getNumChannels(), n, false, false, true);
+        for (int ch = 0; ch < sidechain.getNumChannels(); ++ch)
+            sidechainScratch.copyFrom(ch, 0, sidechain, ch, offset, n);
+            
+        transientEQ.process(highBuffer, sidechainScratch, n);
 
         for (int i = 0; i < n; ++i)
         {
@@ -364,6 +375,8 @@ private:
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lowDelay;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> highDelay;
     std::array<std::array<juce::dsp::IIR::Filter<float>, (size_t) maxAllpassStages>, 2> allpassFilters;
+    DynamicTransientEQ transientEQ;
+    juce::AudioBuffer<float> sidechainScratch;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCrossover;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDelay;

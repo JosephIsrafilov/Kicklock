@@ -111,6 +111,7 @@ public:
     std::atomic<float> latestVerificationDeltaPercent { 0.0f };
     std::atomic<float> latestFixConfidence { 0.0f };
     ScopeFifo scopeFifo;
+    ScopeFifo rawScopeFifo;
 
     // Synchronous analysis. Snapshots the raw capture, runs the offline
     // PhaseFixEngine search, and publishes the result. Message-thread callers
@@ -248,10 +249,12 @@ private:
     RealtimeMultiBandMeter processedMultiBandMeter;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> processedMeterSidechainDelay;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> bypassDelay;
+    juce::AudioBuffer<float> analysisBuffer;
     juce::dsp::LinkwitzRileyFilter<float> rawBassLowpass;
     juce::dsp::LinkwitzRileyFilter<float> rawKickLowpass;
     juce::dsp::LinkwitzRileyFilter<float> processedBassLowpass;
     juce::dsp::LinkwitzRileyFilter<float> processedKickLowpass;
+    juce::dsp::LinkwitzRileyFilter<float> analysisBassCrossoverSim;
 
     // Rolling capture of raw (pre-processing) mono bass/kick for the Analyze
     // button. Sized in prepareToPlay (~2 s). Written on the audio thread,

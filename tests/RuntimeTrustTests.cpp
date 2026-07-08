@@ -78,6 +78,7 @@ namespace
         processor.enableAllBuses();
         processor.setRateAndBufferSizeDetails (sampleRate, blockSize);
         processor.prepareToPlay (sampleRate, blockSize);
+        if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
         if (auto* param = processor.apvts.getParameter ("polarity_invert"))
             param->setValueNotifyingHost (applyPolarity ? 1.0f : 0.0f);
@@ -295,6 +296,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             const std::vector<int> bassDelays (4, 0);
             const std::vector<int> kickDelays (4, 120);

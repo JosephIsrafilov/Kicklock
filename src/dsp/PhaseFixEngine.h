@@ -96,23 +96,35 @@ public:
                                         int numSamples,
                                         double sampleRate,
                                         const PhaseFixRenderSettings& settings,
-                                        float renderMaxDelayMs = absoluteManualMaxDelayMs)
+                                        float renderMaxDelayMs,
+                                        std::vector<float>& bassScratch,
+                                        std::vector<float>& kickScratch)
     {
         PhaseFixScore result;
 
         if (bass == nullptr || kick == nullptr || numSamples <= 0 || sampleRate <= 0.0)
             return result;
 
-        std::vector<float> work ((size_t) numSamples, 0.0f);
-        std::vector<float> renderedKick ((size_t) numSamples, 0.0f);
         renderCandidatePair (bass, kick, numSamples, sampleRate, settings, renderMaxDelayMs,
-                             work, renderedKick);
+                             bassScratch, kickScratch);
 
-        const auto scored = score (work.data(), renderedKick.data(), numSamples, sampleRate);
+        const auto scored = score (bassScratch.data(), kickScratch.data(), numSamples, sampleRate);
         result.multi = scored.multi;
         result.matchPercent = scored.match;
         result.confidence = scored.confidence;
         return result;
+    }
+
+    static PhaseFixScore scoreSettings (const float* bass,
+                                        const float* kick,
+                                        int numSamples,
+                                        double sampleRate,
+                                        const PhaseFixRenderSettings& settings,
+                                        float renderMaxDelayMs = absoluteManualMaxDelayMs)
+    {
+        std::vector<float> bassScratch ((size_t) juce::jmax(0, numSamples), 0.0f);
+        std::vector<float> kickScratch ((size_t) juce::jmax(0, numSamples), 0.0f);
+        return scoreSettings (bass, kick, numSamples, sampleRate, settings, renderMaxDelayMs, bassScratch, kickScratch);
     }
 
     // Public render helper (P4). Renders the bass candidate (sign, fractional
@@ -223,6 +235,9 @@ public:
         float bestMatch = before.match;
         float bestConfidence = before.confidence;
 
+        std::vector<float> bassScratch ((size_t) numSamples, 0.0f);
+        std::vector<float> kickScratch ((size_t) numSamples, 0.0f);
+
         auto scoreCandidate = [&] (bool invert, float delayMs, bool useRotator)
         {
             PhaseFixRenderSettings settings;
@@ -237,7 +252,8 @@ public:
             settings.delayInterpolation = delayInterpolation;
 
             const auto candidate = scoreSettings (bass, kick, numSamples, sampleRate,
-                                                  settings, absoluteManualMaxDelayMs);
+                                                  settings, absoluteManualMaxDelayMs,
+                                                  bassScratch, kickScratch);
             return std::pair<PhaseFixRenderSettings, PhaseFixScore> { settings, candidate };
         };
 
@@ -255,14 +271,16 @@ public:
         const float candidateDelayMs = (hasTransientOffset && std::abs (transientOffsetMs) > 0.1f)
             ? transientOffsetMs
             : align.delayMs;
-        const bool polarityCandidates[] = { align.invertPolarity, ! align.invertPolarity };
+            
         const bool useTimingCandidate = std::abs (candidateDelayMs) > 0.1f;
         const bool useAnalyzerDelay = std::abs (align.delayMs - candidateDelayMs) > 0.1f;
         const float delayCandidates[] = { candidateDelayMs,
                                           useAnalyzerDelay ? align.delayMs : candidateDelayMs,
                                           useTimingCandidate ? 0.0f : candidateDelayMs };
 
-        for (const bool invert : polarityCandidates)
+        const bool invertPolys[] = { align.invertPolarity, ! align.invertPolarity };
+        
+        for (const bool invert : invertPolys)
         {
             for (const float delayMs : delayCandidates)
             {

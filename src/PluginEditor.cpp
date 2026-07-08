@@ -168,7 +168,7 @@ void TransientPunchComponent::paint (juce::Graphics& g)
 KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcessor& p)
     : AudioProcessorEditor (&p),
       audioProcessor (p),
-      oscilloscope (p.scopeFifo, p.getTriggeredHitCapture()),
+      oscilloscope (p.rawScopeFifo, p.getTriggeredHitCapture()),
       correlationDisplay (p.realtimeLowBandMatchPercent,
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent,

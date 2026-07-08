@@ -111,6 +111,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             const std::vector<int> bassDelays (4, 0);
             const std::vector<int> kickDelays (4, testCase.kickDelaySamples);
@@ -235,6 +236,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             const std::vector<int> bassDelays (8, 0);
             const std::vector<int> kickDelays (8, 120);
@@ -1094,6 +1096,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedStableHits (processor, 2048);
 
@@ -1112,6 +1115,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedRingingHits (processor, 2048);
 
@@ -1128,6 +1132,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedHits (processor, 2048, /*bassDelay*/ 0, /*kickDelay*/ 0, /*alternate*/ false);
 
@@ -1145,6 +1150,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedConflictingHits (processor, 2048);
 

@@ -972,7 +972,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickLockAudioProcessor::crea
 
 void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    multibandCore.prepare (sampleRate, samplesPerBlock, juce::jmax (1, getTotalNumOutputChannels()), 20.0f);
+    const int numChannels = juce::jmax(1, getTotalNumOutputChannels());
+    analysisBuffer.setSize(numChannels, samplesPerBlock);
+
+    multibandCore.prepare (sampleRate, samplesPerBlock, numChannels, 20.0f);
     const auto maxDelaySamples = multibandCore.reportLatencySamples();
     setLatencySamples (maxDelaySamples);
 
@@ -998,11 +1001,15 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     rawKickLowpass.prepare ({ sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), 1 });
     processedBassLowpass.prepare ({ sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), 1 });
     processedKickLowpass.prepare ({ sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), 1 });
+    analysisBassCrossoverSim.setType (juce::dsp::LinkwitzRileyFilterType::allpass);
+    analysisBassCrossoverSim.prepare ({ sampleRate, (juce::uint32) juce::jmax (1, samplesPerBlock), 1 });
     rawBassLowpass.reset();
     rawKickLowpass.reset();
     processedBassLowpass.reset();
     processedKickLowpass.reset();
+    analysisBassCrossoverSim.reset();
     scopeFifo.prepare (8192);
+    rawScopeFifo.prepare (8192);
 
     // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
     rawCapture.prepare ((int) (sampleRate * 2.0));
@@ -1010,11 +1017,9 @@ void KickLockAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     transientDetector.setThreshold (1.0e-7f);
     transientDetector.setMinimumEnergyGate (1.0e-8f);
     transientDetector.setAttackReleaseMs (2.0f, 60.0f);
-    // Relative detection: fire when the fast peak envelope pulls this many
-    // times ahead of the slow body envelope, so long 808s / noisy tails whose
-    // level never returns to silence still re-arm between hits.
     transientDetector.setTriggerRatio (1.35f);
     transientDetector.setHoldoffMs (90.0f);
+
     // Triggered oscilloscope capture: keep 20 ms pre-roll internally for a
     // stable trigger, but display the post-trigger window from 0..500 ms so
     // long kicks/808s are visible instead of being cut at ~150 ms.
@@ -1127,8 +1132,13 @@ void KickLockAudioProcessor::processObservationCapture (const juce::AudioBuffer<
             statsOut.kickEnergySum += (double) kickMono * (double) kickMono;
             statsOut.kickPeak = juce::jmax (statsOut.kickPeak, std::abs (kickMono));
 
-            const float bassLow = rawBassLowpass.processSample (0, bassMono);
+            float bassLow = rawBassLowpass.processSample (0, bassMono);
             const float kickLow = rawKickLowpass.processSample (0, kickMono);
+
+            const bool crossoverEnable = crossoverEnableParamRaw == nullptr
+                                      || crossoverEnableParamRaw->load() > 0.5f;
+            if (crossoverEnable)
+                bassLow = analysisBassCrossoverSim.processSample (0, bassLow);
 
             rawCapture.push (bassLow, kickLow);
             pitchTracker.pushSample (bassLow);
@@ -1386,6 +1396,45 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     sidechainReferenceAvailable.store (hasSidechain);
 
     const int numSamples = mainBuffer.getNumSamples();
+
+    // ==========================================
+    // CABLE 1: Raw UI Feed (Decoupled Visuals)
+    // ==========================================
+    // Push raw, un-filtered, un-shifted audio directly to the UI scope
+    if (hasSidechain)
+    {
+        const int mainChannels = mainBuffer.getNumChannels();
+        const int sidechainChannels = sidechainBuffer.getNumChannels();
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float mSum = 0.0f;
+            for (int ch = 0; ch < mainChannels; ++ch)
+                mSum += mainBuffer.getSample (ch, i);
+            const float mainMono = mainChannels > 0 ? mSum / (float) mainChannels : 0.0f;
+
+            float sSum = 0.0f;
+            for (int ch = 0; ch < sidechainChannels; ++ch)
+                sSum += sidechainBuffer.getSample (ch, i);
+            const float sidechainMono = sidechainChannels > 0 ? sSum / (float) sidechainChannels : 0.0f;
+
+            if (++scopeDecimationCounter >= scopeDecimationFactor)
+            {
+                scopeDecimationCounter = 0;
+                // Push to both FIFOs: rawScopeFifo for the UI oscilloscope,
+                // and scopeFifo to keep backward-compatible access for tests.
+                rawScopeFifo.pushSample (mainMono, sidechainMono);
+                scopeFifo.pushSample (mainMono, sidechainMono);
+            }
+        }
+    }
+    
+    // ==========================================
+    // CABLE 2: The Analysis Feed (Smoothed)
+    // ==========================================
+    const int numCh = juce::jmin((int)analysisBuffer.getNumChannels(), mainBuffer.getNumChannels());
+    for (int ch = 0; ch < numCh; ++ch)
+        analysisBuffer.copyFrom(ch, 0, mainBuffer, ch, 0, numSamples);
+
     BlockObservationStats observationStats;
 
     const float delayMs = getEffectiveDelayMs();
@@ -1435,11 +1484,10 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     rawKickLowpass.setCutoffFrequency (coreParams.crossoverHz);
     processedBassLowpass.setCutoffFrequency (coreParams.crossoverHz);
     processedKickLowpass.setCutoffFrequency (coreParams.crossoverHz);
+    analysisBassCrossoverSim.setCutoffFrequency (coreParams.crossoverHz);
 
-    // Shared observation path: raw capture, dry meter, held-activity trackers.
-    // Identical to what processBlockBypassed() runs, so bypassing the
-    // corrective DSP below never starves Analyze or the status readouts.
-    processObservationCapture (mainBuffer, sidechainBuffer, hasSidechain, numSamples, observationStats);
+    // Feed analysis with analysisBuffer instead of mainBuffer
+    processObservationCapture (analysisBuffer, sidechainBuffer, hasSidechain, numSamples, observationStats);
     updateActivityAndSignalState (hasSidechain, observationStats, numSamples);
 
     const bool neutral = isBassProcessingNeutral();
@@ -1477,10 +1525,6 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         }
     }
 
-    // Shared observation path: transient detector, HitCaptureBuffer, Kick
-    // Punch meter, processed multi-band meter, realtime correlation, and the
-    // (decimated) scope fifo. Skipped entirely when there's no sidechain,
-    // since a zero-sidechain signal would be meaningless for all of them.
     if (hasSidechain)
     {
         const int mainChannels = mainBuffer.getNumChannels();
@@ -1498,9 +1542,24 @@ void KickLockAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
                 sidechainSum += sidechainBuffer.getSample (ch, i);
             const float sidechainMono = sidechainChannels > 0 ? sidechainSum / (float) sidechainChannels : 0.0f;
 
-            pushMetersScopeAndTransientState (mainMono, sidechainMono);
+            processedMeterSidechainDelay.pushSample (0, sidechainMono);
+            const float meteredSidechainMono = processedMeterSidechainDelay.popSample (0, (float) getLatencySamples());
+            
+            const float processedBassLow = processedBassLowpass.processSample (0, mainMono);
+            const float alignedKickLow = processedKickLowpass.processSample (0, meteredSidechainMono);
+
+            processedMultiBandMeter.pushSample (processedBassLow, alignedKickLow);
+            
+            // Drive hitCapture and transientPunchMeter from the filtered/processed
+            // sidechain so broadband noise does not cause false retriggers (808 tail test).
+            const float triggerKick = 0.80f * alignedKickLow + 0.20f * meteredSidechainMono;
+            const bool transientDetectedPunch = transientDetector.processSample (triggerKick);
+            hitCapture.pushSample (mainMono, meteredSidechainMono, transientDetectedPunch);
+            transientPunchMeter.pushSample (alignedKickLow, processedBassLow, transientDetectedPunch);
         }
     }
+
+
     else
     {
         realtimeCorrelation.store (0.0f);

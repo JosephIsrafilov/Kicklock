@@ -12,6 +12,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
             processor.prepareToPlay (kSampleRate, 4096);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
             expect (processor.isBassProcessingNeutral());
 
             juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
@@ -30,6 +31,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
             processor.prepareToPlay (kSampleRate, 4096);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
             expect (processor.isBassProcessingNeutral());
 
             juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
@@ -49,6 +51,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
             expect (processor.isBassProcessingNeutral());
 
             feedKickBassHits (processor, 2048, /*bypassed*/ false);
@@ -63,6 +66,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             // Bypass must not kill diagnostic observation: as long as the host
             // still routes a sidechain, Kick Punch keeps reading real hits.
@@ -87,6 +91,7 @@ public:
             processor.disableNonMainBuses(); // simulate a host that never routes the sidechain bus
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
                                                          processor.getTotalNumOutputChannels()),
@@ -105,6 +110,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedKickBassHits (processor, 2048, /*bypassed*/ false);
             expect (processor.isTransientPunchValid());
@@ -125,6 +131,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 8192);
             processor.prepareToPlay (kSampleRate, 8192);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedAnalyzableInvertedSignal (processor, 8192);
 
@@ -152,6 +159,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 8192);
             processor.prepareToPlay (kSampleRate, 8192);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setBoolParam (processor, "phaseFilterEnabled", true);
             feedAnalyzableInvertedSignal (processor, 8192);
@@ -167,6 +175,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             expect (! processor.beginBackgroundAnalyze());
             expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::Idle);
@@ -178,6 +187,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 },
                            { false, false, false, false }, 2048);
@@ -200,6 +210,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
             processor.prepareToPlay (kSampleRate, 4096);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setBoolParam (processor, "phaseFilterEnabled", false);
             setFloatParam (processor, "rotatorFreq", 90.0f);
@@ -232,6 +243,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
             processor.prepareToPlay (kSampleRate, 4096);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setBoolParam (processor, "phaseFilterEnabled", true);
             setFloatParam (processor, "rotatorFreq", 450.0f);
@@ -256,6 +268,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
             processor.prepareToPlay (kSampleRate, 4096);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setBoolParam (processor, "allpass_enable", false);
             setBoolParam (processor, "phaseFilterEnabled", true);
@@ -270,6 +283,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 8192);
             processor.prepareToPlay (kSampleRate, 8192);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
             feedAnalyzableInvertedSignal (processor, 8192);
 
             const auto fix = processor.analyzeFix();
@@ -297,6 +311,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setBoolParam (processor, "allpass_enable", true);
             setBoolParam (processor, "phaseFilterEnabled", true);
@@ -332,6 +347,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             PhaseFixResult fix;
             fix.valid = true;
@@ -360,6 +376,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setFloatParam (processor, "delay_ms", -3.25f);
             setFloatParam (processor, "delayMs", -3.25f);
@@ -421,6 +438,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setFloatParam (processor, "delay_ms", 1.0f);
             setBoolParam (processor, "polarity_invert", false);
@@ -449,6 +467,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             expectEquals (processor.getNumPrograms(), 4);
             expectEquals (processor.getProgramName (0), juce::String ("Tight EDM"));
@@ -475,6 +494,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             PhaseFixResult fix;
             fix.valid = true;
@@ -502,6 +522,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             const float delayBefore = rawParam (processor, "delayMs");
             const float polarityBefore = rawParam (processor, "polarityInvert");
@@ -558,6 +579,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 }, { false, false, false, false }, 2048);
 
@@ -586,6 +608,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             // ~2.5 ms kick-late offset: a genuine Strong fix under P2 honest
             // classification (a 0.83 ms/97% pair would correctly read AlreadyGood).
@@ -605,6 +628,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 }, { false, false, false, false }, 2048);
 
@@ -632,6 +656,7 @@ public:
                 processor.enableAllBuses();
                 processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
                 processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
                 feedHitSeriesWithStartOffset (processor,
                                               { 0, 0, 0, 0 },
@@ -661,6 +686,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedLongTailHitSeries (processor, 2048);
 
@@ -677,6 +703,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
             processor.prepareToPlay (kSampleRate, 2048);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             feedHitSeries (processor, { 0, 40, 0, 40 }, { 40, 0, 40, 0 }, { false, true, false, true }, 2048);
 
@@ -691,6 +718,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             expectWithinAbsoluteError (processor.apvts.getParameter ("delay_ms")->convertTo0to1 (0.0f),
                                        0.5f, 1.0e-7f);
@@ -744,6 +772,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             const int expectedHeadroom = (int) std::ceil (kSampleRate * 0.020);
             expectEquals (processor.getLatencySamples(), expectedHeadroom);
@@ -802,6 +831,7 @@ public:
             processor.enableAllBuses();
             processor.setRateAndBufferSizeDetails (kSampleRate, 4096);
             processor.prepareToPlay (kSampleRate, 4096);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             juce::AudioBuffer<float> buffer (juce::jmax (processor.getTotalNumInputChannels(),
                                                          processor.getTotalNumOutputChannels()),
@@ -833,6 +863,7 @@ public:
             KickLockAudioProcessor processor;
             processor.setRateAndBufferSizeDetails (kSampleRate, 512);
             processor.prepareToPlay (kSampleRate, 512);
+            if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             // Nothing set -> neutral.
             expect (processor.isBassProcessingNeutral());

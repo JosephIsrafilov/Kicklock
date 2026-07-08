@@ -948,62 +948,117 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
                                        float gain,
                                        float midY)
 {
-    juce::Path whiteTrace;
+    if (visible < 2)
+        return;
 
-    // Decimate to at most ~2 points per pixel: iterating every sample issued
-    // up to 8192 drawLine calls per frame at 60 Hz — a real CPU hog once the
-    // visible window exceeded the width.
-    const int pointCount = calculateTriggeredRenderPointCount (visible, (int) std::ceil (bounds.getWidth()));
-    const float xStep = bounds.getWidth() / (float) juce::jmax (1, pointCount - 1);
     const float halfHeight = bounds.getHeight() * 0.46f;
-    const float lineWidth = juce::jmax (1.0f, xStep + 0.35f);
 
-    juce::Path constrPath, destrPath;
+    // Number of points to draw. If zoomed in closely, don't draw more points than samples.
+    const int columns = juce::jmax (1, (int) std::ceil (bounds.getWidth()));
+    const int numPoints = juce::jmin (visible, columns);
+    const float xStep = bounds.getWidth() / (float) numPoints;
 
-    for (int point = 0; point < pointCount; ++point)
+    juce::Path whiteTrace;
+    
+    // Create premium gradients for the fill from the zero axis to the peaks
+    juce::ColourGradient constrGrad (constructive.withAlpha (0.0f), bounds.getCentreX(), midY,
+                                     constructive.withAlpha (0.8f), bounds.getCentreX(), bounds.getY(), false);
+    juce::ColourGradient destrGrad (destructive.withAlpha (0.0f), bounds.getCentreX(), midY,
+                                    destructive.withAlpha (0.8f), bounds.getCentreX(), bounds.getY(), false);
+
+    for (int p = 0; p < numPoints; ++p)
     {
-        const int i = triggeredRenderSampleIndex (point, pointCount, visible);
-        const float x = bounds.getX() + (float) point * xStep;
-        const float bass = juce::jlimit (-1.0f, 1.0f, visibleMainBuffer[(size_t) i] * gain);
-        const float kick = juce::jlimit (-1.0f, 1.0f, visibleSideBuffer[(size_t) i] * gain);
-        const float combined = juce::jlimit (-1.0f, 1.0f,
-                                             0.5f * (visibleMainBuffer[(size_t) i]
-                                                     + visibleSideBuffer[(size_t) i]) * gain);
-        const float overlap = juce::jmin (std::abs (bass), std::abs (kick));
-        const float signedOverlap = (bass >= 0.0f ? 1.0f : -1.0f) * overlap;
-        const float overlapY = midY - signedOverlap * halfHeight;
-        const float combinedY = midY - combined * halfHeight;
-
-        // Colour the constructive/destructive fill from the LOW-BAND envelope,
-        // not the raw broadband sample sign, so the green/red regions track the
-        // musical kick/bass body relationship instead of flickering on every
-        // high-frequency zero crossing (P7).
-        const auto relation = classifyPhaseRelation (smoothedMainBuffer[(size_t) i],
-                                                     smoothedSideBuffer[(size_t) i]);
+        const int sampleStart = (int) ((long long) p * visible / numPoints);
+        const int sampleEnd   = juce::jmin (visible, (int) ((long long) (p + 1) * visible / numPoints));
+        const int span        = juce::jmax (1, sampleEnd - sampleStart);
         
-        if (relation == PhaseRelation::Constructive)
+        // Sub-sample step for very large zooms to cap CPU, while keeping enough
+        // resolution to find the true peaks.
+        const int step = juce::jmax (1, span / 128);
+
+        float maxOverlap    = 0.0f;
+        float minCombined   = 1.0f;
+        float maxCombined   = -1.0f;
+        
+        float energySum   = 0.0f;
+        float envelopeSum = 0.0f;
+        int count = 0;
+
+        for (int s = sampleStart; s < sampleEnd; s += step)
         {
-            const float y = juce::jmin (midY, overlapY);
-            const float h = juce::jmax (1.0f, std::abs (overlapY - midY));
-            constrPath.addRectangle (x - lineWidth * 0.5f, y, lineWidth, h);
-        }
-        else if (relation == PhaseRelation::Destructive)
-        {
-            const float y = juce::jmin (midY, overlapY);
-            const float h = juce::jmax (1.0f, std::abs (overlapY - midY));
-            destrPath.addRectangle (x - lineWidth * 0.5f, y, lineWidth, h);
+            const float rawBass = visibleMainBuffer[(size_t) s];
+            const float rawKick = visibleSideBuffer[(size_t) s];
+            const float sBass   = smoothedMainBuffer[(size_t) s];
+            const float sKick   = smoothedSideBuffer[(size_t) s];
+
+            const float bassGained = juce::jlimit (-1.0f, 1.0f, rawBass * gain);
+            const float kickGained = juce::jlimit (-1.0f, 1.0f, rawKick * gain);
+
+            // Envelope and Energy for coloring/opacity
+            envelopeSum += sBass * sKick;
+            energySum   += std::abs (bassGained) + std::abs (kickGained);
+            ++count;
+
+            // Envelope Min/Max for drawing shapes (prevents HF cancelling to 0)
+            const float combined = 0.5f * (bassGained + kickGained);
+            if (combined < minCombined) minCombined = combined;
+            if (combined > maxCombined) maxCombined = combined;
+
+            const float ov = juce::jmin (std::abs (bassGained), std::abs (kickGained));
+            if (ov > maxOverlap) maxOverlap = ov;
         }
 
-        if (point == 0)
-            whiteTrace.startNewSubPath (x, combinedY);
+        if (count == 0)
+            continue;
+
+        if (minCombined > maxCombined) minCombined = maxCombined = 0.0f;
+
+        const float invCount  = 1.0f / (float) count;
+        const float avgEnergy = energySum * invCount;
+
+        // ----- DYNAMIC ALPHA -----
+        const float rawAlpha  = juce::jlimit (0.06f, 1.0f, avgEnergy);
+        const float fillAlpha = 0.12f + 0.60f * rawAlpha;
+        const float glowAlpha = 0.06f + 0.25f * rawAlpha;
+
+        const float x0 = bounds.getX() + (float) p * xStep;
+        const float w  = xStep + 0.5f;
+
+        // Draw symmetric overlap area around zero-axis
+        const float h = juce::jmax (1.0f, maxOverlap * halfHeight);
+        const float y = midY - h;
+        const float hFull = h * 2.0f;
+
+        if (envelopeSum > 1.0e-6f)
+        {
+            g.setGradientFill (constrGrad);
+            g.fillRect (x0, y, w, hFull);
+            g.setColour (constructive.withAlpha (glowAlpha));
+            g.fillRect (x0, y - 1.0f, w, hFull + 2.0f);
+        }
+        else if (envelopeSum < -1.0e-6f)
+        {
+            g.setGradientFill (destrGrad);
+            g.fillRect (x0, y, w, hFull);
+            g.setColour (destructive.withAlpha (glowAlpha));
+            g.fillRect (x0, y - 1.0f, w, hFull + 2.0f);
+        }
+
+        // Min/Max envelope for the combined white trace
+        const float yTop = midY - maxCombined * halfHeight;
+        const float yBot = midY - minCombined * halfHeight;
+
+        if (p == 0)
+        {
+            whiteTrace.startNewSubPath (x0, yTop);
+            whiteTrace.lineTo (x0, yBot);
+        }
         else
-            whiteTrace.lineTo (x, combinedY);
+        {
+            whiteTrace.lineTo (x0, yTop);
+            whiteTrace.lineTo (x0, yBot);
+        }
     }
-
-    g.setColour (constructive.withAlpha (0.28f));
-    g.fillPath (constrPath);
-    g.setColour (destructive.withAlpha (0.28f));
-    g.fillPath (destrPath);
 
     g.setColour (traceColour.withAlpha (0.96f));
     g.strokePath (whiteTrace, juce::PathStrokeType (1.7f, juce::PathStrokeType::curved,
