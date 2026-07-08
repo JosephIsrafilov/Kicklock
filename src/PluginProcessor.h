@@ -112,6 +112,7 @@ public:
     std::atomic<float> latestFixConfidence { 0.0f };
     ScopeFifo scopeFifo;
     ScopeFifo rawScopeFifo;
+    ScopeFifo spectrumFifo;
 
     // Synchronous analysis. Snapshots the raw capture, runs the offline
     // PhaseFixEngine search, and publishes the result. Message-thread callers

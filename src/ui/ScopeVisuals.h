@@ -18,7 +18,6 @@ enum class GridDivision
     Half,
     Whole,
     FourBars,
-    EightBars,
     Bar,
     Milliseconds
 };
@@ -237,8 +236,7 @@ inline GridDivision gridDivisionFromChoiceIndex (int index) noexcept
         case 1:  return GridDivision::Half;
         case 2:  return GridDivision::Whole;
         case 3:  return GridDivision::FourBars;
-        case 4:  return GridDivision::EightBars;
-        case 5:  return GridDivision::Bar;
+        case 4:  return GridDivision::Bar;
         default: return GridDivision::Milliseconds;
     }
 }
@@ -260,7 +258,6 @@ inline double gridDivisionToMs (double bpm, GridDivision division) noexcept
         case GridDivision::Half:         return quarterMs * 2.0;
         case GridDivision::Whole:        return quarterMs * 4.0;
         case GridDivision::FourBars:     return quarterMs * 16.0;
-        case GridDivision::EightBars:    return quarterMs * 32.0;
         case GridDivision::Bar:          return quarterMs * 4.0;
         case GridDivision::Milliseconds: return 0.0;
     }

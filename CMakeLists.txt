@@ -46,6 +46,7 @@ target_sources(KickLock
         src/PluginProcessor.cpp
         src/PluginEditor.cpp
         src/ui/Oscilloscope.cpp
+        src/ui/SpectrumAnalyzer.cpp
 )
 
 juce_generate_juce_header(KickLock)

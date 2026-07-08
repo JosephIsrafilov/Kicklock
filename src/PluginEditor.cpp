@@ -169,6 +169,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     : AudioProcessorEditor (&p),
       audioProcessor (p),
       oscilloscope (p.rawScopeFifo, p.getTriggeredHitCapture()),
+      spectrumAnalyzer (p.spectrumFifo),
       correlationDisplay (p.realtimeLowBandMatchPercent,
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent,
@@ -272,6 +273,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     // --- Centre scope + live match ----------------------------------------
     addAndMakeVisible (oscilloscope);
+    addAndMakeVisible (spectrumAnalyzer);
     oscilloscope.setTooltip ("Click-hold and drag to pause the display and scrub through the captured waveform; "
                              "release to resume live. In Triggered mode, hold Shift while dragging to adjust Delay "
                              "instead (double-click resets Delay). Wheel = time zoom, Shift+wheel = amplitude zoom.");
@@ -443,6 +445,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
+    spectrumAnalyzer.setSampleRate (audioProcessor.getSampleRate());
     oscilloscope.setDelayParameter (audioProcessor.apvts.getParameter ("delay_ms"));
     oscilloscope.setVisualOffsetParameter (audioProcessor.apvts.getParameter ("visualOffsetSamples"));
     pushScopeSettings();
@@ -518,7 +521,19 @@ void KickLockAudioProcessorEditor::configureCombo (juce::ComboBox& combo, const 
 void KickLockAudioProcessorEditor::pushScopeSettings()
 {
     const int viewIdx = viewCombo.getSelectedItemIndex();
-    oscilloscope.setViewMode (scopeViewModeFromChoiceIndex (viewIdx));
+    const auto mode = scopeViewModeFromChoiceIndex (viewIdx);
+    oscilloscope.setViewMode (mode);
+    
+    if (mode == ScopeViewMode::Spectrum)
+    {
+        oscilloscope.setVisible (false);
+        spectrumAnalyzer.setVisible (true);
+    }
+    else
+    {
+        oscilloscope.setVisible (true);
+        spectrumAnalyzer.setVisible (false);
+    }
     oscilloscope.setGridDivision (gridDivisionFromChoiceIndex (gridCombo.getSelectedItemIndex()));
 
     if (const auto* offset = audioProcessor.apvts.getRawParameterValue ("visualOffsetSamples"))
@@ -698,6 +713,7 @@ void KickLockAudioProcessorEditor::timerCallback()
 {
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
+    spectrumAnalyzer.setSampleRate (audioProcessor.getSampleRate());
     oscilloscope.setTempoInfo (audioProcessor.getLatestBpm(),
                                audioProcessor.isTempoAvailable());
     pushScopeSettings();
@@ -879,6 +895,7 @@ void KickLockAudioProcessorEditor::resized()
     scopeBlock.removeFromTop (6);
     auto scopeArea = scopeBlock;
     oscilloscope.setBounds (scopeArea);
+    spectrumAnalyzer.setBounds (scopeArea);
 
     noSidechainOverlay.setBounds (scopeArea.withSizeKeepingCentre (scopeArea.getWidth(), 24));
 

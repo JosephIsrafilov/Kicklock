@@ -273,9 +273,6 @@ void Oscilloscope::vblankCallback()
 
                 if (anyRead)
                 {
-                    if (viewMode == ScopeViewMode::Spectrum)
-                        calculateSpectrum();
-                        
                     viewChanged = true;
                 }
             }
@@ -375,7 +372,6 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     drawGrid (g, plotBounds, plotBounds.getCentreY(),
               viewMode == ScopeViewMode::Separate,
-              viewMode == ScopeViewMode::Spectrum,
               visible, gain);
 
     {
@@ -387,7 +383,6 @@ void Oscilloscope::paint (juce::Graphics& g)
             case ScopeViewMode::Triggered:  break;
             case ScopeViewMode::FreeRun:    drawFreeRunMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
             case ScopeViewMode::PhaseDelta: drawPhaseDeltaMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
-            case ScopeViewMode::Spectrum:   drawSpectrumMode (g, plotBounds, visible, gain, plotBounds.getCentreY()); break;
             case ScopeViewMode::Separate:   drawSeparateMode (g, plotBounds, visible, gain); break;
         }
 
@@ -434,26 +429,7 @@ void Oscilloscope::drawHoverCrosshair (juce::Graphics& g, juce::Rectangle<float>
     juce::String text;
     juce::Colour crosshairCol = juce::Colours::lightgreen.withAlpha (0.75f);
     
-    if (viewMode == ScopeViewMode::Spectrum)
-    {
-        const float minFreq = 20.0f;
-        const float maxFreq = 20000.0f;
-        const float minDb = -60.0f;
-        const float maxDb = 0.0f;
-        
-        float freq = minFreq * std::pow (maxFreq / minFreq, (lastMousePos.x - bounds.getX()) / bounds.getWidth());
-        float normalizedY = (bounds.getBottom() - lastMousePos.y) / bounds.getHeight();
-        float db = minDb + normalizedY * (maxDb - minDb);
-        
-        juce::String freqStr = freq >= 1000.0f ? juce::String (freq / 1000.0f, 1) + " kHz" : juce::String (freq, 0) + " Hz";
-        text = freqStr + ", " + juce::String (db, 1) + " dB";
-        
-        g.setColour (crosshairCol);
-        g.drawHorizontalLine ((int) std::round (lastMousePos.y), bounds.getX(), bounds.getRight());
-        g.drawVerticalLine ((int) std::round (lastMousePos.x), bounds.getY(), bounds.getBottom());
-    }
-    else
-    {
+
         const float midY = bounds.getCentreY();
         const float halfHeight = bounds.getHeight() * 0.46f;
         
@@ -467,7 +443,6 @@ void Oscilloscope::drawHoverCrosshair (juce::Graphics& g, juce::Rectangle<float>
             
         g.setColour (crosshairCol);
         g.drawHorizontalLine ((int) std::round (lastMousePos.y), bounds.getX(), bounds.getRight());
-    }
 
     juce::Font font (juce::FontOptions(10.0f).withStyle("bold"));
     g.setFont (font);
@@ -945,12 +920,12 @@ void Oscilloscope::drawTriggeredTrace (juce::Graphics& g, juce::Rectangle<float>
     if (glowAlpha > 0.0f)
     {
         g.setColour (colour.withMultipliedAlpha (glowAlpha));
-        g.strokePath (stroke, juce::PathStrokeType (strokeWidth + 2.6f, juce::PathStrokeType::curved,
+        g.strokePath (stroke, juce::PathStrokeType (strokeWidth + 2.6f, juce::PathStrokeType::mitered,
                                                     juce::PathStrokeType::rounded));
     }
 
     g.setColour (colour);
-    g.strokePath (stroke, juce::PathStrokeType (strokeWidth, juce::PathStrokeType::curved,
+    g.strokePath (stroke, juce::PathStrokeType (strokeWidth, juce::PathStrokeType::mitered,
                                                 juce::PathStrokeType::rounded));
 }
 
@@ -958,7 +933,6 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
                              juce::Rectangle<float> bounds,
                              float midY,
                              bool separateMode,
-                             bool spectrumMode,
                              int visible,
                              float gain)
 {
@@ -972,7 +946,7 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
     currentKey.boundsH = (int) bounds.getHeight();
     currentKey.tempoAvailable = tempoAvailable;
     currentKey.separateMode = separateMode;
-    currentKey.spectrumMode = spectrumMode;
+
     currentKey.division = gridDivision;
 
     if (gridKey != currentKey || gridCache.isNull())
@@ -996,7 +970,7 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
                 majorStepMs = (float) bpmToQuarterMs (bpm);
                 minorDivisions = 0;
             }
-            else if (gridDivision == GridDivision::FourBars || gridDivision == GridDivision::EightBars)
+            else if (gridDivision == GridDivision::FourBars)
             {
                 // Draw grid lines on every bar for multi-bar views
                 majorStepMs = (float) bpmToQuarterMs (bpm) * 4.0f;
@@ -1015,63 +989,7 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
             minorDivisions = 2;
         }
 
-        if (spectrumMode)
-        {
-            // --- Frequency grid (logarithmic) ---
-            const float minFreq = 20.0f;
-            const float maxFreq = 20000.0f;
-            
-            const float freqs[] = { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 };
-            gCache.setColour (gridMajor);
-            gCache.setFont (juce::Font (juce::FontOptions (10.0f)));
-            
-            for (float f : freqs)
-            {
-                float normalizedX = std::log (f / minFreq) / std::log (maxFreq / minFreq);
-                float x = bounds.getX() + normalizedX * bounds.getWidth();
-                
-                gCache.drawVerticalLine ((int) std::round (x), bounds.getY(), bounds.getBottom());
-                
-                if (f == 100 || f == 1000 || f == 10000)
-                {
-                    juce::String label = f >= 1000 ? juce::String (f / 1000.0f, 0) + "k" : juce::String (f, 0);
-                    gCache.setColour (labelColour);
-                    gCache.drawText (label,
-                                     juce::Rectangle<int> ((int) std::round (x + 4.0f),
-                                                           (int) std::round (bounds.getBottom() - 16.0f),
-                                                           40, 12),
-                                     juce::Justification::centredLeft);
-                    gCache.setColour (gridMajor);
-                }
-            }
-            
-            // --- dB grid (linear from 0 to -60) ---
-            const float minDb = -60.0f;
-            const float maxDb = 0.0f;
-            const float dbStep = 12.0f;
-            
-            gCache.setColour (gridMinor);
-            for (float db = 0.0f; db >= minDb; db -= dbStep)
-            {
-                float normalizedY = (db - minDb) / (maxDb - minDb);
-                float y = bounds.getBottom() - normalizedY * bounds.getHeight();
-                
-                gCache.drawHorizontalLine ((int) std::round (y), bounds.getX(), bounds.getRight());
-                
-                if (db < 0.0f && db > minDb)
-                {
-                    gCache.setColour (labelColour);
-                    gCache.drawText (juce::String (db, 0) + " dB",
-                                     juce::Rectangle<int> ((int) bounds.getX() + 4,
-                                                           (int) std::round (y - 14.0f),
-                                                           40, 12),
-                                     juce::Justification::centredLeft);
-                    gCache.setColour (gridMinor);
-                }
-            }
-        }
-        else
-        {
+
             if (visibleWindowMs > 0.0f)
             {
                 const float scroll = displayScrollMs;
@@ -1131,7 +1049,6 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
                 drawHorizontalMarkers (midY, bounds.getHeight() * 0.46f);
             }
         }
-    }
 
     g.drawImageAt (gridCache, (int) bounds.getX(), (int) bounds.getY());
 }
@@ -1255,66 +1172,8 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
     }
 
     g.setColour (traceColour.withAlpha (0.96f));
-    g.strokePath (whiteTrace, juce::PathStrokeType (1.7f, juce::PathStrokeType::curved,
+    g.strokePath (whiteTrace, juce::PathStrokeType (1.7f, juce::PathStrokeType::mitered,
                                                     juce::PathStrokeType::rounded));
-}
-
-void Oscilloscope::drawSpectrumMode (juce::Graphics& g,
-                                     juce::Rectangle<float> bounds,
-                                     int visible,
-                                     float gain,
-                                     float midY)
-{
-    const float minFreq = 20.0f;
-    const float maxFreq = 20000.0f;
-    const float minDb = -60.0f;
-    const float maxDb = 0.0f;
-
-    auto drawSpectrumCurve = [&](const std::array<float, historyLength>& spectrumData, juce::Colour colour) {
-        juce::Path path;
-        bool first = true;
-        
-        for (float x = bounds.getX(); x <= bounds.getRight(); x += 1.0f)
-        {
-            // Map x to freq (logarithmic)
-            float freq = minFreq * std::pow (maxFreq / minFreq, (x - bounds.getX()) / bounds.getWidth());
-            
-            // Map freq to FFT bin
-            float binIdx = freq * (float)historyLength / (float)sampleRate;
-            int idx = juce::jlimit (0, historyLength / 2 - 1, (int) std::round (binIdx));
-            
-            float db = spectrumData[(size_t)idx];
-            
-            // Map db to y (0dB at top, -60dB at bottom)
-            float y = bounds.getBottom() - (juce::jlimit (minDb, maxDb, db) - minDb) / (maxDb - minDb) * bounds.getHeight();
-            
-            if (first)
-            {
-                path.startNewSubPath (x, y);
-                first = false;
-            }
-            else
-            {
-                path.lineTo (x, y);
-            }
-        }
-        
-        juce::Path filledPath = path;
-        filledPath.lineTo (bounds.getRight(), bounds.getBottom());
-        filledPath.lineTo (bounds.getX(), bounds.getBottom());
-        filledPath.closeSubPath();
-        
-        g.setColour (colour.withAlpha (0.4f));
-        g.fillPath (filledPath);
-        
-        g.setColour (colour.withAlpha (0.95f));
-        g.strokePath (path, juce::PathStrokeType (1.5f, juce::PathStrokeType::curved));
-    };
-
-    drawSpectrumCurve (spectrumSide, kickColour);
-    drawSpectrumCurve (spectrumMain, bassColour);
-    
-    drawWaveLegend (g, bounds);
 }
 
 void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
@@ -1456,7 +1315,7 @@ void Oscilloscope::strokeMinMaxBand (juce::Graphics& g, juce::Rectangle<float> b
     g.setColour (colour.withMultipliedAlpha (0.55f));
     g.fillPath (band);
     g.setColour (colour);
-    g.strokePath (band, juce::PathStrokeType (strokeWidth * 0.6f, juce::PathStrokeType::curved,
+    g.strokePath (band, juce::PathStrokeType (strokeWidth * 0.6f, juce::PathStrokeType::mitered,
                                               juce::PathStrokeType::rounded));
 }
 
@@ -1601,7 +1460,7 @@ void Oscilloscope::ensureSweepBuffersSized()
     pendingRelockHitId = 0;
     kickReferenceHitId = 0;
     sweepMarkersHitId = 0;
-    kickReferenceState = KickReferenceState::NoReference;
+    kickReferenceState = KickReferenceState::RelockPending;
     fallbackBass.clear();
     fallbackKick.clear();
 }
@@ -1788,41 +1647,6 @@ void Oscilloscope::finishSweep()
         targetDisplayGain = candidate;
 }
 
-void Oscilloscope::calculateSpectrum()
-{
-    // Gather latest 8192 samples
-    for (int i = 0; i < historyLength; ++i)
-    {
-        int readIdx = (writeIndex + i) % historyLength;
-        fftScratchMain[(size_t)i] = mainHistory[(size_t)readIdx];
-        fftScratchSide[(size_t)i] = sidechainHistory[(size_t)readIdx];
-    }
-    
-    // Apply window
-    fftWindow.multiplyWithWindowingTable (fftScratchMain.data(), historyLength);
-    fftWindow.multiplyWithWindowingTable (fftScratchSide.data(), historyLength);
-    
-    // Zero-pad the rest of the array
-    std::fill (fftScratchMain.begin() + historyLength, fftScratchMain.end(), 0.0f);
-    std::fill (fftScratchSide.begin() + historyLength, fftScratchSide.end(), 0.0f);
-
-    auto& fft = FftPlanCache::get(13); // 2^13 = 8192
-    
-    fft.performFrequencyOnlyForwardTransform (fftScratchMain.data());
-    fft.performFrequencyOnlyForwardTransform (fftScratchSide.data());
-    
-    const float minDb = -144.0f;
-    for (int i = 0; i < historyLength / 2; ++i)
-    {
-        float magM = fftScratchMain[(size_t)i] / (float)historyLength;
-        float dbM = juce::Decibels::gainToDecibels (magM, minDb);
-        spectrumMain[(size_t)i] += (dbM - spectrumMain[(size_t)i]) * 0.4f;
-        
-        float magS = fftScratchSide[(size_t)i] / (float)historyLength;
-        float dbS = juce::Decibels::gainToDecibels (magS, minDb);
-        spectrumSide[(size_t)i] += (dbS - spectrumSide[(size_t)i]) * 0.4f;
-    }
-}
 
 void Oscilloscope::finishPendingRelockSweep()
 {

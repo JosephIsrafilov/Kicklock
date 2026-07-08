@@ -867,7 +867,7 @@ KickLockAudioProcessor::createParameterLayout() {
   // second history squashed into the width. "ms" mode remains selectable.
   layout.add(std::make_unique<juce::AudioParameterChoice>(
       juce::ParameterID{"gridDivision", 1}, "Grid Division",
-      juce::StringArray{"1/4", "1/2", "1", "4", "8", "Bar", "ms"}, 0));
+      juce::StringArray{"1/4", "1/2", "1", "4", "Bar", "ms"}, 0));
 
   layout.add(std::make_unique<juce::AudioParameterChoice>(
       juce::ParameterID{"scopeViewMode", 1}, "Scope View",
@@ -957,6 +957,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   analysisBassCrossoverSim.reset();
   scopeFifo.prepare(8192);
   rawScopeFifo.prepare(8192);
+  spectrumFifo.prepare(16384);
 
   // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
   rawCapture.prepare((int)(sampleRate * 2.0));
@@ -1196,6 +1197,7 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState(
     scopeDecimationCounter = 0;
     scopeFifo.pushSample(mainMono, meteredSidechainMono);
   }
+  spectrumFifo.pushSample(mainMono, meteredSidechainMono);
 }
 
 void KickLockAudioProcessor::processBlockBypassed(
@@ -1485,6 +1487,7 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
         scopeDecimationCounter = 0;
         scopeFifo.pushSample(mainMono, meteredSidechainMono);
       }
+      spectrumFifo.pushSample(mainMono, meteredSidechainMono);
     }
   }
 

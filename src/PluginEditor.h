@@ -4,6 +4,7 @@
 #include "PluginProcessor.h"
 #include "ui/LookAndFeel.h"
 #include "ui/Oscilloscope.h"
+#include "ui/SpectrumAnalyzer.h"
 #include "ui/CorrelationDisplay.h"
 #include "ui/StatusHelpers.h"
 #include "dsp/AnalyzeState.h"
@@ -131,6 +132,7 @@ private:
 
     // --- Centre scope ------------------------------------------------------
     Oscilloscope oscilloscope;
+    SpectrumAnalyzer spectrumAnalyzer;
     CorrelationDisplay correlationDisplay;
 
     // Scope overlays. Added after the scope so they draw on top of it.

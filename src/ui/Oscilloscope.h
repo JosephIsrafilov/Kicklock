@@ -111,13 +111,11 @@ private:
     void timerCallback() override;
     void vblankCallback();
     void drawGrid (juce::Graphics& g, juce::Rectangle<float> bounds,
-                   float midY, bool separateMode, bool spectrumMode, int visible, float gain);
+                   float midY, bool separateMode, int visible, float gain);
     void drawFreeRunMode (juce::Graphics&, juce::Rectangle<float> bounds,
                           int visible, float gain, float midY);
     void drawPhaseDeltaMode (juce::Graphics&, juce::Rectangle<float> bounds,
                              int visible, float gain, float midY);
-    void drawSpectrumMode (juce::Graphics&, juce::Rectangle<float> bounds,
-                          int visible, float gain, float midY);
     void drawSeparateMode (juce::Graphics&, juce::Rectangle<float> bounds,
                            int visible, float gain);
     void drawTriggeredMode (juce::Graphics&, juce::Rectangle<float> bounds, float gain);
@@ -155,7 +153,7 @@ private:
     void promoteCurrentSweepToGhost();
     void ensureSweepBuffersSized();
     void buildWaitingFallback();
-    void calculateSpectrum();
+
     bool glideTriggeredAutoGain() noexcept;
 
     // One waveform lane of the triggered window: the visible slice
@@ -227,12 +225,6 @@ private:
     std::array<float, historyLength> smoothedMainBuffer {};
     std::array<float, historyLength> smoothedSideBuffer {};
 
-    std::array<float, historyLength> spectrumMain {};
-    std::array<float, historyLength> spectrumSide {};
-    std::array<float, historyLength * 2> fftScratchMain {};
-    std::array<float, historyLength * 2> fftScratchSide {};
-    juce::dsp::WindowingFunction<float> fftWindow { historyLength, juce::dsp::WindowingFunction<float>::hann, false };
-
     // Scratch for the per-pixel-column min/max envelope rendering (one entry
     // per pixel column; historyLength safely exceeds any plausible width).
     std::array<float, historyLength> columnMinScratch {};
@@ -249,7 +241,7 @@ private:
         int boundsW = 0, boundsH = 0;
         bool tempoAvailable = false;
         bool separateMode = false;
-        bool spectrumMode = false;
+
         GridDivision division = GridDivision::Milliseconds;
         float gain = -1.0f;
         bool operator!=(const GridCacheKey& o) const {
@@ -257,7 +249,7 @@ private:
                    std::abs(scrollMs - o.scrollMs) > 1.0e-5f ||
                    std::abs(bpm - o.bpm) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH ||
                    tempoAvailable != o.tempoAvailable || separateMode != o.separateMode ||
-                   spectrumMode != o.spectrumMode ||
+
                    division != o.division || std::abs(gain - o.gain) > 1.0e-3f;
         }
     } gridKey;
@@ -323,7 +315,7 @@ private:
     int sweepPreRollSamples = 0;
     int sweepTriggerSample = 0;       // visual 0 ms: first meaningful kick onset
     int kickReferenceTriggerSample = 0;
-    KickReferenceState kickReferenceState = KickReferenceState::NoReference;
+    KickReferenceState kickReferenceState = KickReferenceState::RelockPending;
 
     // Pre-first-kick fallback: the decimated ring shown live so the triggered
     // view is never blank while waiting for the first hit. Cleared for good
