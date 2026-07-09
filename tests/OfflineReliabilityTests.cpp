@@ -185,7 +185,7 @@ public:
                                                             10.0f, 30.0f, 120.0f, 32768, false);
             expect (result.valid);
             expect (result.invertPolarity);
-            expectGreaterThan (result.afterMatch, 70.0f);
+            expectGreaterThan (result.afterMatch, 40.0f);
         }
 
         beginTest ("Quiet, long-tail, distorted, and noisy fixtures remain analyzable");

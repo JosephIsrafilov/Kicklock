@@ -16,7 +16,7 @@ struct BandCorrelationResult
     float bassEnergy = 0.0f;
     float kickEnergy = 0.0f;
     float correlation = 0.0f;
-    float matchPercent = 50.0f;
+    float matchPercent = 0.0f;
     float confidence = 0.0f;   // energy-based reliability of this band
 };
 
@@ -29,15 +29,15 @@ struct MultiBandCorrelationResult
     // Low-end-weighted overall score (SUB + LOW dominate).
     // This is the number that drives decisions and the main Phase Match meter.
     float weightedCorrelation = 0.0f;
-    float weightedMatchPercent = 50.0f;
+    float weightedMatchPercent = 0.0f;
 
     // SUB + LOW only, for the "sub/low band match" read-out.
-    float lowEndMatchPercent = 50.0f;
+    float lowEndMatchPercent = 0.0f;
 
     // Even (energy-only) blend across the full 20 Hz-500 Hz span, for the broad
     // low/body read-out. Not weighted toward the low end, so it shows the wideband
     // relationship without steering decisions.
-    float broadbandMatchPercent = 50.0f;
+    float broadbandMatchPercent = 0.0f;
 
     // Most out-of-phase band among the confident ones (worst conflict), or -1.
     int worstConflictBandIndex = -1;
@@ -179,7 +179,7 @@ public:
 private:
     static float toPercent (double r)
     {
-        return (float) ((std::clamp (r, -1.0, 1.0) + 1.0) * 50.0);
+        return (float) (std::clamp (r, -1.0, 1.0) * 100.0);
     }
 
     static void bandPass (std::vector<float>& x, double fs, float lowHz, float highHz)

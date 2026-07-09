@@ -8,6 +8,27 @@ SpectrumAnalyzer::SpectrumAnalyzer(ScopeFifo& fifoToUse)
     startTimerHz (30);
     spectrumMain.fill (0.0f);
     spectrumSide.fill (0.0f);
+
+    speedComboBox.addItem("Slow", 1);
+    speedComboBox.addItem("Medium", 2);
+    speedComboBox.addItem("Fast", 3);
+    speedComboBox.setSelectedId(2, juce::dontSendNotification);
+    
+    speedComboBox.onChange = [this] {
+        switch (speedComboBox.getSelectedId()) {
+            case 1: smoothingFactor = 0.15f; break; // Slow
+            case 2: smoothingFactor = 0.4f;  break; // Medium
+            case 3: smoothingFactor = 0.8f;  break; // Fast
+        }
+    };
+    
+    // Style the combobox to match the dark UI
+    speedComboBox.setColour(juce::ComboBox::backgroundColourId, juce::Colours::black.withAlpha(0.3f));
+    speedComboBox.setColour(juce::ComboBox::outlineColourId, juce::Colours::transparentWhite);
+    speedComboBox.setColour(juce::ComboBox::textColourId, juce::Colours::white.withAlpha(0.7f));
+    speedComboBox.setJustificationType(juce::Justification::centred);
+    
+    addAndMakeVisible(speedComboBox);
 }
 
 SpectrumAnalyzer::~SpectrumAnalyzer()
@@ -68,15 +89,15 @@ void SpectrumAnalyzer::calculateSpectrum()
     fft.performFrequencyOnlyForwardTransform (fftScratchSide.data());
     
     const float minDb = -144.0f;
-    for (int i = 0; i < historyLength / 2; ++i)
+    for (int i = 0; i < historyLength; ++i)
     {
         float magM = fftScratchMain[(size_t)i] / (float)historyLength;
         float dbM = juce::Decibels::gainToDecibels (magM, minDb);
-        spectrumMain[(size_t)i] += (dbM - spectrumMain[(size_t)i]) * 0.4f;
+        spectrumMain[(size_t)i] += (dbM - spectrumMain[(size_t)i]) * smoothingFactor;
         
         float magS = fftScratchSide[(size_t)i] / (float)historyLength;
         float dbS = juce::Decibels::gainToDecibels (magS, minDb);
-        spectrumSide[(size_t)i] += (dbS - spectrumSide[(size_t)i]) * 0.4f;
+        spectrumSide[(size_t)i] += (dbS - spectrumSide[(size_t)i]) * smoothingFactor;
     }
 }
 
@@ -97,8 +118,21 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     // Draw Title
     g.setColour (juce::Colours::white.withAlpha (0.9f));
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+    auto titleArea = plotBounds.removeFromTop (16.0f).toNearestInt();
+    
+    // Position the combobox in the top right of the plot area
+    juce::Rectangle<int> comboBounds = titleArea.removeFromRight(70).withSizeKeepingCentre(70, 16);
+    speedComboBox.setBounds(comboBounds);
+    
+    // Label for the combobox
+    g.setColour (juce::Colours::white.withAlpha (0.5f));
+    g.setFont (juce::Font (juce::FontOptions (10.0f)));
+    g.drawText("Speed:", titleArea.removeFromRight(40).withSizeKeepingCentre(40, 16), juce::Justification::centredRight);
+    
+    g.setColour (juce::Colours::white.withAlpha (0.9f));
+    g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
     g.drawText ("SPECTRUM ANALYZER",
-                plotBounds.removeFromTop (16.0f).toNearestInt(),
+                titleArea,
                 juce::Justification::centredLeft);
                 
     const float minFreq = 20.0f;
@@ -130,7 +164,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
         juce::Graphics::ScopedSaveState state (g);
         g.reduceClipRegion (plotBounds.toNearestInt());
         
-        auto drawSpectrumCurve = [&](const std::array<float, historyLength / 2>& spectrumData, juce::Colour colour) {
+        auto drawSpectrumCurve = [&](const std::array<float, historyLength>& spectrumData, juce::Colour colour) {
             juce::Path path;
             bool first = true;
             
@@ -145,8 +179,8 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                 if (binEnd - binStart < 1.0f)
                 {
                     float binCenter = (binStart + binEnd) * 0.5f;
-                    int idx1 = juce::jlimit (0, historyLength / 2 - 1, (int) std::floor (binCenter));
-                    int idx2 = juce::jlimit (0, historyLength / 2 - 1, idx1 + 1);
+                    int idx1 = juce::jlimit (0, historyLength - 1, (int) std::floor (binCenter));
+                    int idx2 = juce::jlimit (0, historyLength - 1, idx1 + 1);
                     float frac = binCenter - (float)idx1;
                     
                     float db1 = spectrumData[(size_t)idx1];
@@ -158,8 +192,8 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                 }
                 else
                 {
-                    int startIdx = juce::jlimit (0, historyLength / 2 - 1, (int) std::floor (binStart));
-                    int endIdx   = juce::jlimit (0, historyLength / 2 - 1, (int) std::ceil (binEnd));
+                    int startIdx = juce::jlimit (0, historyLength - 1, (int) std::floor (binStart));
+                    int endIdx   = juce::jlimit (0, historyLength - 1, (int) std::ceil (binEnd));
                     for (int i = startIdx; i <= endIdx; ++i)
                     {
                         if (spectrumData[(size_t)i] > db)
@@ -285,8 +319,8 @@ void SpectrumAnalyzer::rebuildBinCache()
         float freqStart = minFreq * std::pow (maxFreq / minFreq, (x - 0.5f - plotBounds.getX()) / plotBounds.getWidth());
         float freqEnd   = minFreq * std::pow (maxFreq / minFreq, (x + 0.5f - plotBounds.getX()) / plotBounds.getWidth());
         
-        float binStart = freqStart * (float)historyLength / (float)sampleRate;
-        float binEnd   = freqEnd   * (float)historyLength / (float)sampleRate;
+        float binStart = freqStart * (float)(historyLength * 2) / (float)sampleRate;
+        float binEnd   = freqEnd   * (float)(historyLength * 2) / (float)sampleRate;
         
         binCache.push_back ({x, binStart, binEnd});
     }

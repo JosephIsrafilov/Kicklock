@@ -53,15 +53,15 @@ struct PhaseFixResult
     float phaseFilterQ = 0.7f;
     int phaseFilterStages = 2;
 
-    float beforeMatchPercent = 50.0f;
-    float afterMatchPercent = 50.0f;
-    float predictedAfterMatchPercent = 50.0f;
-    float displayBeforeMatchPercent = 50.0f;
-    float displayAfterMatchPercent = 50.0f;
-    float verifiedAfterMatchPercent = -1.0f;
+    float beforeMatchPercent = 0.0f;
+    float afterMatchPercent = 0.0f;
+    float predictedAfterMatchPercent = 0.0f;
+    float verifiedAfterMatchPercent = 0.0f;
+    float displayBeforeMatchPercent = 0.0f;
+    float displayAfterMatchPercent = 0.0f;
     float verificationDeltaPercent = 0.0f;
-    bool verificationWarning = false;
     float improvementPercent = 0.0f;
+    bool verificationWarning = false;
     float confidence = 0.0f;
 
     bool requiresTimelineMove = false;
@@ -374,7 +374,7 @@ private:
     struct Score
     {
         MultiBandCorrelationResult multi;
-        float match = 50.0f;
+        float match = 0.0f;
         float confidence = 0.0f;
     };
 
@@ -382,12 +382,12 @@ private:
     // genuinely good match (or a smaller gain onto an excellent final match);
     // Partial is a worthwhile gain regardless of the final absolute; AlreadyGood
     // is a high starting match with little left to add.
-    static constexpr float strongImprovementThreshold = 8.0f;
-    static constexpr float partialImprovementThreshold = 5.0f;
-    static constexpr float alreadyGoodBeforeThreshold = 80.0f;
-    static constexpr float strongAfterThreshold = 75.0f;
-    static constexpr float excellentAfterThreshold = 90.0f;
-    static constexpr float verificationWarningThreshold = 10.0f;
+    static constexpr float strongImprovementThreshold = 32.0f;
+    static constexpr float partialImprovementThreshold = 20.0f;
+    static constexpr float alreadyGoodBeforeThreshold = 20.0f;
+    static constexpr float strongAfterThreshold = 0.0f;
+    static constexpr float excellentAfterThreshold = 60.0f;
+    static constexpr float verificationWarningThreshold = 40.0f;
 
     // P3: score a rendered pair on the ONE canonical ruler (the shared
     // PhaseBands table + low-end-weighted blend), and fill Score.multi so band

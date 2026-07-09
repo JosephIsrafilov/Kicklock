@@ -36,3 +36,7 @@ build/
 build_*/
 Builds/
 *.vst3/
+
+# AI Agents and Skills
+.agents/
+skills-lock.json

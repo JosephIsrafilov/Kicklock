@@ -101,11 +101,11 @@ public:
     float getBandMatchPercent (int bandIndex) const noexcept
     {
         if (bandIndex < 0 || bandIndex >= numBands)
-            return 50.0f;
+            return 0.0f;
 
         double corr = 0.0;
         if (! bandCorrelation (bands[(size_t) bandIndex], corr))
-            return 50.0f;
+            return 0.0f;
 
         return toPercent (corr);
     }
@@ -163,9 +163,8 @@ public:
     }
 
     // True while any band carries enough joint energy for the correlation to
-    // mean anything. When this is false every getter returns a neutral 50% —
-    // and a UI printing "50%" over silence reads as "half aligned", which is
-    // misleading; it should show "no signal" instead.
+    // mean anything. When this is false every getter returns a neutral 0% —
+    // and a UI printing "0%" over silence reads as "no signal".
     bool hasSignal() const noexcept
     {
         double totalEnergy = 0.0;
@@ -184,7 +183,7 @@ private:
     static constexpr int numBands = PhaseBands::numBands;
     static constexpr double butterworthQ = 0.70710678;
     // -60 dBFS on the joint (geometric-mean) band energy. Below this the pair is
-    // effectively silent and every read-out is a neutral 50%.
+    // effectively silent and every read-out is a neutral 0%.
     static constexpr double energyGateFloor = 1.0e-6;
 
     struct BiquadCoeffs
@@ -276,7 +275,7 @@ private:
     // energy share of the total across bands (optionally times the decision
     // weight), not by an absolute level. This is what makes a quiet-but-aligned
     // pair still read correctly - a -30 dBFS aligned bass no longer pins the
-    // display at 50%. An absolute -60 dBFS gate on the summed energy keeps
+    // display at 0%. An absolute -60 dBFS gate on the summed energy keeps
     // genuine silence neutral.
     float blend (int firstBand, int lastBand, bool useDecisionWeight) const noexcept
     {
@@ -298,7 +297,7 @@ private:
         }
 
         if (totalEnergy <= energyGateFloor)
-            return 50.0f;
+            return 0.0f;
 
         double sum = 0.0, weight = 0.0;
         for (int b = firstBand; b < lastBand; ++b)
@@ -313,12 +312,12 @@ private:
             weight += w;
         }
 
-        return weight > 1.0e-9 ? toPercent (sum / weight) : 50.0f;
+        return weight > 1.0e-9 ? toPercent (sum / weight) : 0.0f;
     }
 
     static float toPercent (double r) noexcept
     {
-        return (float) ((std::clamp (r, -1.0, 1.0) + 1.0) * 50.0);
+        return (float) (std::clamp (r, -1.0, 1.0) * 100.0);
     }
 
     double sampleRate = 44100.0;

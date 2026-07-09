@@ -72,13 +72,13 @@ public:
 
         beginTest ("Polarity hint shows on sustained cancellation with hysteresis");
         {
-            // Comes on below 25%, stays on until above 32%, never during silence.
-            expect (! shouldShowPolarityHint (false, 40.0f, true));
-            expect (! shouldShowPolarityHint (false, 28.0f, true));   // below on-threshold? no (25)
-            expect (shouldShowPolarityHint (false, 20.0f, true));
-            expect (shouldShowPolarityHint (true, 28.0f, true));      // hysteresis holds it on
-            expect (! shouldShowPolarityHint (true, 35.0f, true));    // clears above 32
-            expect (! shouldShowPolarityHint (true, 10.0f, false));   // silence gates it off
+            // Comes on below -50%, stays on until above -36%, never during silence.
+            expect (! shouldShowPolarityHint (false, -20.0f, true));
+            expect (! shouldShowPolarityHint (false, -44.0f, true));   // below on-threshold? no (-50)
+            expect (shouldShowPolarityHint (false, -60.0f, true));
+            expect (shouldShowPolarityHint (true, -44.0f, true));      // hysteresis holds it on
+            expect (! shouldShowPolarityHint (true, -30.0f, true));    // clears above -36
+            expect (! shouldShowPolarityHint (true, -80.0f, false));   // silence gates it off
         }
 
         beginTest ("Min/max columns capture every peak and split ranges exactly");

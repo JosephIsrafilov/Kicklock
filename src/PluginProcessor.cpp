@@ -432,8 +432,8 @@ PhaseFixResult analyzeAggregatedHits(const std::vector<float> &bass,
     aggregated.beforeMatchPercent = before.matchPercent;
     aggregated.afterMatchPercent = after.matchPercent;
   } else {
-    aggregated.beforeMatchPercent = 50.0f;
-    aggregated.afterMatchPercent = 50.0f;
+    aggregated.beforeMatchPercent = 0.0f;
+    aggregated.afterMatchPercent = 0.0f;
   }
 
   aggregated.predictedAfterMatchPercent = aggregated.afterMatchPercent;
@@ -1016,10 +1016,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   scopeDecimationFactor = juce::jmax(1, (int)(sampleRate / 2048.0));
   scopeDecimationCounter = 0;
   rawScopeDecimationCounter = 0;
-  // Spectrum: ~16 kHz effective rate is enough for a 20 Hz–8 kHz comparison
-  // display and cuts dual-FFT UI cost roughly 3x vs full-rate 48 kHz.
-  spectrumDecimationFactor = juce::jmax(1, (int)(sampleRate / 16000.0));
-  spectrumDecimationCounter = 0;
+  // Spectrum: No spectrum decimation
   dryMeterDecimationCounter = 0;
   processedMeterDecimationCounter = 0;
   lastPublishedCrossoverHz = -1.0f;
@@ -1029,7 +1026,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   bassSignalRms.store(0.0f);
   kickSignalRms.store(0.0f);
   for (auto &bandMatch : liveBandMatchPercent)
-    bandMatch.store(50.0f);
+    bandMatch.store(0.0f);
   latestAppliedBeforePercent.store(-1.0f);
   realtimeCorrelation.store(0.0f);
   liveMatchValid.store(false);
@@ -1254,10 +1251,7 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState(
   }
 
   if (spectrumCaptureEnabled.load(std::memory_order_relaxed)) {
-    if (++spectrumDecimationCounter >= spectrumDecimationFactor) {
-      spectrumDecimationCounter = 0;
-      spectrumFifo.pushSample(mainMono, meteredSidechainMono);
-    }
+    spectrumFifo.pushSample(mainMono, meteredSidechainMono);
   }
 }
 
@@ -1593,11 +1587,8 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
         scopeFifo.pushSample(mainMono, meteredSidechainMono);
       }
 
-      if (captureSpectrum) {
-        if (++spectrumDecimationCounter >= spectrumDecimationFactor) {
-          spectrumDecimationCounter = 0;
-          spectrumFifo.pushSample(mainMono, meteredSidechainMono);
-        }
+      if (spectrumCaptureEnabled.load(std::memory_order_relaxed)) {
+        spectrumFifo.pushSample(mainMono, meteredSidechainMono);
       }
     }
   }
@@ -1615,21 +1606,21 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   liveMatchValid.store(hasSidechain && activeMeter.hasSignal());
 
   const float dryMatch =
-      hasSidechain ? dryMultiBandMeter.getWeightedMatchPercent() : 50.0f;
+      hasSidechain ? dryMultiBandMeter.getWeightedMatchPercent() : 0.0f;
   const float processedMatch =
-      hasSidechain ? processedMultiBandMeter.getWeightedMatchPercent() : 50.0f;
+      hasSidechain ? processedMultiBandMeter.getWeightedMatchPercent() : 0.0f;
   const float activeMatch =
-      hasSidechain ? activeMeter.getWeightedMatchPercent() : 50.0f;
+      hasSidechain ? activeMeter.getWeightedMatchPercent() : 0.0f;
   const float activeLowEnd =
-      hasSidechain ? activeMeter.getLowEndMatchPercent() : 50.0f;
+      hasSidechain ? activeMeter.getLowEndMatchPercent() : 0.0f;
   const float activeBroad =
-      hasSidechain ? activeMeter.getBroadbandMatchPercent() : 50.0f;
+      hasSidechain ? activeMeter.getBroadbandMatchPercent() : 0.0f;
   const float activeSubLossDb =
       hasSidechain ? activeMeter.getLowEndSubLossDb() : 0.0f;
   std::array<float, PhaseBands::numBands> activeBands{};
   for (int band = 0; band < PhaseBands::numBands; ++band)
     activeBands[(size_t)band] =
-        hasSidechain ? activeMeter.getBandMatchPercent(band) : 50.0f;
+        hasSidechain ? activeMeter.getBandMatchPercent(band) : 0.0f;
 
   // Smooth the UI values with a slow ~500ms EMA to prevent the numbers from
   // dancing too fast
@@ -1670,7 +1661,7 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   uiSmoothingInitialized.store(true, std::memory_order_relaxed);
 
   realtimeCorrelation.store(
-      juce::jlimit(-1.0f, 1.0f, activeMatch / 50.0f - 1.0f));
+      juce::jlimit(-1.0f, 1.0f, activeMatch / 100.0f));
 }
 
 juce::AudioProcessorEditor *KickLockAudioProcessor::createEditor() {
@@ -1754,6 +1745,11 @@ KickLockAudioProcessor::captureCurrentParameterSnapshot() const {
   snapshot.phaseFilterQ = readParameterValue("rotatorQ", 0.7f);
   snapshot.phaseFilterStageIndex = juce::jlimit(
       0, 2, (int)std::lround(readParameterValue("rotatorStages", 0.0f)));
+  snapshot.crossoverEnabled = crossoverEnableParamRaw
+                                  ? (crossoverEnableParamRaw->load() > 0.5f)
+                                  : false;
+  snapshot.crossoverFreqHz =
+      crossoverFreqParam ? crossoverFreqParam->load() : 150.0f;
   return snapshot;
 }
 
@@ -1774,6 +1770,9 @@ void KickLockAudioProcessor::restoreParameterSnapshot(
   setParameterValueWithGesture("rotatorQ", snapshot.phaseFilterQ);
   setParameterValueWithGesture("rotatorStages",
                                (float)snapshot.phaseFilterStageIndex);
+  setParameterValueWithGesture("crossover_enable",
+                               snapshot.crossoverEnabled ? 1.0f : 0.0f);
+  setParameterValueWithGesture("crossover_freq", snapshot.crossoverFreqHz);
 }
 
 KickLockAudioProcessor::ParameterSnapshot
@@ -2031,7 +2030,7 @@ KickLockAudioProcessor::computeAndPublishFix(const std::vector<float> &bass,
     // Map the internal offline scores to the live meter scale for display
     result.displayBeforeMatchPercent = liveLowEndMatchPercent.load();
     const float improvement = result.predictedAfterMatchPercent - result.beforeMatchPercent;
-    result.displayAfterMatchPercent = juce::jlimit(0.0f, 100.0f, result.displayBeforeMatchPercent + improvement);
+    result.displayAfterMatchPercent = juce::jlimit(-100.0f, 100.0f, result.displayBeforeMatchPercent + improvement);
     
     latestFixResult = result;
     lastAnalyzedBassWindow = std::move(analyzedBass);

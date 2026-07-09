@@ -50,13 +50,56 @@ namespace
     }
 
     void drawYAxisGrid (juce::Graphics& g, juce::Rectangle<float> bounds, float centreY, float halfHeight, float gain,
-                        juce::Colour majorColor, juce::Colour minorColor, juce::Colour textColor)
+                        juce::Colour majorColor, juce::Colour minorColor)
     {
         g.setColour (majorColor.brighter (0.25f));
         g.drawHorizontalLine ((int) std::round (centreY), bounds.getX(), bounds.getRight());
 
         const float dbLevels[] = { 24.0f, 18.0f, 12.0f, 6.0f, 3.0f, 0.0f, -3.0f, -6.0f, -12.0f, -18.0f };
-        g.setFont (juce::Font (juce::FontOptions (9.5f)));
+
+        for (float db : dbLevels)
+        {
+            const float linear = std::pow (10.0f, db / 20.0f);
+            const float scaled = linear * gain;
+            
+            if (scaled > 1.08f) continue;
+
+            const float yTop = centreY - scaled * halfHeight;
+            const float yBot = centreY + scaled * halfHeight;
+            
+            juce::Colour lineCol = minorColor.brighter (0.15f);
+
+            if (db > 0.0f)
+            {
+                lineCol = destructive.withAlpha(0.2f);
+            }
+            else if (db == 0.0f)
+            {
+                lineCol = minorColor.brighter (0.4f);
+            }
+
+            if (scaled > 0.05f)
+            {
+                if (yTop >= bounds.getY())
+                {
+                    g.setColour (lineCol);
+                    g.drawHorizontalLine ((int) std::round (yTop), bounds.getX(), bounds.getRight());
+                }
+
+                if (yBot <= bounds.getBottom())
+                {
+                    g.setColour (lineCol);
+                    g.drawHorizontalLine ((int) std::round (yBot), bounds.getX(), bounds.getRight());
+                }
+            }
+        }
+    }
+
+    void drawYAxisLabels (juce::Graphics& g, juce::Rectangle<float> bounds, float centreY, float halfHeight, float gain,
+                          juce::Colour textColor)
+    {
+        const float dbLevels[] = { 24.0f, 18.0f, 12.0f, 6.0f, 3.0f, 0.0f, -3.0f, -6.0f, -12.0f, -18.0f };
+        g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
 
         for (float db : dbLevels)
         {
@@ -70,42 +113,31 @@ namespace
 
             juce::String label = (db > 0.0f ? "+" : "") + (db == 0.0f ? "0" : juce::String (db, 0)) + " dB";
             
-            juce::Colour lineCol = minorColor.brighter (0.15f);
-            juce::Colour textCol = textColor.withAlpha(0.6f);
+            juce::Colour textCol = textColor.withAlpha(0.85f);
 
             if (db > 0.0f)
-            {
-                lineCol = destructive.withAlpha(0.2f);
-                textCol = destructive.withAlpha(0.9f);
-            }
-            else if (db == 0.0f)
-            {
-                lineCol = minorColor.brighter (0.4f);
-            }
+                textCol = destructive.withAlpha(0.95f);
+
+            auto drawLabel = [&](float yPos, bool isTop) {
+                juce::Rectangle<int> textRect ((int) bounds.getRight() - 34, 
+                                               (int) std::round (yPos) + (isTop ? -14 : 2), 
+                                               30, 12);
+                
+                // Optional: Draw a faint dark pill behind the text for maximum readability over waveforms
+                g.setColour (juce::Colours::black.withAlpha(0.5f));
+                g.fillRoundedRectangle (textRect.toFloat().expanded(2.0f, 1.0f), 3.0f);
+
+                g.setColour (textCol);
+                g.drawText (label, textRect, juce::Justification::centredRight);
+            };
 
             if (scaled > 0.05f)
             {
                 if (yTop >= bounds.getY())
-                {
-                    g.setColour (lineCol);
-                    g.drawHorizontalLine ((int) std::round (yTop), bounds.getX(), bounds.getRight());
-                    
-                    g.setColour (textCol);
-                    g.drawText (label, 
-                                juce::Rectangle<int> ((int) bounds.getRight() - 34, (int) std::round (yTop) - 12, 30, 12),
-                                juce::Justification::centredRight);
-                }
+                    drawLabel (yTop, true);
 
                 if (yBot <= bounds.getBottom())
-                {
-                    g.setColour (lineCol);
-                    g.drawHorizontalLine ((int) std::round (yBot), bounds.getX(), bounds.getRight());
-                    
-                    g.setColour (textCol);
-                    g.drawText (label, 
-                                juce::Rectangle<int> ((int) bounds.getRight() - 34, (int) std::round (yBot), 30, 12),
-                                juce::Justification::centredRight);
-                }
+                    drawLabel (yBot, false);
             }
         }
     }
@@ -363,6 +395,8 @@ void Oscilloscope::paint (juce::Graphics& g)
             drawHoverCrosshair (g, plotBounds, displayGain * ampZoom);
         }
 
+        drawYAxisLabels (g, plotBounds, plotBounds.getCentreY(), plotBounds.getHeight() * 0.46f, displayGain * ampZoom, labelColour);
+
         drawHoldIndicator (g, panelBounds);
         return;
     }
@@ -392,6 +426,17 @@ void Oscilloscope::paint (juce::Graphics& g)
             drawTransientMarkers (g, plotBounds, visible);
 
         drawHoverCrosshair (g, plotBounds, gain);
+    }
+
+    if (viewMode == ScopeViewMode::Separate)
+    {
+        const float laneHalfHeight = plotBounds.getHeight() * 0.22f;
+        drawYAxisLabels (g, plotBounds, plotBounds.getY() + plotBounds.getHeight() * 0.25f, laneHalfHeight, gain, labelColour);
+        drawYAxisLabels (g, plotBounds, plotBounds.getY() + plotBounds.getHeight() * 0.75f, laneHalfHeight, gain, labelColour);
+    }
+    else
+    {
+        drawYAxisLabels (g, plotBounds, plotBounds.getCentreY(), plotBounds.getHeight() * 0.46f, gain, labelColour);
     }
 
     drawScopeFooter (g, footerStrip, visible);
@@ -477,7 +522,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     const float midY = bounds.getCentreY();
     const float halfHeight = bounds.getHeight() * 0.46f;
 
-    drawYAxisGrid (g, bounds, midY, halfHeight, gain, gridMajor, gridMinor, labelColour);
+    drawYAxisGrid (g, bounds, midY, halfHeight, gain, gridMajor, gridMinor);
 
     // Pick the data source: the live full-rate sweep once hits are flowing,
     // or the decimated-ring fallback before the first hit so the view is
@@ -1032,7 +1077,7 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
 
             auto drawHorizontalMarkers = [&] (float centreY, float halfHeight)
             {
-                drawYAxisGrid (gCache, bounds, centreY, halfHeight, gain, gridMajor, gridMinor, labelColour);
+                drawYAxisGrid (gCache, bounds, centreY, halfHeight, gain, gridMajor, gridMinor);
             };
 
             if (separateMode)

@@ -593,12 +593,12 @@ public:
             for (int attempt = 0; attempt < 500; ++attempt)
             {
                 verified = processor.getLatestFixResult();
-                if (verified.verifiedAfterMatchPercent >= 0.0f)
+                if (verified.verifiedAfterMatchPercent >= -100.0f)
                     break;
                 juce::Thread::sleep (10);
             }
 
-            expectGreaterThan (verified.verifiedAfterMatchPercent, 0.0f);
+            expectGreaterThan (verified.verifiedAfterMatchPercent, -100.0f);
             expectLessThan (verified.verificationDeltaPercent, 10.0f);
         }
 

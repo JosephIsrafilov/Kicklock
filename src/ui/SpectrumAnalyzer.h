@@ -47,8 +47,8 @@ private:
     std::array<float, historyLength * 2> fftScratchSide {};
     juce::dsp::WindowingFunction<float> fftWindow { historyLength, juce::dsp::WindowingFunction<float>::hann, false };
 
-    std::array<float, historyLength / 2> spectrumMain {};
-    std::array<float, historyLength / 2> spectrumSide {};
+    std::array<float, historyLength> spectrumMain {};
+    std::array<float, historyLength> spectrumSide {};
 
     struct PixelBinCache {
         float x;
@@ -59,6 +59,9 @@ private:
     double lastCacheSampleRate = 0.0;
     float lastCacheWidth = 0.0f;
     float lastCacheX = 0.0f;
+
+    juce::ComboBox speedComboBox;
+    float smoothingFactor = 0.4f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrumAnalyzer)
 };

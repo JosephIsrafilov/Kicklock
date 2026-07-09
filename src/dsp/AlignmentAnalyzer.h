@@ -13,8 +13,8 @@ struct AlignmentResult
     bool  valid          = false;
     float delayMs        = 0.0f;
     bool  invertPolarity = false;
-    float beforeMatch    = 50.0f;
-    float afterMatch     = 50.0f;
+    float beforeMatch    = 0.0f;
+    float afterMatch     = 0.0f;
 
     bool  adjustRotator  = false;
     float rotatorFreqHz  = 200.0f;
@@ -38,7 +38,7 @@ public:
                                  float highHz = 120.0f)
     {
         if (bass == nullptr || kick == nullptr || numSamples <= 0 || sampleRate <= 0.0)
-            return 50.0f;
+            return 0.0f;
 
         std::vector<float> a (bass, bass + numSamples);
         std::vector<float> b (kick, kick + numSamples);
@@ -57,7 +57,7 @@ public:
 
         const double norm = std::sqrt (aa * bb);
         if (norm < 1.0e-9)
-            return 50.0f;
+            return 0.0f;
 
         return toPercent (ab / norm);
     }
@@ -485,7 +485,7 @@ private:
     static float toPercent (double r)
     {
         r = std::clamp (r, -1.0, 1.0);
-        return (float) ((r + 1.0) * 50.0);
+        return (float) (r * 100.0);
     }
 
     static void bandPass (std::vector<float>& x, double fs, float lowHz, float highHz)
