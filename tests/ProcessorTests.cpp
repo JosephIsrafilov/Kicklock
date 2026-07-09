@@ -193,6 +193,7 @@ public:
                            { false, false, false, false }, 2048);
 
             expect (processor.beginBackgroundAnalyze());
+            expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 1.0f, 1.0e-7f);
 
             for (int tries = 0; tries < 200 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
                 juce::Thread::sleep (5);
@@ -593,12 +594,12 @@ public:
             for (int attempt = 0; attempt < 500; ++attempt)
             {
                 verified = processor.getLatestFixResult();
-                if (verified.verifiedAfterMatchPercent >= -100.0f)
+                if (verified.verifiedAfterMatchPercent >= 0.0f)
                     break;
                 juce::Thread::sleep (10);
             }
 
-            expectGreaterThan (verified.verifiedAfterMatchPercent, -100.0f);
+            expectGreaterThan (verified.verifiedAfterMatchPercent, 0.0f);
             expectLessThan (verified.verificationDeltaPercent, 10.0f);
         }
 

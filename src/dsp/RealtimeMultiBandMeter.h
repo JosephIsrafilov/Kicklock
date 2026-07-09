@@ -101,11 +101,11 @@ public:
     float getBandMatchPercent (int bandIndex) const noexcept
     {
         if (bandIndex < 0 || bandIndex >= numBands)
-            return 0.0f;
+            return 50.0f;
 
         double corr = 0.0;
         if (! bandCorrelation (bands[(size_t) bandIndex], corr))
-            return 0.0f;
+            return 50.0f;
 
         return toPercent (corr);
     }
@@ -297,7 +297,7 @@ private:
         }
 
         if (totalEnergy <= energyGateFloor)
-            return 0.0f;
+            return 50.0f;
 
         double sum = 0.0, weight = 0.0;
         for (int b = firstBand; b < lastBand; ++b)
@@ -312,12 +312,12 @@ private:
             weight += w;
         }
 
-        return weight > 1.0e-9 ? toPercent (sum / weight) : 0.0f;
+        return weight > 1.0e-9 ? toPercent (sum / weight) : 50.0f;
     }
 
     static float toPercent (double r) noexcept
     {
-        return (float) (std::clamp (r, -1.0, 1.0) * 100.0);
+        return (float) ((std::clamp (r, -1.0, 1.0) + 1.0) * 50.0);
     }
 
     double sampleRate = 44100.0;

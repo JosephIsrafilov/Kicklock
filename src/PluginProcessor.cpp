@@ -63,6 +63,21 @@ float rmsOf(const std::vector<float> &x) noexcept {
   return (float)std::sqrt(sum / (double)x.size());
 }
 
+void applyCrossoverPhaseSimulation(std::vector<float> &bass, double sampleRate,
+                                   float crossoverHz) {
+  if (bass.empty() || sampleRate <= 0.0)
+    return;
+
+  juce::dsp::LinkwitzRileyFilter<float> crossoverSim;
+  crossoverSim.setType(juce::dsp::LinkwitzRileyFilterType::allpass);
+  crossoverSim.prepare({sampleRate, (juce::uint32)juce::jmax(1, (int)bass.size()), 1});
+  crossoverSim.setCutoffFrequency(crossoverHz);
+  crossoverSim.reset();
+
+  for (auto &sample : bass)
+    sample = crossoverSim.processSample(0, sample);
+}
+
 // P6: when analysis can't produce a usable fix, say specifically what's
 // missing rather than a generic "waiting for signal". Inspects the captured
 // window so the message names the actual absent input (no kick / no bass /
@@ -1083,7 +1098,6 @@ void KickLockAudioProcessor::processObservationCapture(
     const float scNorm = scCh > 0 ? 1.0f / (float)scCh : 0.0f;
     const bool crossoverEnable = crossoverEnableParamRaw == nullptr ||
                                  crossoverEnableParamRaw->load() > 0.5f;
-
     // Channel pointers avoid per-sample getSample() bounds checks in the hot path.
     const float* mainPtrs[2] = {
         mainCh > 0 ? mainBuffer.getReadPointer(0) : nullptr,
@@ -1116,13 +1130,17 @@ void KickLockAudioProcessor::processObservationCapture(
       statsOut.kickEnergySum += (float)(kickMono * kickMono);
       statsOut.kickPeak = juce::jmax(statsOut.kickPeak, std::abs(kickMono));
 
-      float bassLow = rawBassLowpass.processSample(0, bassMono);
+      const float rawBassLow = rawBassLowpass.processSample(0, bassMono);
       const float kickLow = rawKickLowpass.processSample(0, kickMono);
 
-      if (crossoverEnable)
-        bassLow = analysisBassCrossoverSim.processSample(0, bassLow);
+      // The live pitch/auto-align path follows the crossover phase shift, while
+      // the stored analyze snapshot and dry meter stay raw so old captures can
+      // be re-analyzed consistently when Analyze forces crossover on.
+      const float bassLow = crossoverEnable
+                                 ? analysisBassCrossoverSim.processSample(0, rawBassLow)
+                                 : rawBassLow;
 
-      rawCapture.push(bassLow, kickLow);
+      rawCapture.push(rawBassLow, kickLow);
       pitchTracker.pushSample(bassLow);
 
       if (autoAlignEngine != nullptr)
@@ -1130,7 +1148,7 @@ void KickLockAudioProcessor::processObservationCapture(
 
       if (++dryMeterDecimationCounter >= meterDecimationFactor) {
         dryMeterDecimationCounter = 0;
-        dryMultiBandMeter.pushSample(bassLow, kickLow);
+        dryMultiBandMeter.pushSample(rawBassLow, kickLow);
       }
     }
   } else {
@@ -1282,6 +1300,7 @@ void KickLockAudioProcessor::processBlockBypassed(
   if (std::abs(crossoverHz - lastPublishedCrossoverHz) > 0.01f) {
     rawBassLowpass.setCutoffFrequency(crossoverHz);
     rawKickLowpass.setCutoffFrequency(crossoverHz);
+    analysisBassCrossoverSim.setCutoffFrequency(crossoverHz);
     lastPublishedCrossoverHz = crossoverHz;
   }
 
@@ -1587,7 +1606,7 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
         scopeFifo.pushSample(mainMono, meteredSidechainMono);
       }
 
-      if (spectrumCaptureEnabled.load(std::memory_order_relaxed)) {
+      if (captureSpectrum) {
         spectrumFifo.pushSample(mainMono, meteredSidechainMono);
       }
     }
@@ -1606,21 +1625,21 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   liveMatchValid.store(hasSidechain && activeMeter.hasSignal());
 
   const float dryMatch =
-      hasSidechain ? dryMultiBandMeter.getWeightedMatchPercent() : 0.0f;
+      hasSidechain ? dryMultiBandMeter.getWeightedMatchPercent() : 50.0f;
   const float processedMatch =
-      hasSidechain ? processedMultiBandMeter.getWeightedMatchPercent() : 0.0f;
+      hasSidechain ? processedMultiBandMeter.getWeightedMatchPercent() : 50.0f;
   const float activeMatch =
-      hasSidechain ? activeMeter.getWeightedMatchPercent() : 0.0f;
+      hasSidechain ? activeMeter.getWeightedMatchPercent() : 50.0f;
   const float activeLowEnd =
-      hasSidechain ? activeMeter.getLowEndMatchPercent() : 0.0f;
+      hasSidechain ? activeMeter.getLowEndMatchPercent() : 50.0f;
   const float activeBroad =
-      hasSidechain ? activeMeter.getBroadbandMatchPercent() : 0.0f;
+      hasSidechain ? activeMeter.getBroadbandMatchPercent() : 50.0f;
   const float activeSubLossDb =
-      hasSidechain ? activeMeter.getLowEndSubLossDb() : 0.0f;
+      hasSidechain ? activeMeter.getLowEndSubLossDb() : 0.0f; // Sub loss is 0.0 for no loss
   std::array<float, PhaseBands::numBands> activeBands{};
   for (int band = 0; band < PhaseBands::numBands; ++band)
     activeBands[(size_t)band] =
-        hasSidechain ? activeMeter.getBandMatchPercent(band) : 0.0f;
+        hasSidechain ? activeMeter.getBandMatchPercent(band) : 50.0f;
 
   // Smooth the UI values with a slow ~500ms EMA to prevent the numbers from
   // dancing too fast
@@ -1998,20 +2017,33 @@ KickLockAudioProcessor::computeAndPublishFix(const std::vector<float> &bass,
                                              int numSamples) {
   const auto delayInterpolation = interpolationFromChoice(
       delayInterpParam != nullptr ? delayInterpParam->load() : 0.0f);
+  const bool analyzeWithCrossover = crossoverEnableParamRaw == nullptr ||
+                                    crossoverEnableParamRaw->load() > 0.5f;
+  const float analysisCrossoverHz =
+      crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
 
   PhaseFixResult result;
   std::vector<float> analyzedBass, analyzedKick;
+  std::vector<float> crossoverBass;
+  const std::vector<float>* bassForAnalysis = &bass;
+
+  if (analyzeWithCrossover && numSamples > 0) {
+    crossoverBass = bass;
+    applyCrossoverPhaseSimulation(crossoverBass, getSampleRate(),
+                                  analysisCrossoverHz);
+    bassForAnalysis = &crossoverBass;
+  }
 
   if (numSamples > 32) {
     const auto hits = extractRecentHitWindows(kick, getSampleRate(), 8);
     if (!hits.empty())
-      appendHitWindows(bass, kick, hits, analyzedBass, analyzedKick);
+      appendHitWindows(*bassForAnalysis, kick, hits, analyzedBass, analyzedKick);
     else {
-      analyzedBass = bass;
+      analyzedBass = *bassForAnalysis;
       analyzedKick = kick;
     }
 
-    result = analyzeAggregatedHits(bass, kick, hits, getSampleRate(),
+    result = analyzeAggregatedHits(*bassForAnalysis, kick, hits, getSampleRate(),
                                    delayInterpolation);
   } else {
     PhaseFixEngine::updateDerivedResultFields(result);
@@ -2019,7 +2051,7 @@ KickLockAudioProcessor::computeAndPublishFix(const std::vector<float> &bass,
 
   // P6: replace the generic "waiting for signal" text with a specific reason
   // (no kick / no bass / not enough material) when there's no usable result.
-  refineInsufficientSignalMessage(result, bass, kick, numSamples,
+  refineInsufficientSignalMessage(result, *bassForAnalysis, kick, numSamples,
                                   getSampleRate());
 
   // Publish the result and the window it was computed from under the lock so
@@ -2030,13 +2062,12 @@ KickLockAudioProcessor::computeAndPublishFix(const std::vector<float> &bass,
     // Map the internal offline scores to the live meter scale for display
     result.displayBeforeMatchPercent = liveLowEndMatchPercent.load();
     const float improvement = result.predictedAfterMatchPercent - result.beforeMatchPercent;
-    result.displayAfterMatchPercent = juce::jlimit(-100.0f, 100.0f, result.displayBeforeMatchPercent + improvement);
+    result.displayAfterMatchPercent = juce::jlimit(0.0f, 100.0f, result.displayBeforeMatchPercent + improvement);
     
     latestFixResult = result;
     lastAnalyzedBassWindow = std::move(analyzedBass);
     lastAnalyzedKickWindow = std::move(analyzedKick);
-    lastAnalyzedCrossoverHz =
-        crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+    lastAnalyzedCrossoverHz = analysisCrossoverHz;
   }
 
   latestAnalyzedBeforePercent.store(result.beforeMatchPercent);
@@ -2067,6 +2098,8 @@ bool KickLockAudioProcessor::beginBackgroundAnalyze() {
       rawCapture.getFilledSamples() < minMaterialSamples) {
     return false;
   }
+
+  setParameterValueWithGesture("crossover_enable", 1.0f);
 
   analyzeState.store(AnalyzeState::Preparing, std::memory_order_release);
 
@@ -2166,6 +2199,8 @@ bool KickLockAudioProcessor::applyLatestFix() {
     setParameterValueWithGesture(
         "rotatorStages", (float)juce::jlimit(0, 2, fix.phaseFilterStages - 2));
   }
+
+  setParameterValueWithGesture("crossover_enable", 1.0f);
 
   {
     const std::lock_guard<std::mutex> lock(resultMutex);

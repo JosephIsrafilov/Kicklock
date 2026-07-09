@@ -104,6 +104,7 @@ public:
     // Fires onZoomChanged so the editor can keep its sliders in sync.
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
     std::function<void()> onZoomChanged;
+    std::function<void()> onToggleCleanMode;
 
 private:
     juce::Point<float> lastMousePos { -1.0f, -1.0f };

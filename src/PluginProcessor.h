@@ -81,9 +81,9 @@ public:
     // measure (no sidechain or silence), so the UI can show "no signal"
     // instead of a misleading neutral 50%.
     std::atomic<bool> liveMatchValid { false };
-    std::atomic<float> liveMultiBandMatchPercent { 0.0f };  // low-end-weighted overall
-    std::atomic<float> liveLowEndMatchPercent { 0.0f };     // SUB + LOW only
-    std::atomic<float> liveBroadbandMatchPercent { 0.0f };  // even 20 Hz-500 Hz blend
+    std::atomic<float> liveMultiBandMatchPercent { 50.0f };  // low-end-weighted overall
+    std::atomic<float> liveLowEndMatchPercent { 50.0f };     // SUB + LOW only
+    std::atomic<float> liveBroadbandMatchPercent { 50.0f };  // even 20 Hz-500 Hz blend
 
     // Live sub/low-end loss in dB versus the best achievable alignment (see
     // SubLossMeter.h) — the same SUB+LOW relationship as liveLowEndMatchPercent,
@@ -105,9 +105,9 @@ public:
     // dynamic behaviour a static filter setup can't provide.
     std::atomic<float> trackedBassHz { 0.0f };
 
-    std::atomic<float> latestAnalyzedBeforePercent { 0.0f };
-    std::atomic<float> latestAnalyzedAfterPercent { 0.0f };
-    std::atomic<float> latestVerifiedAfterPercent { -200.0f };
+    std::atomic<float> latestAnalyzedBeforePercent { 50.0f };
+    std::atomic<float> latestAnalyzedAfterPercent { 50.0f };
+    std::atomic<float> latestVerifiedAfterPercent { -1.0f };
     std::atomic<float> latestVerificationDeltaPercent { 0.0f };
     std::atomic<float> latestFixConfidence { 0.0f };
     ScopeFifo scopeFifo;

@@ -43,7 +43,7 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto bounds = getLocalBounds().toFloat().reduced (1.0f);
-        const float pct = juce::jlimit (-100.0f, 100.0f, displayWeightedPercent);
+        const float pct = juce::jlimit (0.0f, 100.0f, displayWeightedPercent);
         const auto accent = colourForMatch (pct);
 
         g.setColour (juce::Colour (0xff171d23));
@@ -152,9 +152,9 @@ public:
 private:
     static juce::Colour colourForMatch (float pct) noexcept
     {
-        if (pct < 10.0f)
+        if (pct < 55.0f)
             return juce::Colour (0xffef4444);
-        if (pct < 50.0f)
+        if (pct < 75.0f)
             return juce::Colour (0xfff59e0b);
         return juce::Colour (0xff22c55e);
     }
@@ -190,7 +190,7 @@ private:
         g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
         g.drawText (label, bounds.removeFromLeft (42.0f).toNearestInt(), juce::Justification::centredLeft);
         g.setColour (colourForMatch (value));
-        g.drawText (juce::String ((int) std::round (value)) + "%",
+        g.drawText (juce::String ((int) std::round (juce::jlimit (0.0f, 100.0f, value))) + "%",
                     bounds.toNearestInt(),
                     juce::Justification::centredLeft);
     }
@@ -200,12 +200,11 @@ private:
                                const char* label,
                                float value)
     {
-        const float pct = juce::jlimit (-100.0f, 100.0f, value);
+        const float pct = juce::jlimit (0.0f, 100.0f, value);
         g.setColour (juce::Colour (0xff2b3540));
         g.fillRoundedRectangle (bounds, 4.0f);
 
-        const float fillPct = (pct + 100.0f) * 0.5f;
-        auto fill = bounds.withWidth (bounds.getWidth() * fillPct / 100.0f);
+        auto fill = bounds.withWidth (bounds.getWidth() * pct / 100.0f);
         g.setColour (colourForMatch (pct).withAlpha (0.78f));
         g.fillRoundedRectangle (fill, 4.0f);
 

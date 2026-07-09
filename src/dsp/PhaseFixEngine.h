@@ -53,15 +53,15 @@ struct PhaseFixResult
     float phaseFilterQ = 0.7f;
     int phaseFilterStages = 2;
 
-    float beforeMatchPercent = 0.0f;
-    float afterMatchPercent = 0.0f;
-    float predictedAfterMatchPercent = 0.0f;
-    float verifiedAfterMatchPercent = 0.0f;
-    float displayBeforeMatchPercent = 0.0f;
-    float displayAfterMatchPercent = 0.0f;
+    float beforeMatchPercent = 50.0f;
+    float afterMatchPercent = 50.0f;
+    float predictedAfterMatchPercent = 50.0f;
+    float displayBeforeMatchPercent = 50.0f;
+    float displayAfterMatchPercent = 50.0f;
+    float verifiedAfterMatchPercent = -1.0f;
     float verificationDeltaPercent = 0.0f;
-    float improvementPercent = 0.0f;
     bool verificationWarning = false;
+    float improvementPercent = 0.0f;
     float confidence = 0.0f;
 
     bool requiresTimelineMove = false;
@@ -100,7 +100,9 @@ public:
                                         const PhaseFixRenderSettings& settings,
                                         float renderMaxDelayMs,
                                         std::vector<float>& bassScratch,
-                                        std::vector<float>& kickScratch)
+                                        std::vector<float>& kickScratch,
+                                        int alignCropStart = 0,
+                                        int alignCropLength = 0)
     {
         PhaseFixScore result;
 
@@ -110,10 +112,22 @@ public:
         renderCandidatePair (bass, kick, numSamples, sampleRate, settings, renderMaxDelayMs,
                              bassScratch, kickScratch);
 
-        const auto scored = score (bassScratch.data(), kickScratch.data(), numSamples, sampleRate);
-        result.multi = scored.multi;
-        result.matchPercent = scored.match;
-        result.confidence = scored.confidence;
+        const auto scoredFull = score (bassScratch.data(), kickScratch.data(), numSamples, sampleRate);
+        result.multi = scoredFull.multi;
+        result.matchPercent = scoredFull.match;
+        
+        if (alignCropLength > 0 && alignCropStart >= 0 && alignCropStart + alignCropLength <= numSamples)
+        {
+            const auto scoredCrop = score (bassScratch.data() + alignCropStart, 
+                                           kickScratch.data() + alignCropStart, 
+                                           alignCropLength, sampleRate);
+            result.confidence = scoredCrop.confidence;
+        }
+        else
+        {
+            result.confidence = scoredFull.confidence;
+        }
+        
         return result;
     }
 
@@ -186,18 +200,21 @@ public:
                 // Only re-window when it actually tightens the span; a crop that
                 // still spans the whole buffer would just repeat the same work.
                 if (windowLength > 32 && windowLength < numSamples)
-                    return analyzeCore (bass + start, kick + start, windowLength,
-                                        sampleRate, maxDelayMs, delayInterpolation, searchRotator);
+                    return analyzeCore (bass, kick, numSamples, sampleRate,
+                                        start, windowLength,
+                                        maxDelayMs, delayInterpolation, searchRotator);
             }
         }
 
-        return analyzeCore (bass, kick, numSamples, sampleRate, maxDelayMs, delayInterpolation, searchRotator);
+        return analyzeCore (bass, kick, numSamples, sampleRate, 0, numSamples, maxDelayMs, delayInterpolation, searchRotator);
     }
 
         static PhaseFixResult analyzeCore (const float* bass,
                                        const float* kick,
                                        int numSamples,
                                        double sampleRate,
+                                       int alignCropStart,
+                                       int alignCropLength,
                                        float maxDelayMs = defaultAutoFixMaxDelayMs,
                                        InterpolationType delayInterpolation = InterpolationType::Linear,
                                        bool searchRotator = true)
@@ -212,14 +229,14 @@ public:
             return result;
         }
 
-        const int bassPeak = locateDominantTransient (bass, numSamples, sampleRate);
-        const int kickPeak = locateDominantTransient (kick, numSamples, sampleRate);
+        const int bassPeak = locateDominantTransient (bass + alignCropStart, alignCropLength, sampleRate);
+        const int kickPeak = locateDominantTransient (kick + alignCropStart, alignCropLength, sampleRate);
         const bool hasTransientOffset = bassPeak >= 0 && kickPeak >= 0;
         const float transientOffsetMs = hasTransientOffset
             ? (float) ((double) (kickPeak - bassPeak) * 1000.0 / sampleRate)
             : 0.0f;
 
-        const auto align = AlignmentAnalyzer::analyze (bass, kick, numSamples,
+        const auto align = AlignmentAnalyzer::analyze (bass + alignCropStart, kick + alignCropStart, alignCropLength,
                                                        sampleRate, maxDelayMs,
                                                        30.0f, 120.0f, 16384, searchRotator);
 
@@ -231,11 +248,14 @@ public:
 
         result.valid = true;
         result.enoughSignal = true; 
-        const auto before = score (bass, kick, numSamples, sampleRate);
+        
+        const auto beforeFull = score (bass, kick, numSamples, sampleRate);
+        const auto beforeCrop = score (bass + alignCropStart, kick + alignCropStart, alignCropLength, sampleRate);
+        
         PhaseFixRenderSettings bestSettings;
         bestSettings.delayInterpolation = delayInterpolation;
-        float bestMatch = before.match;
-        float bestConfidence = before.confidence;
+        float bestMatch = beforeFull.match;
+        float bestConfidence = beforeCrop.confidence;
 
         std::vector<float> bassScratch ((size_t) numSamples, 0.0f);
         std::vector<float> kickScratch ((size_t) numSamples, 0.0f);
@@ -255,7 +275,8 @@ public:
 
             const auto candidate = scoreSettings (bass, kick, numSamples, sampleRate,
                                                   settings, absoluteManualMaxDelayMs,
-                                                  bassScratch, kickScratch);
+                                                  bassScratch, kickScratch,
+                                                  alignCropStart, alignCropLength);
             return std::pair<PhaseFixRenderSettings, PhaseFixScore> { settings, candidate };
         };
 
@@ -305,13 +326,13 @@ public:
         result.phaseFilterQ = bestSettings.phaseFilterQ;
         result.phaseFilterStages = bestSettings.phaseFilterStages;
 
-        result.beforeMatchPercent = before.match;
+        result.beforeMatchPercent = beforeFull.match;
         result.afterMatchPercent = bestMatch;
         result.predictedAfterMatchPercent = bestMatch;
-        result.displayBeforeMatchPercent = before.match;
+        result.displayBeforeMatchPercent = beforeFull.match;
         result.displayAfterMatchPercent = bestMatch;
         result.improvementPercent = result.afterMatchPercent - result.beforeMatchPercent;
-        result.confidence = std::min (before.confidence, bestConfidence);
+        result.confidence = std::min (beforeCrop.confidence, bestConfidence);
 
         if ((hasTransientOffset && std::abs (transientOffsetMs) > maxDelayMs + 0.25f)
                  || std::abs (align.delayMs) > maxDelayMs + 0.25f
@@ -374,7 +395,7 @@ private:
     struct Score
     {
         MultiBandCorrelationResult multi;
-        float match = 0.0f;
+        float match = 50.0f;
         float confidence = 0.0f;
     };
 
@@ -382,12 +403,12 @@ private:
     // genuinely good match (or a smaller gain onto an excellent final match);
     // Partial is a worthwhile gain regardless of the final absolute; AlreadyGood
     // is a high starting match with little left to add.
-    static constexpr float strongImprovementThreshold = 32.0f;
-    static constexpr float partialImprovementThreshold = 20.0f;
-    static constexpr float alreadyGoodBeforeThreshold = 20.0f;
-    static constexpr float strongAfterThreshold = 0.0f;
-    static constexpr float excellentAfterThreshold = 60.0f;
-    static constexpr float verificationWarningThreshold = 40.0f;
+    static constexpr float strongImprovementThreshold = 8.0f;
+    static constexpr float partialImprovementThreshold = 5.0f;
+    static constexpr float alreadyGoodBeforeThreshold = 80.0f;
+    static constexpr float strongAfterThreshold = 75.0f;
+    static constexpr float excellentAfterThreshold = 90.0f;
+    static constexpr float verificationWarningThreshold = 10.0f;
 
     // P3: score a rendered pair on the ONE canonical ruler (the shared
     // PhaseBands table + low-end-weighted blend), and fill Score.multi so band

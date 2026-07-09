@@ -777,9 +777,9 @@ public:
             PhaseFixResult r;
             r.valid = true;
             r.enoughSignal = true;
-            r.beforeMatchPercent = -14.0f;
-            r.afterMatchPercent = 16.0f;
-            r.improvementPercent = 30.0f;
+            r.beforeMatchPercent = 43.0f;
+            r.afterMatchPercent = 63.0f;
+            r.improvementPercent = 20.0f;
             r.confidence = 0.46f;
             PhaseFixEngine::updateDerivedResultFields (r);
 
@@ -794,9 +794,9 @@ public:
             PhaseFixResult r;
             r.valid = true;
             r.enoughSignal = true;
-            r.beforeMatchPercent = 4.0f;
-            r.afterMatchPercent = 10.0f;
-            r.improvementPercent = 6.0f;
+            r.beforeMatchPercent = 52.0f;
+            r.afterMatchPercent = 55.0f;
+            r.improvementPercent = 3.0f;
             r.confidence = 0.58f;
             PhaseFixEngine::updateDerivedResultFields (r);
 
@@ -1007,7 +1007,7 @@ public:
             const auto r = PhaseFixEngine::analyze (bass.data(), kick.data(), n, kSampleRate, 10.0f);
 
             expect (r.valid);
-            expectGreaterThan (r.beforeMatchPercent, 70.0f);
+            expectGreaterThan (r.beforeMatchPercent, 85.0f);
             expectEquals ((int) r.quality, (int) PhaseFixQuality::AlreadyGood);
             expect (! r.phaseFilterEnabled);
             expect (r.optionalApplyAllowed);

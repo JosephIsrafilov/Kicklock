@@ -72,13 +72,13 @@ public:
 
         beginTest ("Polarity hint shows on sustained cancellation with hysteresis");
         {
-            // Comes on below -50%, stays on until above -36%, never during silence.
-            expect (! shouldShowPolarityHint (false, -20.0f, true));
-            expect (! shouldShowPolarityHint (false, -44.0f, true));   // below on-threshold? no (-50)
-            expect (shouldShowPolarityHint (false, -60.0f, true));
-            expect (shouldShowPolarityHint (true, -44.0f, true));      // hysteresis holds it on
-            expect (! shouldShowPolarityHint (true, -30.0f, true));    // clears above -36
-            expect (! shouldShowPolarityHint (true, -80.0f, false));   // silence gates it off
+            // Comes on below 25%, stays on until above 32%, never during silence.
+            expect (! shouldShowPolarityHint (false, 40.0f, true));
+            expect (! shouldShowPolarityHint (false, 28.0f, true));   // below on-threshold? no (25)
+            expect (shouldShowPolarityHint (false, 20.0f, true));
+            expect (shouldShowPolarityHint (true, 28.0f, true));      // hysteresis holds it on
+            expect (! shouldShowPolarityHint (true, 35.0f, true));    // clears above 32
+            expect (! shouldShowPolarityHint (true, 10.0f, false));   // silence gates it off
         }
 
         beginTest ("Min/max columns capture every peak and split ranges exactly");
@@ -456,6 +456,20 @@ public:
             expect (! scopeKickReferenceCaptureIsValid (1.0e-5f));
             expect (scopeKickReferenceCaptureIsValid ((float) std::pow (10.0, -30.0 / 20.0)));
             expect (scopeKickReferenceCaptureIsValid (0.7f));
+        }
+
+        beginTest ("Pending re-lock accepts a valid partial retriggered window");
+        {
+            const int preRoll = msToSamples (20.0f, kSampleRate);
+            const int sixtyMs = msToSamples (60.0f, kSampleRate);
+            const float validPeak = (float) std::pow (10.0, -30.0 / 20.0);
+
+            expect (! scopePendingRelockCaptureIsReady (preRoll + sixtyMs - 1,
+                                                        preRoll, kSampleRate, validPeak));
+            expect (! scopePendingRelockCaptureIsReady (preRoll + sixtyMs,
+                                                        preRoll, kSampleRate, 1.0e-5f));
+            expect (scopePendingRelockCaptureIsReady (preRoll + sixtyMs,
+                                                      preRoll, kSampleRate, validPeak));
         }
     }
 };

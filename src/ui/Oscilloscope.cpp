@@ -118,7 +118,7 @@ namespace
             if (db > 0.0f)
                 textCol = destructive.withAlpha(0.95f);
 
-            auto drawLabel = [&](float yPos, bool isTop) {
+            auto drawLabel = [&] (float yPos) {
                 juce::Rectangle<int> textRect ((int) bounds.getRight() - 34, 
                                                (int) std::round (yPos) - 6, 
                                                30, 12);
@@ -134,10 +134,10 @@ namespace
             if (scaled > 0.05f)
             {
                 if (yTop >= bounds.getY())
-                    drawLabel (yTop, true);
+                    drawLabel (yTop);
 
                 if (yBot <= bounds.getBottom())
-                    drawLabel (yBot, false);
+                    drawLabel (yBot);
             }
         }
     }
@@ -894,7 +894,9 @@ void Oscilloscope::drawTriggeredTrace (juce::Graphics& g, juce::Rectangle<float>
                             const_cast<float*>(columnMinScratch.data()), 
                             const_cast<float*>(columnMaxScratch.data()));
 
-        stroke.preallocateSpace (numColumns * 6 + 8);
+        juce::Path envelope;
+        stroke.preallocateSpace (numColumns * 3 + 8);
+        envelope.preallocateSpace (numColumns * 6 + 8);
         const float columnW = (float) drawCount * sampleXStep / (float) numColumns;
 
         for (int c = 0; c < numColumns; ++c)
@@ -911,22 +913,31 @@ void Oscilloscope::drawTriggeredTrace (juce::Graphics& g, juce::Rectangle<float>
             }
 
             const_cast<float*>(columnMinScratch.data())[(size_t) c] = yBot;
-            if (c == 0) stroke.startNewSubPath (x, yTop);
-            else stroke.lineTo (x, yTop);
+            const float yMid = 0.5f * (yTop + yBot);
+
+            if (c == 0)
+            {
+                envelope.startNewSubPath (x, yTop);
+                stroke.startNewSubPath (x, yMid);
+            }
+            else
+            {
+                envelope.lineTo (x, yTop);
+                stroke.lineTo (x, yMid);
+            }
         }
 
         for (int c = numColumns - 1; c >= 0; --c)
         {
             const float x = bounds.getX() + ((float) c + 0.5f) * columnW;
-            stroke.lineTo (x, columnMinScratch[(size_t) c]);
+            envelope.lineTo (x, columnMinScratch[(size_t) c]);
         }
-        stroke.closeSubPath();
+        envelope.closeSubPath();
 
-        // For envelope, fill the body
         if (fillAlpha > 0.0f)
         {
-            g.setColour (colour.withAlpha (fillAlpha * 2.0f));
-            g.fillPath (stroke);
+            g.setColour (colour.withAlpha (fillAlpha));
+            g.fillPath (envelope);
         }
     }
     else
@@ -1174,7 +1185,6 @@ void Oscilloscope::drawPhaseDeltaMode (juce::Graphics& g,
 
         // ----- DYNAMIC ALPHA -----
         const float rawAlpha  = juce::jlimit (0.06f, 1.0f, avgEnergy);
-        const float fillAlpha = 0.12f + 0.60f * rawAlpha;
         const float glowAlpha = 0.06f + 0.25f * rawAlpha;
 
         const float x0 = bounds.getX() + (float) p * xStep;
@@ -1542,25 +1552,48 @@ bool Oscilloscope::drainSweepStream (bool consume)
 
         for (int i = 0; i < count; ++i)
         {
-            const bool captureRelockSilently = kickReferenceState == KickReferenceState::RelockPending
-                                            && kickReferenceValid;
-
             if ((flagScratch[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
             {
-                if (captureRelockSilently)
-                    beginPendingRelockSweep();
-                else
+                if (kickReferenceState == KickReferenceState::RelockPending && kickReferenceValid)
                 {
-                    beginNewSweep();
-                    dirty = true;
+                    if (! pendingRelockDiscarding
+                        && scopePendingRelockCaptureIsReady (pendingRelockFill,
+                                                             sweepPreRollSamples,
+                                                             sampleRate,
+                                                             pendingRelockPeak))
+                    {
+                        finishPendingRelockSweep();
+                        dirty = true;
+                    }
+
+                    if (kickReferenceState == KickReferenceState::RelockPending)
+                        beginPendingRelockSweep();
                 }
+                else if (! kickReferenceValid
+                         && kickReferenceShouldReplaceOnCapture (kickReferenceState)
+                         && ! sweepDiscarding)
+                {
+                    float kickPeak = 0.0f;
+                    for (int k = 0; k < sweepFill; ++k)
+                        kickPeak = juce::jmax (kickPeak, std::abs (sweepKick[(size_t) k]));
+
+                    if (scopePendingRelockCaptureIsReady (sweepFill,
+                                                          sweepPreRollSamples,
+                                                          sampleRate,
+                                                          kickPeak))
+                    {
+                        finishSweep();
+                        dirty = true;
+                    }
+                }
+
+                beginNewSweep();
+                dirty = true;
             }
 
-            if (captureRelockSilently)
+            if (kickReferenceState == KickReferenceState::RelockPending && kickReferenceValid
+                && ! pendingRelockDiscarding && pendingRelockFill < sweepWindowSamples)
             {
-                if (pendingRelockDiscarding || pendingRelockFill >= sweepWindowSamples)
-                    continue;
-
                 const float bassValue = bassScratch[(size_t) i];
                 const float kickValue = kickScratch[(size_t) i];
                 pendingRelockBass[(size_t) pendingRelockFill] = bassValue;
@@ -1575,8 +1608,6 @@ bool Oscilloscope::drainSweepStream (bool consume)
                     finishPendingRelockSweep();
                     dirty = true;
                 }
-
-                continue;
             }
 
             if (sweepDiscarding || sweepFill >= sweepWindowSamples)
@@ -1712,7 +1743,7 @@ void Oscilloscope::finishPendingRelockSweep()
 
     sweepBass.swap (pendingRelockBass);
     sweepKick.swap (pendingRelockKick);
-    sweepFill = sweepWindowSamples;
+    sweepFill = juce::jlimit (0, sweepWindowSamples, pendingRelockFill);
     sweepPeak = pendingRelockPeak;
     sweepDiscarding = true;
     sweepHitId = pendingRelockHitId;
@@ -1755,6 +1786,10 @@ bool Oscilloscope::glideTriggeredAutoGain() noexcept
 void Oscilloscope::relockKickReference() noexcept
 {
     kickReferenceState = kickReferenceStateAfterRelock();
+    pendingRelockFill = 0;
+    pendingRelockPeak = 0.0f;
+    pendingRelockDiscarding = true;
+    pendingRelockHitId = 0;
 
     // Deliberately keeps the current traces on screen while the re-lock waits
     // for the next hit — the reference swaps in place when the next sweep
@@ -1953,6 +1988,9 @@ void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
 
     if (onZoomChanged != nullptr)
         onZoomChanged();
+
+    if (onToggleCleanMode != nullptr)
+        onToggleCleanMode();
 
     repaint();
 }

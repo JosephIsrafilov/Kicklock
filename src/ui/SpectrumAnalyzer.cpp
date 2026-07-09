@@ -89,16 +89,19 @@ void SpectrumAnalyzer::calculateSpectrum()
     fft.performFrequencyOnlyForwardTransform (fftScratchSide.data());
     
     const float minDb = -144.0f;
+    // Calibration offset to match DAW metering (-0.8dB compensation)
+    const float calibrationDbOffset = -0.8f; 
+    
     for (int i = 0; i < historyLength; ++i)
     {
         // Multiply by 4 to compensate for Hann window coherent gain (0.5) 
         // and real-to-complex FFT energy split (0.5)
         float magM = (fftScratchMain[(size_t)i] / (float)historyLength) * 4.0f;
-        float dbM = juce::Decibels::gainToDecibels (magM, minDb);
+        float dbM = juce::Decibels::gainToDecibels (magM, minDb) + calibrationDbOffset;
         spectrumMain[(size_t)i] += (dbM - spectrumMain[(size_t)i]) * smoothingFactor;
         
         float magS = (fftScratchSide[(size_t)i] / (float)historyLength) * 4.0f;
-        float dbS = juce::Decibels::gainToDecibels (magS, minDb);
+        float dbS = juce::Decibels::gainToDecibels (magS, minDb) + calibrationDbOffset;
         spectrumSide[(size_t)i] += (dbS - spectrumSide[(size_t)i]) * smoothingFactor;
     }
 }
@@ -122,16 +125,11 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
     auto titleArea = plotBounds.removeFromTop (16.0f).toNearestInt();
     
-    titleArea.removeFromRight (100); // Leave space for wave legend
-    
-    // Position the combobox in the top right of the plot area
-    juce::Rectangle<int> comboBounds = titleArea.removeFromRight(70).withSizeKeepingCentre(70, 16);
-    speedComboBox.setBounds(comboBounds);
-    
     // Label for the combobox
+    juce::Rectangle<int> comboBounds = speedComboBox.getBounds();
     g.setColour (juce::Colours::white.withAlpha (0.5f));
     g.setFont (juce::Font (juce::FontOptions (10.0f)));
-    g.drawText("Speed:", titleArea.removeFromRight(40).withSizeKeepingCentre(40, 16), juce::Justification::centredRight);
+    g.drawText("Speed:", comboBounds.translated(-45, 0).withWidth(40), juce::Justification::centredRight);
     
     g.setColour (juce::Colours::white.withAlpha (0.9f));
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
@@ -141,7 +139,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                 
     const float minFreq = 20.0f;
     const float maxFreq = 20000.0f;
-    const float minDb = -84.0f;
+    const float minDb = -108.0f;
     const float maxDb = 0.0f;
     
     // Draw vertical/horizontal grid lines (UNDER the curves)
@@ -156,7 +154,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     }
     
     // dB grid lines
-    const float dbs[] = { -12.0f, -24.0f, -36.0f, -48.0f, -60.0f, -72.0f };
+    const float dbs[] = { -6.0f, -12.0f, -24.0f, -36.0f, -48.0f, -60.0f, -72.0f, -84.0f, -96.0f };
     for (float db : dbs)
     {
         float y = plotBounds.getBottom() - (db - minDb) / (maxDb - minDb) * plotBounds.getHeight();
@@ -299,6 +297,15 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
 void SpectrumAnalyzer::resized()
 {
     rebuildBinCache();
+    
+    auto panelBounds = getLocalBounds().reduced (8, 8);
+    auto plotBounds = panelBounds.reduced (12, 10);
+    plotBounds.removeFromTop (12);
+    auto titleArea = plotBounds.removeFromTop (16);
+    
+    titleArea.removeFromRight (110); // Leave space for wave legend
+    juce::Rectangle<int> comboBounds = titleArea.removeFromRight(70).withSizeKeepingCentre(70, 16);
+    speedComboBox.setBounds(comboBounds);
 }
 
 void SpectrumAnalyzer::rebuildBinCache()

@@ -116,6 +116,7 @@ private:
     void refreshAnalyzeWorkflow();
     void refreshCompareButtons();
     void pushScopeSettings();
+    void setChromeVisible (bool shouldBeVisible);
 
     KickLockAudioProcessor& audioProcessor;
     KickLockLookAndFeel lookAndFeel;
@@ -213,6 +214,7 @@ private:
     bool polarityHintVisible = false;
     AnalysisMaterialStatus latestMaterialStatus = AnalysisMaterialStatus::WaitingForSidechain;
     bool helpOverlayVisible = false;
+    bool cleanScopeMode = false;
 
     // Latest analyzer result snapshot for the explanation panel.
     PhaseFixResult latestResult;

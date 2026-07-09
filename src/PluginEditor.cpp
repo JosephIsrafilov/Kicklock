@@ -170,7 +170,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
       audioProcessor (p),
       oscilloscope (p.rawScopeFifo, p.getTriggeredHitCapture()),
       spectrumAnalyzer (p.spectrumFifo),
-      correlationDisplay (p.realtimeLowBandMatchPercent,
+      correlationDisplay (p.liveMultiBandMatchPercent,
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent,
                           p.liveBandMatchPercent,
@@ -218,11 +218,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     {
         if (! canStartAnalyze)
             return;
-
-        // The internal analyzer always applies a 150 Hz crossover, so force the UI
-        // toggle to ON to avoid a visual conflict.
-        if (auto* p = audioProcessor.apvts.getParameter ("crossover_enable"))
-            p->setValueNotifyingHost (1.0f);
 
         latestResultAutoApplied = false;
         if (audioProcessor.beginBackgroundAnalyze())
@@ -274,6 +269,14 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     // --- Centre scope + live match ----------------------------------------
     addAndMakeVisible (oscilloscope);
     addAndMakeVisible (spectrumAnalyzer);
+    oscilloscope.onToggleCleanMode = [this]
+    {
+        cleanScopeMode = ! cleanScopeMode;
+        if (cleanScopeMode)
+            helpOverlayVisible = false;
+        resized();
+        repaint();
+    };
 
     addAndMakeVisible (correlationDisplay);
     correlationDisplay.setTooltip ("Live match. Click Details to collapse or expand the detailed meters.");
@@ -384,8 +387,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     analyzerBody.setColour (juce::Label::textColourId, text);
     analyzerBody.setMinimumHorizontalScale (1.0f);
     analyzerBody.setText ("Press Analyze while the loop plays. KickLock will "
-                          "recommend a delay, polarity and phase setting and "
-                          "explain what it found.", juce::dontSendNotification);
+                          "recommend a bass-path correction.", juce::dontSendNotification);
     addAndMakeVisible (analyzerBody);
     addAndMakeVisible (transientPunch);
 
@@ -517,13 +519,75 @@ void KickLockAudioProcessorEditor::configureCombo (juce::ComboBox& combo, const 
     addAndMakeVisible (combo);
 }
 
+void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
+{
+    gridCombo.setVisible (shouldBeVisible);
+    viewCombo.setVisible (shouldBeVisible);
+    freezeButton.setVisible (shouldBeVisible);
+    relockKickButton.setVisible (shouldBeVisible);
+    analyzeButton.setVisible (shouldBeVisible);
+    applyFixButton.setVisible (shouldBeVisible);
+    revertButton.setVisible (shouldBeVisible);
+    compareAButton.setVisible (shouldBeVisible);
+    compareBButton.setVisible (shouldBeVisible);
+    compareCopyButton.setVisible (shouldBeVisible);
+    helpButton.setVisible (shouldBeVisible);
+
+    correlationDisplay.setVisible (shouldBeVisible);
+    suggestedOverlay.setVisible (shouldBeVisible);
+    manualDelayOverlay.setVisible (shouldBeVisible);
+    noSidechainOverlay.setVisible (shouldBeVisible);
+    splitter.setVisible (shouldBeVisible);
+
+    manualHeader.setVisible (shouldBeVisible);
+    delaySlider.setVisible (shouldBeVisible);
+    polarityInvertButton.setVisible (shouldBeVisible);
+    phaseFilterButton.setVisible (shouldBeVisible);
+    pitchTrackButton.setVisible (shouldBeVisible);
+    phaseFreqSlider.setVisible (shouldBeVisible);
+    phaseQSlider.setVisible (shouldBeVisible);
+    visualOffsetSlider.setVisible (shouldBeVisible);
+    crossoverEnableButton.setVisible (shouldBeVisible);
+    crossoverSlider.setVisible (shouldBeVisible);
+
+    delayLabel.setVisible (shouldBeVisible);
+    polarityLabel.setVisible (shouldBeVisible);
+    phaseFilterLabel.setVisible (shouldBeVisible);
+    pitchTrackLabel.setVisible (shouldBeVisible);
+    phaseFreqLabel.setVisible (shouldBeVisible);
+    phaseQLabel.setVisible (shouldBeVisible);
+    visualOffsetLabel.setVisible (shouldBeVisible);
+    crossoverEnableLabel.setVisible (shouldBeVisible);
+    crossoverLabel.setVisible (shouldBeVisible);
+
+    advancedHeader.setVisible (shouldBeVisible);
+    delayInterpCombo.setVisible (shouldBeVisible);
+    phaseStagesCombo.setVisible (shouldBeVisible);
+    delayInterpLabel.setVisible (shouldBeVisible);
+    phaseStagesLabel.setVisible (shouldBeVisible);
+
+    analyzerTitle.setVisible (shouldBeVisible);
+    analyzerBody.setVisible (shouldBeVisible);
+    transientPunch.setVisible (shouldBeVisible);
+    setRefButton.setVisible (shouldBeVisible);
+}
+
 void KickLockAudioProcessorEditor::pushScopeSettings()
 {
     const int viewIdx = viewCombo.getSelectedItemIndex();
-    const auto mode = scopeViewModeFromChoiceIndex (viewIdx);
+    const auto requestedMode = scopeViewModeFromChoiceIndex (viewIdx);
+    const auto mode = cleanScopeMode && requestedMode == ScopeViewMode::Spectrum
+                          ? ScopeViewMode::Triggered
+                          : requestedMode;
     oscilloscope.setViewMode (mode);
     
-    if (mode == ScopeViewMode::Spectrum)
+    if (cleanScopeMode)
+    {
+        oscilloscope.setVisible (true);
+        spectrumAnalyzer.setVisible (false);
+        audioProcessor.setSpectrumCaptureEnabled (false);
+    }
+    else if (mode == ScopeViewMode::Spectrum)
     {
         oscilloscope.setVisible (false);
         spectrumAnalyzer.setVisible (true);
@@ -619,8 +683,25 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
 
         if (state == AnalyzeState::ResultReady)
         {
-            suggestedText = resultCanApply ? "Suggested: " + formatSignedDelayMs (latestResult.bassDelayMs)
-                                           : juce::String();
+            const int beforePercent = (int) std::round (juce::jlimit (0.0f, 100.0f, latestResult.displayBeforeMatchPercent));
+            const int afterPercent = (int) std::round (juce::jlimit (0.0f, 100.0f, latestResult.displayAfterMatchPercent));
+            
+            juce::String suggested;
+            if (resultCanApply)
+            {
+                if (latestResult.displayAfterMatchPercent > latestResult.displayBeforeMatchPercent)
+                {
+                    suggested << "Suggested: " << formatSignedDelayMs (latestResult.bassDelayMs) << "\n"
+                              << "Low-end match: " << juce::String (beforePercent)
+                              << "% -> " << juce::String (afterPercent) << "%";
+                }
+                else
+                {
+                    suggested << "Current alignment is optimal.\n"
+                              << "Low-end match: " << juce::String (beforePercent) << "%";
+                }
+            }
+            suggestedText = suggested;
 
             juce::String body;
             body << latestResult.message;
@@ -635,6 +716,8 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
                          << " Hz, Q " << juce::String (latestResult.phaseFilterQ, 2) << "\n";
                 else
                     body << "Phase Filter: off\n";
+                
+                body << "Confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%";
             }
             else
             {
@@ -643,28 +726,11 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
                 else
                     body << "\n\nNo applicable bass-path change was found.";
 
-                body << "\n";
-            }
-
-            if (resultCanApply)
-            {
-                body << "Confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
-                     << "Low-end match: " << juce::String ((int) std::round (latestResult.displayBeforeMatchPercent))
-                     << "% -> " << juce::String ((int) std::round (latestResult.displayAfterMatchPercent)) << "%";
-            }
-            else
-            {
-                body << "Signal confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
-                     << "Current low-end match: " << juce::String ((int) std::round (latestResult.displayBeforeMatchPercent)) << "%";
-
-                if (latestResult.displayAfterMatchPercent < latestResult.displayBeforeMatchPercent)
-                    body << "\nBest tested change would reduce match to "
-                         << juce::String ((int) std::round (latestResult.displayAfterMatchPercent))
-                         << "%, so Apply is disabled.";
+                body << "\n\nCurrent low-end match: " << juce::String (beforePercent) << "%";
             }
 
             if (resultCanApply && latestResult.largeTimingOffset)
-                body << "\n\nWarning: Detected offset is " << juce::String (latestResult.detectedTimingOffsetMs, 1) << " ms, which exceeds the max delay of " << juce::String(PhaseFixEngine::defaultAutoFixMaxDelayMs, 1) << " ms. A best-effort delay was calculated, but manual DAW movement may sound more natural.";
+                body << "\n\nWarning: Detected offset is " << juce::String (latestResult.detectedTimingOffsetMs, 1) << " ms, which exceeds the max delay of " << juce::String(PhaseFixEngine::defaultAutoFixMaxDelayMs, 1) << " ms.";
             else if (resultCanApply && latestResult.requiresTimelineMove)
                 body << "\n\nWarning: This correction conceptually needs a DAW timeline move (" << juce::String(latestResult.suggestedKickMoveMs, 1) << " ms). Delay was clamped to 0 ms for a best-effort fix.";
             else if (resultCanApply && latestResult.unstableRecommendation)
@@ -769,6 +835,9 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (background);
 
+    if (cleanScopeMode)
+        return;
+
     auto bounds = getLocalBounds();
 
     // --- Top bar -----------------------------------------------------------
@@ -822,6 +891,9 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
 
 void KickLockAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
 {
+    if (cleanScopeMode)
+        return;
+
     if (! helpOverlayVisible)
         return;
 
@@ -891,6 +963,19 @@ void KickLockAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
 void KickLockAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
+    setChromeVisible (! cleanScopeMode);
+
+    if (cleanScopeMode)
+    {
+        manualPanelBounds = {};
+        analyzerPanelBounds = {};
+        oscilloscope.setVisible (true);
+        spectrumAnalyzer.setVisible (false);
+        oscilloscope.setBounds (bounds.reduced (8));
+        audioProcessor.setSpectrumCaptureEnabled (false);
+        repaint();
+        return;
+    }
 
     // --- Top bar -----------------------------------------------------------
     auto topBar = bounds.removeFromTop (kTopBarHeight).reduced (14, 6);
@@ -1045,5 +1130,6 @@ void KickLockAudioProcessorEditor::resized()
     audioProcessor.apvts.state.setProperty ("editorHeight", getHeight(), nullptr);
     audioProcessor.apvts.state.setProperty ("bottomPanelHeight", bottomPanelHeight, nullptr);
     
+    pushScopeSettings();
     repaint();
 }

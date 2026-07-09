@@ -179,7 +179,7 @@ public:
 private:
     static float toPercent (double r)
     {
-        return (float) (std::clamp (r, -1.0, 1.0) * 100.0);
+        return (float) ((std::clamp (r, -1.0, 1.0) + 1.0) * 50.0);
     }
 
     static void bandPass (std::vector<float>& x, double fs, float lowHz, float highHz)

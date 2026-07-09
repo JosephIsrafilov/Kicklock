@@ -962,8 +962,8 @@ public:
                 const float v = (float) (1.0e-4 * std::sin (kTwoPi * 55.0 * (double) i / kSampleRate));
                 quiet.pushSample (-v, v);
             }
-            expectWithinAbsoluteError (quiet.getWeightedMatchPercent(), 0.0f, 0.1f);
-            expectWithinAbsoluteError (quiet.getLowEndMatchPercent(), 0.0f, 0.1f);
+            expectWithinAbsoluteError (quiet.getWeightedMatchPercent(), 50.0f, 0.1f);
+            expectWithinAbsoluteError (quiet.getLowEndMatchPercent(), 50.0f, 0.1f);
         }
 
         // P3: the canonical offline scoreRendered() and the live meter share the
