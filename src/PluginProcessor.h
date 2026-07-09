@@ -114,6 +114,13 @@ public:
     ScopeFifo rawScopeFifo;
     ScopeFifo spectrumFifo;
 
+    // UI sets this when the Spectrum view is visible so the audio thread can
+    // skip full-rate spectrum FIFO traffic (and the dual FFT) the rest of the time.
+    void setSpectrumCaptureEnabled (bool enabled) noexcept
+    {
+        spectrumCaptureEnabled.store (enabled, std::memory_order_relaxed);
+    }
+
     // Synchronous analysis. Snapshots the raw capture, runs the offline
     // PhaseFixEngine search, and publishes the result. Message-thread callers
     // (and the unit tests) can use this directly; it can also be called from a
@@ -236,6 +243,7 @@ private:
     std::atomic<float> transientPunchReferenceDb { 0.0f };
     std::atomic<bool> transientPunchReferenceSet { false };
     std::unique_ptr<AutoAlignEngine> autoAlignEngine;
+    juce::AudioBuffer<float> sidechainMonoScratch;
 
     // Live phase-match meters (P5). Multi-band across 20 Hz-500 Hz, low-end
     // weighted, so the kick click can't swing the reading. dry reads the raw
@@ -299,8 +307,8 @@ private:
     // buffer-size-independent.
     struct BlockObservationStats
     {
-        double bassEnergySum = 0.0;
-        double kickEnergySum = 0.0;
+        float bassEnergySum = 0.0f;
+        float kickEnergySum = 0.0f;
         float bassPeak = 0.0f;
         float kickPeak = 0.0f;
     };
@@ -351,6 +359,21 @@ private:
     int scopeDecimationFactor = 1;
     int scopeDecimationCounter = 0;
     int rawScopeDecimationCounter = 0;
+
+    // Spectrum capture is gated by the UI (Spectrum view only) and further
+    // decimated to ~16 kHz so the dual UI-side FFT stays affordable.
+    std::atomic<bool> spectrumCaptureEnabled { false };
+    int spectrumDecimationFactor = 1;
+    int spectrumDecimationCounter = 0;
+
+    // Live multi-band meters update every Nth sample (EMA window scaled to match).
+    static constexpr int meterDecimationFactor = 2;
+    int dryMeterDecimationCounter = 0;
+    int processedMeterDecimationCounter = 0;
+
+    // Avoid recomputing Linkwitz-Riley coefficients every block when the
+    // crossover frequency hasn't moved.
+    float lastPublishedCrossoverHz = -1.0f;
 
     std::atomic<bool> sidechainReferenceAvailable { false };
     std::atomic<bool> tempoAvailable { false };

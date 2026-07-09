@@ -267,16 +267,14 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     addAndMakeVisible (compareCopyButton);
 
     helpButton.setButtonText ("?");
-    helpButton.setTooltip ("Shows sidechain routing steps for common DAWs.");
+    helpButton.setTooltip ("Shows user guide and sidechain routing instructions.");
     helpButton.onClick = [this] { helpOverlayVisible = ! helpOverlayVisible; repaint(); };
     addAndMakeVisible (helpButton);
 
     // --- Centre scope + live match ----------------------------------------
     addAndMakeVisible (oscilloscope);
     addAndMakeVisible (spectrumAnalyzer);
-    oscilloscope.setTooltip ("Click-hold and drag to pause the display and scrub through the captured waveform; "
-                             "release to resume live. In Triggered mode, hold Shift while dragging to adjust Delay "
-                             "instead (double-click resets Delay). Wheel = time zoom, Shift+wheel = amplitude zoom.");
+
     addAndMakeVisible (correlationDisplay);
     correlationDisplay.setTooltip ("Live match. Click Details to collapse or expand the detailed meters.");
 
@@ -476,6 +474,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 KickLockAudioProcessorEditor::~KickLockAudioProcessorEditor()
 {
     stopTimer();
+    audioProcessor.setSpectrumCaptureEnabled (false);
     setLookAndFeel (nullptr);
 }
 
@@ -528,11 +527,13 @@ void KickLockAudioProcessorEditor::pushScopeSettings()
     {
         oscilloscope.setVisible (false);
         spectrumAnalyzer.setVisible (true);
+        audioProcessor.setSpectrumCaptureEnabled (true);
     }
     else
     {
         oscilloscope.setVisible (true);
         spectrumAnalyzer.setVisible (false);
+        audioProcessor.setSpectrumCaptureEnabled (false);
     }
     oscilloscope.setGridDivision (gridDivisionFromChoiceIndex (gridCombo.getSelectedItemIndex()));
 
@@ -648,17 +649,17 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
             if (resultCanApply)
             {
                 body << "Confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
-                     << "Low-end match: " << juce::String ((int) std::round (latestResult.beforeMatchPercent))
-                     << "% -> " << juce::String ((int) std::round (latestResult.predictedAfterMatchPercent)) << "%";
+                     << "Low-end match: " << juce::String ((int) std::round (latestResult.displayBeforeMatchPercent))
+                     << "% -> " << juce::String ((int) std::round (latestResult.displayAfterMatchPercent)) << "%";
             }
             else
             {
                 body << "Signal confidence: " << juce::String ((int) std::round (latestResult.confidence * 100.0f)) << "%\n"
-                     << "Current low-end match: " << juce::String ((int) std::round (latestResult.beforeMatchPercent)) << "%";
+                     << "Current low-end match: " << juce::String ((int) std::round (latestResult.displayBeforeMatchPercent)) << "%";
 
-                if (latestResult.predictedAfterMatchPercent < latestResult.beforeMatchPercent)
+                if (latestResult.displayAfterMatchPercent < latestResult.displayBeforeMatchPercent)
                     body << "\nBest tested change would reduce match to "
-                         << juce::String ((int) std::round (latestResult.predictedAfterMatchPercent))
+                         << juce::String ((int) std::round (latestResult.displayAfterMatchPercent))
                          << "%, so Apply is disabled.";
             }
 
@@ -738,6 +739,12 @@ void KickLockAudioProcessorEditor::timerCallback()
                                  : "Pitch",
                              juce::dontSendNotification);
 
+    const auto oldSidechainStatusText = sidechainStatusText;
+    const auto oldSidechainStatusColour = sidechainStatusColour;
+    const auto oldBpmText = bpmText;
+    const auto oldPdcText = pdcText;
+    const auto oldPolarityHintVisible = polarityHintVisible;
+
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
     refreshCompareButtons();
@@ -748,7 +755,14 @@ void KickLockAudioProcessorEditor::timerCallback()
     // child components that repaint themselves when their own state changes.
     // Repainting the whole window at 30 Hz forced the scope to redraw on an
     // irregular cadence and wasted CPU, so invalidate just the top bar here.
-    repaint (0, 0, getWidth(), kTopBarHeight);
+    if (sidechainStatusText != oldSidechainStatusText ||
+        sidechainStatusColour != oldSidechainStatusColour ||
+        bpmText != oldBpmText ||
+        pdcText != oldPdcText ||
+        polarityHintVisible != oldPolarityHintVisible)
+    {
+        repaint (0, 0, getWidth(), kTopBarHeight);
+    }
 }
 
 void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
@@ -811,8 +825,8 @@ void KickLockAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
     if (! helpOverlayVisible)
         return;
 
-    auto bounds = getLocalBounds().reduced (70, 64);
-    g.setColour (juce::Colours::black.withAlpha (0.58f));
+    auto bounds = getLocalBounds().reduced (40, 40);
+    g.setColour (juce::Colours::black.withAlpha (0.75f));
     g.fillAll();
 
     g.setColour (panel);
@@ -820,30 +834,57 @@ void KickLockAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
     g.setColour (orange.withAlpha (0.8f));
     g.drawRoundedRectangle (bounds.toFloat(), 8.0f, 1.4f);
 
-    auto area = bounds.reduced (22, 18);
+    auto area = bounds.reduced (32, 28);
+    
     g.setColour (text);
-    g.setFont (juce::Font (juce::FontOptions (20.0f)).boldened());
-    g.drawText ("Kick to Sidechain", area.removeFromTop (28), juce::Justification::centredLeft);
+    g.setFont (juce::Font (juce::FontOptions (22.0f)).boldened());
+    g.drawText ("KickLock - User Guide", area.removeFromTop (28), juce::Justification::centred);
+    area.removeFromTop (12);
 
-    g.setColour (mutedText);
-    g.setFont (juce::Font (juce::FontOptions (12.5f)));
-
-    const juce::StringArray lines {
-        "Ableton Live: Drop KickLock on the bass track, open Sidechain in the device header, choose the kick track.",
-        "FL Studio: Put KickLock on the bass mixer insert, route the kick insert to it with Sidechain to this track, select that input in the wrapper.",
-        "Logic Pro: Insert KickLock on bass, enable the plug-in sidechain menu, choose the kick track or bus.",
-        "Cubase: Insert KickLock on bass, activate sidechain in the plug-in header, send the kick channel to that sidechain.",
-        "Reaper: Put KickLock on bass, route kick channels 1/2 to bass channels 3/4, keep bass audio on 1/2."
+    auto drawBlock = [&](const juce::String& title, const juce::String& body, int bodyHeight) {
+        g.setColour (orange);
+        g.setFont (juce::Font (juce::FontOptions (15.0f)).boldened());
+        g.drawText (title, area.removeFromTop (20), juce::Justification::centredLeft);
+        
+        g.setColour (mutedText);
+        g.setFont (juce::Font (juce::FontOptions (13.5f)));
+        g.drawFittedText (body, area.removeFromTop (bodyHeight), juce::Justification::topLeft, 10);
+        area.removeFromTop (10);
     };
 
-    for (const auto& line : lines)
-    {
-        g.drawFittedText (line, area.removeFromTop (44), juce::Justification::centredLeft, 2);
-        area.removeFromTop (4);
-    }
+    drawBlock("What it does", 
+              "KickLock fixes low-end phase cancellation between your kick and bass. "
+              "By aligning their phase, it restores lost punch and guarantees a tight, powerful low end.", 
+              38);
 
+    drawBlock("How it works",
+              "1. Route your Kick drum to KickLock's Sidechain input (KickLock should be placed on your Bass track).\n"
+              "2. Play your track and click 'Analyze'.\n"
+              "3. KickLock analyzes the transients and automatically calculates the optimal Delay, Polarity, and Phase Filter settings.\n"
+              "4. Click 'Apply Fix' to lock the low end in perfect phase.",
+              72);
+              
+    drawBlock("Key Features",
+              "- Phase Filter (Allpass): Rotates phase smoothly without shifting the audio in time.\n"
+              "- Delay & Polarity: Aligns transients perfectly with sub-millisecond precision.\n"
+              "- Crossover: Ensures only the low frequencies (e.g., < 150 Hz) are affected, leaving mids/highs untouched.\n"
+              "- A/B Compare: Easily switch between two configurations to verify improvements.",
+              72);
+
+    drawBlock("Meters & Displays",
+              "- Live Scope: Visualizes the Kick (sidechain) and Bass waveforms in real-time.\n"
+              "- Correlation / Phase Match: Shows how well the frequencies are aligned (100% = perfect, 50% = neutral, 0% = cancelling).\n"
+              "- Transient Punch: Measures the actual dB gain/loss at the exact moment the kick hits.",
+              58);
+              
+    drawBlock("Sidechain Routing",
+              "Ableton: Sidechain drop-down in plugin header.  |  FL Studio: Wrapper settings -> Processing. \n"
+              "Logic: Sidechain menu in header.  |  Cubase: Activate sidechain icon, route kick send. \n"
+              "Reaper: Route kick to plugin channels 3/4.",
+              54);
+              
     g.setColour (orange);
-    g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+    g.setFont (juce::Font (juce::FontOptions (13.0f)).boldened());
     g.drawText ("Press ? to close", area.removeFromBottom (18), juce::Justification::centredRight);
 }
 

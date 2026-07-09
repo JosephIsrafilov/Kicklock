@@ -56,6 +56,8 @@ struct PhaseFixResult
     float beforeMatchPercent = 50.0f;
     float afterMatchPercent = 50.0f;
     float predictedAfterMatchPercent = 50.0f;
+    float displayBeforeMatchPercent = 50.0f;
+    float displayAfterMatchPercent = 50.0f;
     float verifiedAfterMatchPercent = -1.0f;
     float verificationDeltaPercent = 0.0f;
     bool verificationWarning = false;
@@ -306,6 +308,8 @@ public:
         result.beforeMatchPercent = before.match;
         result.afterMatchPercent = bestMatch;
         result.predictedAfterMatchPercent = bestMatch;
+        result.displayBeforeMatchPercent = before.match;
+        result.displayAfterMatchPercent = bestMatch;
         result.improvementPercent = result.afterMatchPercent - result.beforeMatchPercent;
         result.confidence = std::min (before.confidence, bestConfidence);
 

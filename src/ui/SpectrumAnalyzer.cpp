@@ -18,6 +18,7 @@ SpectrumAnalyzer::~SpectrumAnalyzer()
 void SpectrumAnalyzer::setSampleRate (double newSampleRate)
 {
     sampleRate = newSampleRate;
+    rebuildBinCache();
 }
 
 void SpectrumAnalyzer::setColours (juce::Colour mainCol, juce::Colour sideCol)
@@ -133,12 +134,39 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
             juce::Path path;
             bool first = true;
             
-            for (float x = plotBounds.getX(); x <= plotBounds.getRight(); x += 1.0f)
+            for (const auto& cacheItem : binCache)
             {
-                float freq = minFreq * std::pow (maxFreq / minFreq, (x - plotBounds.getX()) / plotBounds.getWidth());
-                float binIdx = freq * (float)historyLength / (float)sampleRate;
-                int idx = juce::jlimit (0, historyLength / 2 - 1, (int) std::round (binIdx));
-                float db = spectrumData[(size_t)idx];
+                float x = cacheItem.x;
+                float binStart = cacheItem.binStart;
+                float binEnd = cacheItem.binEnd;
+                
+                float db = minDb;
+                
+                if (binEnd - binStart < 1.0f)
+                {
+                    float binCenter = (binStart + binEnd) * 0.5f;
+                    int idx1 = juce::jlimit (0, historyLength / 2 - 1, (int) std::floor (binCenter));
+                    int idx2 = juce::jlimit (0, historyLength / 2 - 1, idx1 + 1);
+                    float frac = binCenter - (float)idx1;
+                    
+                    float db1 = spectrumData[(size_t)idx1];
+                    float db2 = spectrumData[(size_t)idx2];
+                    
+                    // Cosine interpolation for smoother rounded peaks in the low-end
+                    float mu2 = (1.0f - std::cos (frac * juce::MathConstants<float>::pi)) / 2.0f;
+                    db = db1 * (1.0f - mu2) + db2 * mu2;
+                }
+                else
+                {
+                    int startIdx = juce::jlimit (0, historyLength / 2 - 1, (int) std::floor (binStart));
+                    int endIdx   = juce::jlimit (0, historyLength / 2 - 1, (int) std::ceil (binEnd));
+                    for (int i = startIdx; i <= endIdx; ++i)
+                    {
+                        if (spectrumData[(size_t)i] > db)
+                            db = spectrumData[(size_t)i];
+                    }
+                }
+                
                 float y = plotBounds.getBottom() - (juce::jlimit (minDb, maxDb, db) - minDb) / (maxDb - minDb) * plotBounds.getHeight();
                 
                 if (first)
@@ -232,6 +260,40 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
 
 void SpectrumAnalyzer::resized()
 {
+    rebuildBinCache();
+}
+
+void SpectrumAnalyzer::rebuildBinCache()
+{
+    if (sampleRate <= 0.0) return;
+    
+    auto panelBounds = getLocalBounds().toFloat().reduced (8.0f, 8.0f);
+    auto plotBounds = panelBounds.reduced (12.0f, 10.0f);
+    plotBounds.removeFromTop (12.0f);
+    plotBounds.removeFromBottom (20.0f);
+    plotBounds.removeFromTop (16.0f);
+    
+    if (plotBounds.getWidth() <= 0.0f || plotBounds.getHeight() <= 0.0f) return;
+    if (sampleRate == lastCacheSampleRate && plotBounds.getWidth() == lastCacheWidth && plotBounds.getX() == lastCacheX) return;
+    
+    binCache.clear();
+    const float minFreq = 20.0f;
+    const float maxFreq = 20000.0f;
+    
+    for (float x = plotBounds.getX(); x <= plotBounds.getRight(); x += 1.0f)
+    {
+        float freqStart = minFreq * std::pow (maxFreq / minFreq, (x - 0.5f - plotBounds.getX()) / plotBounds.getWidth());
+        float freqEnd   = minFreq * std::pow (maxFreq / minFreq, (x + 0.5f - plotBounds.getX()) / plotBounds.getWidth());
+        
+        float binStart = freqStart * (float)historyLength / (float)sampleRate;
+        float binEnd   = freqEnd   * (float)historyLength / (float)sampleRate;
+        
+        binCache.push_back ({x, binStart, binEnd});
+    }
+    
+    lastCacheSampleRate = sampleRate;
+    lastCacheWidth = plotBounds.getWidth();
+    lastCacheX = plotBounds.getX();
 }
 
 void SpectrumAnalyzer::mouseMove (const juce::MouseEvent& e)

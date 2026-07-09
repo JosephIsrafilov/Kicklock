@@ -50,36 +50,53 @@ public:
 
         const int numCh = std::min((int)peakFilters.size(), highBandBass.getNumChannels());
         const int kickCh = rawKickSidechain.getNumChannels();
+        const float* kickPtrs[2] = {
+            kickCh > 0 ? rawKickSidechain.getReadPointer (0) : nullptr,
+            kickCh > 1 ? rawKickSidechain.getReadPointer (1) : nullptr
+        };
+        float* bassPtrs[2] = {
+            numCh > 0 ? highBandBass.getWritePointer (0) : nullptr,
+            numCh > 1 ? highBandBass.getWritePointer (1) : nullptr
+        };
 
         for (int i = 0; i < numSamples; ++i)
         {
-            // Get kick peak for this sample
             float kickPeak = 0.0f;
-            for (int ch = 0; ch < kickCh; ++ch)
-                kickPeak = std::max(kickPeak, std::abs(rawKickSidechain.getSample(ch, i)));
+            if (kickPtrs[0] != nullptr)
+                kickPeak = std::max (kickPeak, std::abs (kickPtrs[0][i]));
+            if (kickPtrs[1] != nullptr)
+                kickPeak = std::max (kickPeak, std::abs (kickPtrs[1][i]));
+            for (int ch = 2; ch < kickCh; ++ch)
+                kickPeak = std::max (kickPeak, std::abs (rawKickSidechain.getSample (ch, i)));
 
-            // Envelope follower
             const float coeff = kickPeak > envelope ? attackCoeff : releaseCoeff;
             envelope = coeff * envelope + (1.0f - coeff) * kickPeak;
 
-            // Map envelope to EQ gain. 
-            // When envelope is high (kick hits), gain goes up.
-            // Let's say +10 dB boost when envelope is 1.0.
-            const float maxBoostDb = 10.0f;
-            const float currentBoostDb = juce::jlimit(0.0f, maxBoostDb, envelope * maxBoostDb);
+            constexpr float maxBoostDb = 10.0f;
+            const float currentBoostDb = juce::jlimit (0.0f, maxBoostDb, envelope * maxBoostDb);
 
-            // Optimization: Only update filter coeffs if the gain changed significantly
-            if (std::abs(currentBoostDb - lastBoostDb) > 0.1f)
+            // Between kicks the boost is ~0: skip peak filtering entirely
+            // (identity) so we don't pay two IIR stages for a no-op.
+            if (currentBoostDb < 0.05f)
             {
-                updateCoefficients(currentBoostDb);
+                if (lastBoostDb >= 0.05f)
+                {
+                    updateCoefficients (0.0f);
+                    lastBoostDb = 0.0f;
+                }
+                continue;
+            }
+
+            if (std::abs (currentBoostDb - lastBoostDb) > 0.1f)
+            {
+                updateCoefficients (currentBoostDb);
                 lastBoostDb = currentBoostDb;
             }
 
-            // Apply EQ
             for (int ch = 0; ch < numCh; ++ch)
             {
-                const float s = highBandBass.getSample(ch, i);
-                highBandBass.setSample(ch, i, peakFilters[(size_t)ch].processSample(s));
+                if (bassPtrs[ch] != nullptr)
+                    bassPtrs[ch][i] = peakFilters[(size_t) ch].processSample (bassPtrs[ch][i]);
             }
         }
     }

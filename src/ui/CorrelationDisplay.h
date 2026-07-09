@@ -217,14 +217,17 @@ private:
 
     void timerCallback() override
     {
-        // Short hold on the valid flag so the display doesn't flicker between
-        // "no signal" and a number in the gaps between kick hits (the meter's
-        // energy gate is EMA-smoothed but can dip on very sparse material).
+        bool needsRepaint = false;
+        const bool prevDisplayValid = displayValid;
+
         if (matchValidRef.load())
             validHoldTicks = 15;    // ~0.5 s at 30 Hz
         else if (validHoldTicks > 0)
             --validHoldTicks;
         displayValid = validHoldTicks > 0;
+        
+        if (displayValid != prevDisplayValid)
+            needsRepaint = true;
 
         const float target = weightedPercentRef.load();
         const float lowTarget = lowEndPercentRef.load();
@@ -232,19 +235,36 @@ private:
         const float beforeTarget = appliedBeforePercentRef.load();
         const float subLossTarget = lowEndSubLossDbRef.load();
 
-        displayWeightedPercent += 0.25f * (target - displayWeightedPercent);
-        displayLowEndPercent += 0.25f * (lowTarget - displayLowEndPercent);
-        displayBroadbandPercent += 0.25f * (broadbandTarget - displayBroadbandPercent);
-        displayAppliedBeforePercent = beforeTarget;
+        auto updateSmoothed = [&needsRepaint](float& current, float targetValue) {
+            int oldRounded = (int) std::round (current);
+            current += 0.25f * (targetValue - current);
+            if ((int) std::round (current) != oldRounded)
+                needsRepaint = true;
+        };
+
+        updateSmoothed (displayWeightedPercent, target);
+        updateSmoothed (displayLowEndPercent, lowTarget);
+        updateSmoothed (displayBroadbandPercent, broadbandTarget);
+        
+        if (displayAppliedBeforePercent != beforeTarget)
+        {
+            displayAppliedBeforePercent = beforeTarget;
+            needsRepaint = true;
+        }
+
+        int oldSubLoss = (int) std::round (displaySubLossDb * 10.0f);
         displaySubLossDb += 0.25f * (subLossTarget - displaySubLossDb);
+        if ((int) std::round (displaySubLossDb * 10.0f) != oldSubLoss)
+            needsRepaint = true;
 
         for (int i = 0; i < PhaseBands::numBands; ++i)
         {
             const float bandTarget = bandRefs[(size_t) i] != nullptr ? bandRefs[(size_t) i]->load() : 50.0f;
-            displayBandPercent[(size_t) i] += 0.25f * (bandTarget - displayBandPercent[(size_t) i]);
+            updateSmoothed (displayBandPercent[(size_t) i], bandTarget);
         }
 
-        repaint();
+        if (needsRepaint)
+            repaint();
     }
 
     std::atomic<float>& weightedPercentRef;

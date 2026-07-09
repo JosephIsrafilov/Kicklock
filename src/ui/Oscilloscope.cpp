@@ -261,10 +261,10 @@ void Oscilloscope::vblankCallback()
         const bool isGliding = std::abs (targetTimeZoom - timeZoom) > 1.0e-3f || std::abs (targetAmpZoom - ampZoom) > 1.0e-3f;
         const bool scrollChanged = displayScrollMs != lastDisplayScrollMs;
 
-        if (! isDisplayFrozen() || panGestureActive || isGliding || scrollChanged)
+        if ((! isDisplayFrozen() && anyRead) || panGestureActive || isGliding || scrollChanged)
         {
             rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode),
-                                   viewMode != ScopeViewMode::FreeRun);
+                                   viewMode == ScopeViewMode::PhaseDelta);
 
             if (! isDisplayFrozen())
             {

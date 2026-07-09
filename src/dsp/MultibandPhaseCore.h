@@ -32,6 +32,9 @@ public:
         lowBuffer.setSize (numChannels, scratchSamples, false, false, true);
         highBuffer.setSize (numChannels, scratchSamples, false, false, true);
         inputBuffer.setSize (numChannels, scratchSamples, false, false, true);
+        // Pre-size sidechain scratch so processChunk never allocates on the
+        // audio thread (previous path called setSize every chunk).
+        sidechainScratch.setSize (2, scratchSamples, false, false, true);
 
         const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) scratchSamples, (juce::uint32) numChannels };
         crossover.prepare (spec);
@@ -240,13 +243,37 @@ private:
             }
         }
         
-        // Transient Q-Enhancement on High-Band
-        // Extract the chunk of the sidechain to pass to transientEQ
-        sidechainScratch.setSize(sidechain.getNumChannels(), n, false, false, true);
-        for (int ch = 0; ch < sidechain.getNumChannels(); ++ch)
-            sidechainScratch.copyFrom(ch, 0, sidechain, ch, offset, n);
-            
-        transientEQ.process(highBuffer, sidechainScratch, n);
+        // Transient Q-enhancement on the high band — only when a sidechain is
+        // present and the high path is active. Copy into a prepare()-sized
+        // scratch; never reallocate here.
+        const int scChannels = juce::jmin (sidechain.getNumChannels(),
+                                           sidechainScratch.getNumChannels());
+        if (scChannels > 0 && currentCrossoverEnabled)
+        {
+            for (int ch = 0; ch < scChannels; ++ch)
+                sidechainScratch.copyFrom (ch, 0, sidechain, ch, offset, n);
+            if (scChannels < sidechainScratch.getNumChannels())
+                sidechainScratch.clear (scChannels, 0, n);
+
+            transientEQ.process (highBuffer, sidechainScratch, n);
+        }
+
+        // Channel write pointers for the outer sample loop.
+        float* mainWrite[2] = {
+            numChannels > 0 ? main.getWritePointer (0, offset) : nullptr,
+            numChannels > 1 ? main.getWritePointer (1, offset) : nullptr
+        };
+
+        const float* lowPtr[2] = {
+            numChannels > 0 ? lowBuffer.getReadPointer (0) : nullptr,
+            numChannels > 1 ? lowBuffer.getReadPointer (1) : nullptr
+        };
+        const float* highPtr[2] = {
+            numChannels > 0 ? highBuffer.getReadPointer (0) : nullptr,
+            numChannels > 1 ? highBuffer.getReadPointer (1) : nullptr
+        };
+        const float maxLowDelay = (float) lowDelay.getMaximumDelayInSamples();
+        const float reportedLat = (float) reportedLatency;
 
         for (int i = 0; i < n; ++i)
         {
@@ -304,17 +331,16 @@ private:
                 allpassCoeffUpdateCountdown = 0;
             }
 
+            const float lowDelaySamplesB = juce::jlimit (0.0f, maxLowDelay, reportedLat + fineOffsetB);
+            const float lowDelaySamplesA = delayCrossfadeActive ? 
+                                           juce::jlimit (0.0f, maxLowDelay, reportedLat + fineOffsetA) : 
+                                           lowDelaySamplesB;
+
             for (int ch = 0; ch < numChannels; ++ch)
             {
-                lowDelay.pushSample (ch, lowBuffer.getSample (ch, i));
-                highDelay.pushSample (ch, highBuffer.getSample (ch, i));
+                lowDelay.pushSample (ch, lowPtr[ch][i]);
+                highDelay.pushSample (ch, highPtr[ch][i]);
 
-                const float lowDelaySamplesA = juce::jlimit (0.0f,
-                                                             (float) lowDelay.getMaximumDelayInSamples(),
-                                                             (float) reportedLatency + fineOffsetA);
-                const float lowDelaySamplesB = juce::jlimit (0.0f,
-                                                             (float) lowDelay.getMaximumDelayInSamples(),
-                                                             (float) reportedLatency + fineOffsetB);
                 float low = 0.0f;
                 if (delayCrossfadeActive)
                 {
@@ -340,8 +366,9 @@ private:
 
                 // The high band is a plain latency-compensated passthrough; only
                 // the low band carries the delay/polarity/phase-filter correction.
-                const float high = highDelay.popSample (ch, (float) reportedLatency);
-                main.setSample (ch, offset + i, low + high);
+                const float high = highDelay.popSample (ch, reportedLat);
+                if (mainWrite[ch] != nullptr)
+                    mainWrite[ch][i] = low + high;
             }
         }
     }

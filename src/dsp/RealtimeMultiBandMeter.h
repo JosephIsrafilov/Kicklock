@@ -37,8 +37,8 @@ public:
         // 1 - exp(-1/window) PER SAMPLE was a transcendental on the audio
         // thread 48k+ times a second (x2 meter instances) for a value that
         // only ever changes here.
-        emaAlpha = 1.0 - std::exp (-1.0 / (double) windowSize);
-        emaBeta = 1.0 - emaAlpha;
+        emaAlpha = 1.0f - std::exp (-1.0f / (float) windowSize);
+        emaBeta = 1.0f - emaAlpha;
 
         for (int b = 0; b < numBands; ++b)
         {
@@ -46,7 +46,7 @@ public:
             band.hp.makeHighPass (sampleRate, PhaseBands::table[(size_t) b].lowHz, butterworthQ);
             band.lp.makeLowPass (sampleRate, PhaseBands::table[(size_t) b].highHz, butterworthQ);
             band.weight = PhaseBands::table[(size_t) b].weight;
-            band.active = (double) PhaseBands::table[(size_t) b].highHz < sampleRate * 0.5;
+            band.active = (float) PhaseBands::table[(size_t) b].highHz < (float) sampleRate * 0.5f;
         }
 
         reset();
@@ -67,27 +67,29 @@ public:
     }
 
     // Audio thread. O(numBands), no allocation, no transcendentals.
+    // Band-pass + EMA use float arithmetic (standard for realtime meters) so
+    // the dual 4-band path does not burn double multiplies 48k times/sec.
     void pushSample (float bass, float kick) noexcept
     {
         if (windowSize <= 0) return;
-        const double alpha = emaAlpha;
-        const double beta = emaBeta;
+        const float alpha = emaAlpha;
+        const float beta = emaBeta;
 
         for (auto& band : bands)
         {
             if (! band.active)
                 continue;
 
-            const double a = band.lp.process (band.hp.process ((double)bass,
+            const float a = band.lp.process (band.hp.process (bass,
                                                     band.hpStateBassZ1, band.hpStateBassZ2),
                                                   band.lpStateBassZ1, band.lpStateBassZ2);
-            const double b = band.lp.process (band.hp.process ((double)kick,
+            const float b = band.lp.process (band.hp.process (kick,
                                                     band.hpStateKickZ1, band.hpStateKickZ2),
                                                   band.lpStateKickZ1, band.lpStateKickZ2);
 
-            band.sumAB = alpha * (a * b) + beta * band.sumAB;
-            band.sumA2 = alpha * (a * a) + beta * band.sumA2;
-            band.sumB2 = alpha * (b * b) + beta * band.sumB2;
+            band.sumAB = (double) alpha * (double) (a * b) + (double) beta * band.sumAB;
+            band.sumA2 = (double) alpha * (double) (a * a) + (double) beta * band.sumA2;
+            band.sumB2 = (double) alpha * (double) (b * b) + (double) beta * band.sumB2;
 
             if (band.numValid < windowSize)
                 ++band.numValid;
@@ -187,40 +189,40 @@ private:
 
     struct BiquadCoeffs
     {
-        static constexpr double pi = 3.14159265358979323846;
-        double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
+        static constexpr float pi = 3.14159265358979323846f;
+        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
 
         void makeLowPass (double fs, double f, double q)
         {
-            const double w0 = 2.0 * pi * f / fs;
-            const double cw = std::cos (w0), sw = std::sin (w0);
-            const double alpha = sw / (2.0 * q);
-            const double a0 = 1.0 + alpha;
-            b0 = ((1.0 - cw) * 0.5) / a0;
-            b1 = (1.0 - cw) / a0;
-            b2 = ((1.0 - cw) * 0.5) / a0;
-            a1 = (-2.0 * cw) / a0;
-            a2 = (1.0 - alpha) / a0;
+            const float w0 = 2.0f * pi * (float) f / (float) fs;
+            const float cw = std::cos (w0), sw = std::sin (w0);
+            const float alpha = sw / (2.0f * (float) q);
+            const float a0 = 1.0f + alpha;
+            b0 = ((1.0f - cw) * 0.5f) / a0;
+            b1 = (1.0f - cw) / a0;
+            b2 = ((1.0f - cw) * 0.5f) / a0;
+            a1 = (-2.0f * cw) / a0;
+            a2 = (1.0f - alpha) / a0;
         }
 
         void makeHighPass (double fs, double f, double q)
         {
-            const double w0 = 2.0 * pi * f / fs;
-            const double cw = std::cos (w0), sw = std::sin (w0);
-            const double alpha = sw / (2.0 * q);
-            const double a0 = 1.0 + alpha;
-            b0 = ((1.0 + cw) * 0.5) / a0;
-            b1 = -(1.0 + cw) / a0;
-            b2 = ((1.0 + cw) * 0.5) / a0;
-            a1 = (-2.0 * cw) / a0;
-            a2 = (1.0 - alpha) / a0;
+            const float w0 = 2.0f * pi * (float) f / (float) fs;
+            const float cw = std::cos (w0), sw = std::sin (w0);
+            const float alpha = sw / (2.0f * (float) q);
+            const float a0 = 1.0f + alpha;
+            b0 = ((1.0f + cw) * 0.5f) / a0;
+            b1 = -(1.0f + cw) / a0;
+            b2 = ((1.0f + cw) * 0.5f) / a0;
+            a1 = (-2.0f * cw) / a0;
+            a2 = (1.0f - alpha) / a0;
         }
 
         // Transposed direct form II, one call per (filter, signal) using that
         // pair's own z-state.
-        double process (double in, double& z1, double& z2) const noexcept
+        float process (float in, float& z1, float& z2) const noexcept
         {
-            const double out = b0 * in + z1;
+            const float out = b0 * in + z1;
             z1 = b1 * in - a1 * out + z2;
             z2 = b2 * in - a2 * out;
             return out;
@@ -233,11 +235,12 @@ private:
         float weight = 0.0f;
         bool active = true;
 
-        double hpStateBassZ1 = 0.0, hpStateBassZ2 = 0.0;
-        double lpStateBassZ1 = 0.0, lpStateBassZ2 = 0.0;
-        double hpStateKickZ1 = 0.0, hpStateKickZ2 = 0.0;
-        double lpStateKickZ1 = 0.0, lpStateKickZ2 = 0.0;
+        float hpStateBassZ1 = 0.0f, hpStateBassZ2 = 0.0f;
+        float lpStateBassZ1 = 0.0f, lpStateBassZ2 = 0.0f;
+        float hpStateKickZ1 = 0.0f, hpStateKickZ2 = 0.0f;
+        float lpStateKickZ1 = 0.0f, lpStateKickZ2 = 0.0f;
 
+        // Running sums stay double so long windows don't lose precision.
         double sumAB = 0.0, sumA2 = 0.0, sumB2 = 0.0;
         int numValid = 0;
     };
@@ -320,7 +323,7 @@ private:
 
     double sampleRate = 44100.0;
     int windowSize = 1;
-    double emaAlpha = 0.0;
-    double emaBeta = 1.0;
+    float emaAlpha = 0.0f;
+    float emaBeta = 1.0f;
     std::array<BandState, numBands> bands;
 };

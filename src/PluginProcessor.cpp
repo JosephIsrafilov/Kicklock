@@ -437,6 +437,17 @@ PhaseFixResult analyzeAggregatedHits(const std::vector<float> &bass,
   }
 
   aggregated.predictedAfterMatchPercent = aggregated.afterMatchPercent;
+
+  const auto beforeFull = PhaseFixEngine::scoreSettings(
+      bass.data(), kick.data(), (int)bass.size(), sampleRate, {},
+      PhaseFixEngine::absoluteManualMaxDelayMs);
+  const auto afterFull = PhaseFixEngine::scoreSettings(
+      bass.data(), kick.data(), (int)bass.size(), sampleRate, settings,
+      PhaseFixEngine::absoluteManualMaxDelayMs);
+
+  aggregated.displayBeforeMatchPercent = beforeFull.matchPercent;
+  aggregated.displayAfterMatchPercent = afterFull.matchPercent;
+
   aggregated.improvementPercent =
       aggregated.afterMatchPercent - aggregated.beforeMatchPercent;
 
@@ -914,6 +925,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
                                            int samplesPerBlock) {
   const int numChannels = juce::jmax(1, getTotalNumOutputChannels());
   analysisBuffer.setSize(numChannels, samplesPerBlock);
+  sidechainMonoScratch.setSize(1, samplesPerBlock, false, false, true);
 
   multibandCore.prepare(sampleRate, samplesPerBlock, numChannels, 20.0f);
   const auto maxDelaySamples = multibandCore.reportLatencySamples();
@@ -924,9 +936,11 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
 
   // Live multi-band phase meters (P5). They band-pass internally, so no
   // separate pre-filters are needed. ~0.25 s rolling window per band.
-  const int liveWindow = juce::jmax(256, (int)(sampleRate * 0.25));
-  dryMultiBandMeter.prepare(sampleRate, liveWindow);
-  processedMultiBandMeter.prepare(sampleRate, liveWindow);
+  // Meters are fed every meterDecimationFactor samples, so scale the window
+  // (and EMA) to keep the same real-time time constant.
+  const int liveWindow = juce::jmax(128, (int)(sampleRate * 0.25) / meterDecimationFactor);
+  dryMultiBandMeter.prepare(sampleRate / (double) meterDecimationFactor, liveWindow);
+  processedMultiBandMeter.prepare(sampleRate / (double) meterDecimationFactor, liveWindow);
   processedMeterSidechainDelay.setMaximumDelayInSamples(maxDelaySamples + 4);
   processedMeterSidechainDelay.prepare(
       {sampleRate, (juce::uint32)juce::jmax(1, samplesPerBlock), 1});
@@ -1002,6 +1016,13 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   scopeDecimationFactor = juce::jmax(1, (int)(sampleRate / 2048.0));
   scopeDecimationCounter = 0;
   rawScopeDecimationCounter = 0;
+  // Spectrum: ~16 kHz effective rate is enough for a 20 Hz–8 kHz comparison
+  // display and cuts dual-FFT UI cost roughly 3x vs full-rate 48 kHz.
+  spectrumDecimationFactor = juce::jmax(1, (int)(sampleRate / 16000.0));
+  spectrumDecimationCounter = 0;
+  dryMeterDecimationCounter = 0;
+  processedMeterDecimationCounter = 0;
+  lastPublishedCrossoverHz = -1.0f;
   sidechainReferenceAvailable.store(false);
   tempoAvailable.store(false);
   latestBpm.store(0.0f);
@@ -1061,27 +1082,46 @@ void KickLockAudioProcessor::processObservationCapture(
   // so Analyze capture and the dry multi-band meter never go stale.
   if (hasSidechain) {
     const int scCh = sidechainBuffer.getNumChannels();
+    const float mainNorm = mainCh > 0 ? 1.0f / (float)mainCh : 0.0f;
+    const float scNorm = scCh > 0 ? 1.0f / (float)scCh : 0.0f;
+    const bool crossoverEnable = crossoverEnableParamRaw == nullptr ||
+                                 crossoverEnableParamRaw->load() > 0.5f;
+
+    // Channel pointers avoid per-sample getSample() bounds checks in the hot path.
+    const float* mainPtrs[2] = {
+        mainCh > 0 ? mainBuffer.getReadPointer(0) : nullptr,
+        mainCh > 1 ? mainBuffer.getReadPointer(1) : nullptr};
+    const float* scPtrs[2] = {
+        scCh > 0 ? sidechainBuffer.getReadPointer(0) : nullptr,
+        scCh > 1 ? sidechainBuffer.getReadPointer(1) : nullptr};
 
     for (int i = 0; i < numSamples; ++i) {
       float mSum = 0.0f;
-      for (int ch = 0; ch < mainCh; ++ch)
+      if (mainPtrs[0] != nullptr)
+        mSum += mainPtrs[0][i];
+      if (mainPtrs[1] != nullptr)
+        mSum += mainPtrs[1][i];
+      // Fall back for >2 channel layouts (rare for this plugin).
+      for (int ch = 2; ch < mainCh; ++ch)
         mSum += mainBuffer.getSample(ch, i);
-      const float bassMono = mainCh > 0 ? mSum / (float)mainCh : 0.0f;
-      statsOut.bassEnergySum += (double)bassMono * (double)bassMono;
+      const float bassMono = mSum * mainNorm;
+      statsOut.bassEnergySum += (float)(bassMono * bassMono);
       statsOut.bassPeak = juce::jmax(statsOut.bassPeak, std::abs(bassMono));
 
       float sSum = 0.0f;
-      for (int ch = 0; ch < scCh; ++ch)
+      if (scPtrs[0] != nullptr)
+        sSum += scPtrs[0][i];
+      if (scPtrs[1] != nullptr)
+        sSum += scPtrs[1][i];
+      for (int ch = 2; ch < scCh; ++ch)
         sSum += sidechainBuffer.getSample(ch, i);
-      const float kickMono = scCh > 0 ? sSum / (float)scCh : 0.0f;
-      statsOut.kickEnergySum += (double)kickMono * (double)kickMono;
+      const float kickMono = sSum * scNorm;
+      statsOut.kickEnergySum += (float)(kickMono * kickMono);
       statsOut.kickPeak = juce::jmax(statsOut.kickPeak, std::abs(kickMono));
 
       float bassLow = rawBassLowpass.processSample(0, bassMono);
       const float kickLow = rawKickLowpass.processSample(0, kickMono);
 
-      const bool crossoverEnable = crossoverEnableParamRaw == nullptr ||
-                                   crossoverEnableParamRaw->load() > 0.5f;
       if (crossoverEnable)
         bassLow = analysisBassCrossoverSim.processSample(0, bassLow);
 
@@ -1091,16 +1131,28 @@ void KickLockAudioProcessor::processObservationCapture(
       if (autoAlignEngine != nullptr)
         autoAlignEngine->pushSample(bassLow, kickLow);
 
-      dryMultiBandMeter.pushSample(bassLow, kickLow);
+      if (++dryMeterDecimationCounter >= meterDecimationFactor) {
+        dryMeterDecimationCounter = 0;
+        dryMultiBandMeter.pushSample(bassLow, kickLow);
+      }
     }
   } else {
+    const float mainNorm = mainCh > 0 ? 1.0f / (float)mainCh : 0.0f;
+    const float* mainPtrs[2] = {
+        mainCh > 0 ? mainBuffer.getReadPointer(0) : nullptr,
+        mainCh > 1 ? mainBuffer.getReadPointer(1) : nullptr};
+
     for (int i = 0; i < numSamples; ++i) {
       float mSum = 0.0f;
-      for (int ch = 0; ch < mainCh; ++ch)
+      if (mainPtrs[0] != nullptr)
+        mSum += mainPtrs[0][i];
+      if (mainPtrs[1] != nullptr)
+        mSum += mainPtrs[1][i];
+      for (int ch = 2; ch < mainCh; ++ch)
         mSum += mainBuffer.getSample(ch, i);
 
-      const float bassMono = mainCh > 0 ? mSum / (float)mainCh : 0.0f;
-      statsOut.bassEnergySum += (double)bassMono * (double)bassMono;
+      const float bassMono = mSum * mainNorm;
+      statsOut.bassEnergySum += (float)(bassMono * bassMono);
       statsOut.bassPeak = juce::jmax(statsOut.bassPeak, std::abs(bassMono));
     }
   }
@@ -1109,10 +1161,10 @@ void KickLockAudioProcessor::processObservationCapture(
 void KickLockAudioProcessor::updateActivityAndSignalState(
     bool hasSidechain, const BlockObservationStats &stats,
     int numSamples) noexcept {
-  const double safeCount = (double)juce::jmax(1, numSamples);
-  const float blockBassRms = (float)std::sqrt(stats.bassEnergySum / safeCount);
+  const float safeCount = (float)juce::jmax(1, numSamples);
+  const float blockBassRms = std::sqrt(stats.bassEnergySum / safeCount);
   const float blockKickRms =
-      hasSidechain ? (float)std::sqrt(stats.kickEnergySum / safeCount) : 0.0f;
+      hasSidechain ? std::sqrt(stats.kickEnergySum / safeCount) : 0.0f;
   bassSignalRms.store(blockBassRms);
   kickSignalRms.store(blockKickRms);
 
@@ -1183,7 +1235,10 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState(
       0.80f * alignedKickLow + 0.20f * meteredSidechainMono;
   const bool transientDetected = transientDetector.processSample(triggerKick);
 
-  processedMultiBandMeter.pushSample(processedBassLow, alignedKickLow);
+  if (++processedMeterDecimationCounter >= meterDecimationFactor) {
+    processedMeterDecimationCounter = 0;
+    processedMultiBandMeter.pushSample(processedBassLow, alignedKickLow);
+  }
   hitCapture.pushSample(mainMono, meteredSidechainMono, transientDetected);
   transientPunchMeter.pushSample(alignedKickLow, processedBassLow,
                                  transientDetected);
@@ -1197,7 +1252,13 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState(
     scopeDecimationCounter = 0;
     scopeFifo.pushSample(mainMono, meteredSidechainMono);
   }
-  spectrumFifo.pushSample(mainMono, meteredSidechainMono);
+
+  if (spectrumCaptureEnabled.load(std::memory_order_relaxed)) {
+    if (++spectrumDecimationCounter >= spectrumDecimationFactor) {
+      spectrumDecimationCounter = 0;
+      spectrumFifo.pushSample(mainMono, meteredSidechainMono);
+    }
+  }
 }
 
 void KickLockAudioProcessor::processBlockBypassed(
@@ -1224,8 +1285,11 @@ void KickLockAudioProcessor::processBlockBypassed(
   // last active (the JUCE default on a fresh instance), skewing the analysis.
   const float crossoverHz =
       crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
-  rawBassLowpass.setCutoffFrequency(crossoverHz);
-  rawKickLowpass.setCutoffFrequency(crossoverHz);
+  if (std::abs(crossoverHz - lastPublishedCrossoverHz) > 0.01f) {
+    rawBassLowpass.setCutoffFrequency(crossoverHz);
+    rawKickLowpass.setCutoffFrequency(crossoverHz);
+    lastPublishedCrossoverHz = crossoverHz;
+  }
 
   processObservationCapture(mainBuffer, sidechainBuffer, hasSidechain,
                             numSamples, observationStats);
@@ -1238,12 +1302,21 @@ void KickLockAudioProcessor::processBlockBypassed(
   const auto fixedDelay = (float)getLatencySamples();
   const int sidechainChannels = sidechainBuffer.getNumChannels();
 
+  float* mainWrite[2] = {
+      numChannels > 0 ? mainBuffer.getWritePointer(0) : nullptr,
+      numChannels > 1 ? mainBuffer.getWritePointer(1) : nullptr
+  };
+  const float* scRead[2] = {
+      sidechainChannels > 0 ? sidechainBuffer.getReadPointer(0) : nullptr,
+      sidechainChannels > 1 ? sidechainBuffer.getReadPointer(1) : nullptr
+  };
+
   for (int i = 0; i < numSamples; ++i) {
     float mainSum = 0.0f;
     for (int ch = 0; ch < numChannels; ++ch) {
-      bypassDelay.pushSample(ch, mainBuffer.getSample(ch, i));
+      bypassDelay.pushSample(ch, mainWrite[ch][i]);
       const float out = bypassDelay.popSample(ch, fixedDelay);
-      mainBuffer.setSample(ch, i, out);
+      mainWrite[ch][i] = out;
       mainSum += out;
     }
 
@@ -1257,7 +1330,9 @@ void KickLockAudioProcessor::processBlockBypassed(
           numChannels > 0 ? mainSum / (float)numChannels : 0.0f;
 
       float sidechainSum = 0.0f;
-      for (int ch = 0; ch < sidechainChannels; ++ch)
+      if (scRead[0] != nullptr) sidechainSum += scRead[0][i];
+      if (scRead[1] != nullptr) sidechainSum += scRead[1][i];
+      for (int ch = 2; ch < sidechainChannels; ++ch)
         sidechainSum += sidechainBuffer.getSample(ch, i);
       const float sidechainMono = sidechainChannels > 0
                                       ? sidechainSum / (float)sidechainChannels
@@ -1350,18 +1425,37 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   if (hasSidechain) {
     const int mainChannels = mainBuffer.getNumChannels();
     const int sidechainChannels = sidechainBuffer.getNumChannels();
+    const float mainNorm = mainChannels > 0 ? 1.0f / (float)mainChannels : 0.0f;
+    const float scNorm =
+        sidechainChannels > 0 ? 1.0f / (float)sidechainChannels : 0.0f;
+    const float* mainPtrs[2] = {
+        mainChannels > 0 ? mainBuffer.getReadPointer(0) : nullptr,
+        mainChannels > 1 ? mainBuffer.getReadPointer(1) : nullptr};
+    const float* scPtrs[2] = {
+        sidechainChannels > 0 ? sidechainBuffer.getReadPointer(0) : nullptr,
+        sidechainChannels > 1 ? sidechainBuffer.getReadPointer(1) : nullptr};
+        
+    float* scMonoWrite = sidechainMonoScratch.getWritePointer(0);
+
     for (int i = 0; i < numSamples; ++i) {
       float mSum = 0.0f;
-      for (int ch = 0; ch < mainChannels; ++ch)
+      if (mainPtrs[0] != nullptr)
+        mSum += mainPtrs[0][i];
+      if (mainPtrs[1] != nullptr)
+        mSum += mainPtrs[1][i];
+      for (int ch = 2; ch < mainChannels; ++ch)
         mSum += mainBuffer.getSample(ch, i);
-      const float mainMono =
-          mainChannels > 0 ? mSum / (float)mainChannels : 0.0f;
+      const float mainMono = mSum * mainNorm;
 
       float sSum = 0.0f;
-      for (int ch = 0; ch < sidechainChannels; ++ch)
+      if (scPtrs[0] != nullptr)
+        sSum += scPtrs[0][i];
+      if (scPtrs[1] != nullptr)
+        sSum += scPtrs[1][i];
+      for (int ch = 2; ch < sidechainChannels; ++ch)
         sSum += sidechainBuffer.getSample(ch, i);
-      const float sidechainMono =
-          sidechainChannels > 0 ? sSum / (float)sidechainChannels : 0.0f;
+      const float sidechainMono = sSum * scNorm;
+      scMonoWrite[i] = sidechainMono;
 
       if (++rawScopeDecimationCounter >= scopeDecimationFactor) {
         rawScopeDecimationCounter = 0;
@@ -1426,11 +1520,14 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   coreParams.allpassQ = allpassQ;
   coreParams.allpassStages = allpassStages;
 
-  rawBassLowpass.setCutoffFrequency(coreParams.crossoverHz);
-  rawKickLowpass.setCutoffFrequency(coreParams.crossoverHz);
-  processedBassLowpass.setCutoffFrequency(coreParams.crossoverHz);
-  processedKickLowpass.setCutoffFrequency(coreParams.crossoverHz);
-  analysisBassCrossoverSim.setCutoffFrequency(coreParams.crossoverHz);
+  if (std::abs(coreParams.crossoverHz - lastPublishedCrossoverHz) > 0.01f) {
+    rawBassLowpass.setCutoffFrequency(coreParams.crossoverHz);
+    rawKickLowpass.setCutoffFrequency(coreParams.crossoverHz);
+    processedBassLowpass.setCutoffFrequency(coreParams.crossoverHz);
+    processedKickLowpass.setCutoffFrequency(coreParams.crossoverHz);
+    analysisBassCrossoverSim.setCutoffFrequency(coreParams.crossoverHz);
+    lastPublishedCrossoverHz = coreParams.crossoverHz;
+  }
 
   // Feed analysis with analysisBuffer instead of mainBuffer
   processObservationCapture(analysisBuffer, sidechainBuffer, hasSidechain,
@@ -1444,32 +1541,40 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
 
   if (hasSidechain) {
     const int mainChannels = mainBuffer.getNumChannels();
-    const int sidechainChannels = sidechainBuffer.getNumChannels();
+    const float mainNorm = mainChannels > 0 ? 1.0f / (float)mainChannels : 0.0f;
+    const float latencySamplesF = (float)getLatencySamples();
+    const bool captureSpectrum =
+        spectrumCaptureEnabled.load(std::memory_order_relaxed);
+    const float* mainPtrs[2] = {
+        mainChannels > 0 ? mainBuffer.getReadPointer(0) : nullptr,
+        mainChannels > 1 ? mainBuffer.getReadPointer(1) : nullptr};
+    const float* scMonoRead = sidechainMonoScratch.getReadPointer(0);
 
     for (int i = 0; i < numSamples; ++i) {
       float mainSum = 0.0f;
-      for (int ch = 0; ch < mainChannels; ++ch)
+      if (mainPtrs[0] != nullptr)
+        mainSum += mainPtrs[0][i];
+      if (mainPtrs[1] != nullptr)
+        mainSum += mainPtrs[1][i];
+      for (int ch = 2; ch < mainChannels; ++ch)
         mainSum += mainBuffer.getSample(ch, i);
-      const float mainMono =
-          mainChannels > 0 ? mainSum / (float)mainChannels : 0.0f;
+      const float mainMono = mainSum * mainNorm;
 
-      float sidechainSum = 0.0f;
-      for (int ch = 0; ch < sidechainChannels; ++ch)
-        sidechainSum += sidechainBuffer.getSample(ch, i);
-      const float sidechainMono = sidechainChannels > 0
-                                      ? sidechainSum / (float)sidechainChannels
-                                      : 0.0f;
+      const float sidechainMono = scMonoRead[i];
 
       processedMeterSidechainDelay.pushSample(0, sidechainMono);
       const float meteredSidechainMono =
-          processedMeterSidechainDelay.popSample(0, (float)getLatencySamples());
+          processedMeterSidechainDelay.popSample(0, latencySamplesF);
 
       const float processedBassLow =
           processedBassLowpass.processSample(0, mainMono);
       const float alignedKickLow =
           processedKickLowpass.processSample(0, meteredSidechainMono);
 
-      processedMultiBandMeter.pushSample(processedBassLow, alignedKickLow);
+      if (++processedMeterDecimationCounter >= meterDecimationFactor) {
+        processedMeterDecimationCounter = 0;
+        processedMultiBandMeter.pushSample(processedBassLow, alignedKickLow);
+      }
 
       // Drive hitCapture and transientPunchMeter from the filtered/processed
       // sidechain so broadband noise does not cause false retriggers (808 tail
@@ -1487,7 +1592,13 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
         scopeDecimationCounter = 0;
         scopeFifo.pushSample(mainMono, meteredSidechainMono);
       }
-      spectrumFifo.pushSample(mainMono, meteredSidechainMono);
+
+      if (captureSpectrum) {
+        if (++spectrumDecimationCounter >= spectrumDecimationFactor) {
+          spectrumDecimationCounter = 0;
+          spectrumFifo.pushSample(mainMono, meteredSidechainMono);
+        }
+      }
     }
   }
 
@@ -1829,24 +1940,15 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
     const bool hasLegacyRotatorFreq =
         restoredState.hasProperty(juce::Identifier("rotatorFreq"));
 
-    apvts.replaceState(restoredState);
-
-    auto migrateLegacyToCanonical = [this, &restoredState](
+    auto migrateLegacyToCanonical = [&restoredState](
                                         bool hasCanonical, bool hasLegacy,
                                         const char *canonicalId,
                                         const char *legacyId) {
       if (hasCanonical || !hasLegacy)
         return;
 
-      auto *parameter = apvts.getParameter(canonicalId);
-      if (parameter == nullptr)
-        return;
-
-      const auto value = (float)restoredState.getProperty(
-          juce::Identifier(legacyId),
-          parameter->convertFrom0to1(parameter->getValue()));
-      parameter->setValueNotifyingHost(parameter->convertTo0to1(value));
-      apvts.state.setProperty(juce::Identifier(canonicalId), value, nullptr);
+      const auto value = restoredState.getProperty(juce::Identifier(legacyId));
+      restoredState.setProperty(juce::Identifier(canonicalId), value, nullptr);
     };
 
     migrateLegacyToCanonical(hasDelayMs, hasLegacyDelayMs, "delay_ms",
@@ -1858,22 +1960,20 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
     migrateLegacyToCanonical(hasAllpassFreq, hasLegacyRotatorFreq,
                              "allpass_freq", "rotatorFreq");
 
-    auto snapBoolParameter = [this, &restoredState](const char *id) {
-      auto *parameter = apvts.getParameter(id);
-      if (parameter == nullptr)
-        return;
-
-      const auto restoredValue =
-          (float)restoredState.getProperty(id, parameter->getValue());
-      const float snappedValue = restoredValue >= 0.5f ? 1.0f : 0.0f;
-      parameter->setValueNotifyingHost(parameter->convertTo0to1(snappedValue));
-      apvts.state.setProperty(id, snappedValue, nullptr);
+    auto snapBoolParameter = [&restoredState](const char *id) {
+      if (restoredState.hasProperty(id)) {
+        const float restoredValue = (float)restoredState.getProperty(id);
+        const float snappedValue = restoredValue >= 0.5f ? 1.0f : 0.0f;
+        restoredState.setProperty(id, snappedValue, nullptr);
+      }
     };
 
     snapBoolParameter("polarity_invert");
     snapBoolParameter("polarityInvert");
     snapBoolParameter("allpass_enable");
     snapBoolParameter("phaseFilterEnabled");
+
+    apvts.replaceState(restoredState);
 
     markRestoredParameterSources(
         hasDelayMs || hasLegacyDelayMs, hasLegacyDelayMs,
@@ -1927,6 +2027,12 @@ KickLockAudioProcessor::computeAndPublishFix(const std::vector<float> &bass,
   // a background worker and the message thread never race on them.
   {
     const std::lock_guard<std::mutex> lock(resultMutex);
+    
+    // Map the internal offline scores to the live meter scale for display
+    result.displayBeforeMatchPercent = liveLowEndMatchPercent.load();
+    const float improvement = result.predictedAfterMatchPercent - result.beforeMatchPercent;
+    result.displayAfterMatchPercent = juce::jlimit(0.0f, 100.0f, result.displayBeforeMatchPercent + improvement);
+    
     latestFixResult = result;
     lastAnalyzedBassWindow = std::move(analyzedBass);
     lastAnalyzedKickWindow = std::move(analyzedKick);

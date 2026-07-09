@@ -18,6 +18,9 @@ public:
         sampleRate = newSampleRate;
         windowSize = windowSizeSamples > 0 ? windowSizeSamples : 1;
 
+        windowAlpha = 1.0 - std::exp(-1.0 / (double)windowSize);
+        windowBeta = 1.0 - windowAlpha;
+
         updateSmoothingCoefficient();
         reset();
     }
@@ -40,8 +43,8 @@ public:
         if (windowSize <= 0)
             return;
 
-        const double alpha = 1.0 - std::exp(-1.0 / (double)windowSize);
-        const double beta = 1.0 - alpha;
+        const double alpha = windowAlpha;
+        const double beta = windowBeta;
         const double da = (double) a;
         const double db = (double) b;
 
@@ -112,6 +115,8 @@ private:
 
     double sampleRate = 0.0;
     int windowSize = 1;
+    double windowAlpha = 1.0;
+    double windowBeta = 0.0;
 
     int numValid = 0;
 

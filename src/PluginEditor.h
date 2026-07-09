@@ -24,14 +24,19 @@ public:
     void setValues (float punchDbIn, bool validIn, bool hasSidechainIn, bool hasReferenceIn, float referenceDbIn,
                     float kickPeakIn, float sumPeakIn) noexcept
     {
-        punchDb = punchDbIn;
-        valid = validIn;
-        hasSidechain = hasSidechainIn;
-        hasReference = hasReferenceIn;
-        referenceDb = referenceDbIn;
-        kickPeak = kickPeakIn;
-        sumPeak = sumPeakIn;
-        repaint();
+        if (punchDb != punchDbIn || valid != validIn || hasSidechain != hasSidechainIn ||
+            hasReference != hasReferenceIn || referenceDb != referenceDbIn ||
+            kickPeak != kickPeakIn || sumPeak != sumPeakIn)
+        {
+            punchDb = punchDbIn;
+            valid = validIn;
+            hasSidechain = hasSidechainIn;
+            hasReference = hasReferenceIn;
+            referenceDb = referenceDbIn;
+            kickPeak = kickPeakIn;
+            sumPeak = sumPeakIn;
+            repaint();
+        }
     }
 
     void paint (juce::Graphics&) override;

@@ -25,6 +25,7 @@ public:
 
 private:
     void calculateSpectrum();
+    void rebuildBinCache();
     void drawWaveLegend(juce::Graphics& g, juce::Rectangle<float> bounds) const;
 
     ScopeFifo& spectrumFifo;
@@ -48,6 +49,16 @@ private:
 
     std::array<float, historyLength / 2> spectrumMain {};
     std::array<float, historyLength / 2> spectrumSide {};
+
+    struct PixelBinCache {
+        float x;
+        float binStart;
+        float binEnd;
+    };
+    std::vector<PixelBinCache> binCache;
+    double lastCacheSampleRate = 0.0;
+    float lastCacheWidth = 0.0f;
+    float lastCacheX = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrumAnalyzer)
 };
