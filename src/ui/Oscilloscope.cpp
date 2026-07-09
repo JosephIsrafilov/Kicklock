@@ -120,7 +120,7 @@ namespace
 
             auto drawLabel = [&](float yPos, bool isTop) {
                 juce::Rectangle<int> textRect ((int) bounds.getRight() - 34, 
-                                               (int) std::round (yPos) + (isTop ? -14 : 2), 
+                                               (int) std::round (yPos) - 6, 
                                                30, 12);
                 
                 // Optional: Draw a faint dark pill behind the text for maximum readability over waveforms

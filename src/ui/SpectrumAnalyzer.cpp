@@ -91,11 +91,13 @@ void SpectrumAnalyzer::calculateSpectrum()
     const float minDb = -144.0f;
     for (int i = 0; i < historyLength; ++i)
     {
-        float magM = fftScratchMain[(size_t)i] / (float)historyLength;
+        // Multiply by 4 to compensate for Hann window coherent gain (0.5) 
+        // and real-to-complex FFT energy split (0.5)
+        float magM = (fftScratchMain[(size_t)i] / (float)historyLength) * 4.0f;
         float dbM = juce::Decibels::gainToDecibels (magM, minDb);
         spectrumMain[(size_t)i] += (dbM - spectrumMain[(size_t)i]) * smoothingFactor;
         
-        float magS = fftScratchSide[(size_t)i] / (float)historyLength;
+        float magS = (fftScratchSide[(size_t)i] / (float)historyLength) * 4.0f;
         float dbS = juce::Decibels::gainToDecibels (magS, minDb);
         spectrumSide[(size_t)i] += (dbS - spectrumSide[(size_t)i]) * smoothingFactor;
     }
@@ -120,6 +122,8 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
     auto titleArea = plotBounds.removeFromTop (16.0f).toNearestInt();
     
+    titleArea.removeFromRight (100); // Leave space for wave legend
+    
     // Position the combobox in the top right of the plot area
     juce::Rectangle<int> comboBounds = titleArea.removeFromRight(70).withSizeKeepingCentre(70, 16);
     speedComboBox.setBounds(comboBounds);
@@ -137,7 +141,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                 
     const float minFreq = 20.0f;
     const float maxFreq = 20000.0f;
-    const float minDb = -60.0f;
+    const float minDb = -84.0f;
     const float maxDb = 0.0f;
     
     // Draw vertical/horizontal grid lines (UNDER the curves)
@@ -152,7 +156,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     }
     
     // dB grid lines
-    const float dbs[] = { -12.0f, -24.0f, -36.0f, -48.0f };
+    const float dbs[] = { -12.0f, -24.0f, -36.0f, -48.0f, -60.0f, -72.0f };
     for (float db : dbs)
     {
         float y = plotBounds.getBottom() - (db - minDb) / (maxDb - minDb) * plotBounds.getHeight();
@@ -249,7 +253,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
         float y = plotBounds.getBottom() - (db - minDb) / (maxDb - minDb) * plotBounds.getHeight();
         
         g.setColour (juce::Colours::white.withAlpha (0.35f));
-        g.drawText (juce::String (db, 0) + " dB", (int) plotBounds.getX() + 4, (int) std::round (y) - 12, 50, 12, juce::Justification::left, false);
+        g.drawText (juce::String (db, 0) + " dB", (int) plotBounds.getX() + 4, (int) std::round (y) - 6, 50, 12, juce::Justification::left, false);
     }
     
     // Tooltip/Crosshair (updated to use plotBounds instead of full bounds)
@@ -319,8 +323,8 @@ void SpectrumAnalyzer::rebuildBinCache()
         float freqStart = minFreq * std::pow (maxFreq / minFreq, (x - 0.5f - plotBounds.getX()) / plotBounds.getWidth());
         float freqEnd   = minFreq * std::pow (maxFreq / minFreq, (x + 0.5f - plotBounds.getX()) / plotBounds.getWidth());
         
-        float binStart = freqStart * (float)(historyLength * 2) / (float)sampleRate;
-        float binEnd   = freqEnd   * (float)(historyLength * 2) / (float)sampleRate;
+        float binStart = freqStart * (float)historyLength / (float)sampleRate;
+        float binEnd   = freqEnd   * (float)historyLength / (float)sampleRate;
         
         binCache.push_back ({x, binStart, binEnd});
     }
