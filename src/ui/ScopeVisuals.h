@@ -880,3 +880,24 @@ inline TriggeredSweepSource triggeredSweepSourceFor (bool hasCapturedSweep) noex
     return hasCapturedSweep ? TriggeredSweepSource::HitCaptureSweep
                              : TriggeredSweepSource::None;
 }
+
+struct TriggeredKickSource
+{
+    const float* data;
+    int fillCount;
+    uint64_t hitId;
+};
+
+inline TriggeredKickSource selectTriggeredKickSource (bool kickReferenceValid,
+                                                      const float* kickReferenceData,
+                                                      uint64_t kickReferenceHitId,
+                                                      const float* sweepKickData,
+                                                      int sweepFill,
+                                                      int sweepWindowSamples,
+                                                      uint64_t sweepHitId) noexcept
+{
+    if (kickReferenceValid)
+        return { kickReferenceData, sweepWindowSamples, kickReferenceHitId };
+
+    return { sweepKickData, sweepFill, sweepHitId };
+}

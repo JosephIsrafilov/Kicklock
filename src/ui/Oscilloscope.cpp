@@ -574,6 +574,9 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     {
         g.setColour (labelColour);
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
+    {
+        g.setColour (labelColour);
+        g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
         g.drawText (fifo.getSideChannels() > 0 ? triggeredScopeEmptyText (kickReferenceState)
                                                : "WAITING FOR SIDECHAIN",
                     bounds.withSizeKeepingCentre (220.0f, 18.0f).toNearestInt(),
@@ -583,23 +586,16 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
 
     const float* bassData = sweepBass.data();
     const int bassFillCount = sweepFill;
-    const float* kickData = sweepKick.data();
-    const int kickFillCount = sweepFill;
+    const auto kickSource = selectTriggeredKickSource (kickReferenceValid,
+                                                       kickReference.data(), kickReferenceHitId,
+                                                       sweepKick.data(), sweepFill,
+                                                       sweepWindowSamples, sweepHitId);
+    const float* kickData = kickSource.data;
+    const int kickFillCount = kickSource.fillCount;
     const int preRoll = sweepTriggerSample;
     const double rate = sampleRate;
 
     const int triggerSample = juce::jlimit (0, n - 1, preRoll);
-    const bool referenceCompatible = true;
-
-    if (! referenceCompatible)
-    {
-        g.setColour (labelColour);
-        g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-        g.drawText ("WAITING FOR COMPATIBLE TRIGGER FRAME",
-                    bounds.withSizeKeepingCentre (280.0f, 18.0f).toNearestInt(),
-                    juce::Justification::centred);
-        return;
-    }
 
     // Time zoom: select the visible slice of the capture window, keeping the
     // visual 0 ms line at a fixed fractional x. The ms axis uses the source's own
@@ -686,7 +682,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         currentKickKey.timeZoom = timeZoom;
         currentKickKey.boundsW = (int) bounds.getWidth();
         currentKickKey.boundsH = (int) bounds.getHeight();
-        currentKickKey.hitId = sweepHitId;
+        currentKickKey.hitId = kickSource.hitId;
 
         if (kickRefKey != currentKickKey || kickRefCache.isNull())
         {

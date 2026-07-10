@@ -695,6 +695,21 @@ public:
             expect (scopePendingRelockCaptureIsReady (preRoll + sixtyMs,
                                                       preRoll, kSampleRate, validPeak));
         }
+        beginTest ("Triggered Kick source selection uses locked reference when valid");
+        {
+            float sweepData[1] = { 0.1f };
+            float refData[1]   = { 0.9f };
+
+            auto noRef = selectTriggeredKickSource (false, refData, 100, sweepData, 10, 50, 101);
+            expect (noRef.data == sweepData);
+            expectEquals (noRef.fillCount, 10);
+            expectEquals ((int) noRef.hitId, 101);
+
+            auto validRef = selectTriggeredKickSource (true, refData, 100, sweepData, 10, 50, 101);
+            expect (validRef.data == refData);
+            expectEquals (validRef.fillCount, 50);
+            expectEquals ((int) validRef.hitId, 100);
+        }
     }
 };
 
