@@ -277,13 +277,55 @@ public:
             expectEquals (shifted.bassIndex, wrapHistoryIndex (unshifted.bassIndex + 6, 2048));
         }
 
-        beginTest ("Triggered scope is the default first view mode");
+        beginTest ("Persisted scope-mode indices stay compatible with existing presets");
         {
             expectEquals ((int) scopeViewModeFromChoiceIndex (0), (int) ScopeViewMode::Triggered);
             expectEquals ((int) scopeViewModeFromChoiceIndex (1), (int) ScopeViewMode::FreeRun);
             expectEquals ((int) scopeViewModeFromChoiceIndex (2), (int) ScopeViewMode::PhaseDelta);
             expectEquals ((int) scopeViewModeFromChoiceIndex (3), (int) ScopeViewMode::Spectrum);
             expectEquals ((int) scopeViewModeFromChoiceIndex (4), (int) ScopeViewMode::Separate);
+            expectEquals (scopeViewModeToChoiceIndex (ScopeViewMode::Spectrum), 3);
+            expectEquals (scopeViewModeToChoiceIndex (ScopeViewMode::Separate), 4);
+        }
+
+        beginTest ("Visible scope-mode menu puts Spectrum last");
+        {
+            expectEquals ((int) scopeViewModeFromUiIndex (0), (int) ScopeViewMode::Triggered);
+            expectEquals ((int) scopeViewModeFromUiIndex (1), (int) ScopeViewMode::FreeRun);
+            expectEquals ((int) scopeViewModeFromUiIndex (2), (int) ScopeViewMode::PhaseDelta);
+            expectEquals ((int) scopeViewModeFromUiIndex (3), (int) ScopeViewMode::Separate);
+            expectEquals ((int) scopeViewModeFromUiIndex (4), (int) ScopeViewMode::Spectrum);
+            expectEquals ((int) scopeViewModeFromUiIndex (-1), (int) ScopeViewMode::Triggered);
+            expectEquals ((int) scopeViewModeFromUiIndex (99), (int) ScopeViewMode::Triggered);
+
+            for (const auto mode : { ScopeViewMode::Triggered, ScopeViewMode::FreeRun,
+                                     ScopeViewMode::PhaseDelta, ScopeViewMode::Separate,
+                                     ScopeViewMode::Spectrum })
+                expectEquals ((int) scopeViewModeFromUiIndex (uiIndexFromScopeViewMode (mode)), (int) mode);
+
+            expect (scopeFullModeShowsGrid (ScopeViewMode::Triggered));
+            expect (scopeFullModeShowsGrid (ScopeViewMode::FreeRun));
+            expect (scopeFullModeShowsGrid (ScopeViewMode::PhaseDelta));
+            expect (scopeFullModeShowsGrid (ScopeViewMode::Separate));
+            expect (! scopeFullModeShowsGrid (ScopeViewMode::Spectrum));
+        }
+
+        beginTest ("Scope zoom helpers preserve direction, limits, and Spectrum gating");
+        {
+            expectWithinAbsoluteError (scopeZoomTargetFromWheelDelta (2.0f, 1.0f, 1.0f, 16.0f),
+                                       2.6f, 1.0e-6f);
+            expectWithinAbsoluteError (scopeZoomTargetFromWheelDelta (2.0f, -1.0f, 1.0f, 16.0f),
+                                       1.4f, 1.0e-6f);
+            expectWithinAbsoluteError (scopeZoomTargetFromWheelDelta (1.0f, -1.0f, 1.0f, 16.0f),
+                                       1.0f, 1.0e-6f);
+            expectWithinAbsoluteError (scopeZoomTargetFromWheelDelta (16.0f, 1.0f, 1.0f, 16.0f),
+                                       16.0f, 1.0e-6f);
+            expectWithinAbsoluteError (scopeZoomTargetFromMagnify (2.0f, 1.25f, 1.0f, 16.0f),
+                                       2.5f, 1.0e-6f);
+            expectWithinAbsoluteError (scopeZoomTargetFromMagnify (2.0f, 0.5f, 1.0f, 16.0f),
+                                       1.0f, 1.0e-6f);
+            expect (scopeModeAcceptsZoom (ScopeViewMode::Triggered));
+            expect (! scopeModeAcceptsZoom (ScopeViewMode::Spectrum));
         }
 
         beginTest ("Triggered scope drag maps pixels to delay nudges");
@@ -330,6 +372,31 @@ public:
             expectEquals (effectiveVisualOffsetSamples (ScopeViewMode::Separate, savedOffset), savedOffset);
             expectEquals (effectiveVisualOffsetSamples (ScopeViewMode::PhaseDelta, savedOffset), savedOffset);
             expectEquals (savedOffset, -256);
+        }
+
+        beginTest ("Separate cursor badges identify the selected lane only");
+        {
+            expectEquals (juce::String (formatScopeHoverDbBadge (ScopeViewMode::Separate, 0, -6.0f)),
+                          juce::String ("BASS -6.0 dB"));
+            expectEquals (juce::String (formatScopeHoverDbBadge (ScopeViewMode::Separate, 1, 3.0f)),
+                          juce::String ("KICK +3.0 dB"));
+            expectEquals (juce::String (formatScopeHoverDbBadge (ScopeViewMode::Separate, 0, -144.0f)),
+                          juce::String ("BASS -inf dB"));
+            expectEquals (juce::String (formatScopeHoverDbBadge (ScopeViewMode::Triggered, 0, -6.0f)),
+                          juce::String ("-6.0 dB"));
+        }
+
+        beginTest ("Spectrum display arrays start at the analyzer floor");
+        {
+            std::array<float, 8> spectrumMain {};
+            std::array<float, 8> spectrumSide {};
+            spectrumMain.fill (SpectrumAnalysis::minimumDb);
+            spectrumSide.fill (SpectrumAnalysis::minimumDb);
+
+            for (const auto value : spectrumMain)
+                expectWithinAbsoluteError (value, SpectrumAnalysis::minimumDb, 1.0e-6f);
+            for (const auto value : spectrumSide)
+                expectWithinAbsoluteError (value, SpectrumAnalysis::minimumDb, 1.0e-6f);
         }
 
         auto checkHighFrequencyBins = [this] (double sampleRate,
@@ -520,18 +587,18 @@ public:
                           juce::String ("WAITING FOR KICK"));
         }
 
-        beginTest ("Auto re-lock is edge-triggered and stable at steady state");
+        beginTest ("Auto re-lock only arms a new Triggered-mode reference");
         {
-            expect (shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, false, false));
+            expect (shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, true, true));
             expect (shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, false, true));
-            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, false, false));
+            // Any non-Triggered mode is represented by triggeredMode == false.
+            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, true, false)); // Separate
+            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, true, false)); // Free-run
+            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, true, false)); // Phase Delta
+            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, true, false)); // Spectrum
+            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, true, true));
             expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, false, false, true));
             expect (! shouldAutoRelockKickReference (KickReferenceState::RelockPending, false, true, false, true));
-
-            const bool firstEdge = shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, false, false);
-            const bool steadyState = shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, false, false);
-            expect (firstEdge);
-            expect (! steadyState);
         }
 
         beginTest ("Triggered rendering is capped to screen-resolution points");

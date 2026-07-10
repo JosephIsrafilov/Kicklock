@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 enum class ScopeViewMode
 {
@@ -50,6 +52,9 @@ struct DisplayHistoryIndices
     int kickIndex = 0;
 };
 
+// These indices are persisted by the APVTS choice parameter. Keep them stable
+// so existing presets that saved Spectrum as 3 and Separate as 4 continue to
+// restore the same mode even though the visible menu uses a different order.
 inline ScopeViewMode scopeViewModeFromChoiceIndex (int index) noexcept
 {
     switch (index)
@@ -60,6 +65,82 @@ inline ScopeViewMode scopeViewModeFromChoiceIndex (int index) noexcept
         case 4:  return ScopeViewMode::Separate;
         default: return ScopeViewMode::Triggered;
     }
+}
+
+inline int scopeViewModeToChoiceIndex (ScopeViewMode mode) noexcept
+{
+    switch (mode)
+    {
+        case ScopeViewMode::FreeRun:    return 1;
+        case ScopeViewMode::PhaseDelta: return 2;
+        case ScopeViewMode::Spectrum:   return 3;
+        case ScopeViewMode::Separate:   return 4;
+        default:                         return 0;
+    }
+}
+
+// The menu deliberately differs from the persisted choice order: Spectrum is
+// shown last without changing the serialized APVTS identifiers above.
+inline ScopeViewMode scopeViewModeFromUiIndex (int index) noexcept
+{
+    switch (index)
+    {
+        case 1:  return ScopeViewMode::FreeRun;
+        case 2:  return ScopeViewMode::PhaseDelta;
+        case 3:  return ScopeViewMode::Separate;
+        case 4:  return ScopeViewMode::Spectrum;
+        default: return ScopeViewMode::Triggered;
+    }
+}
+
+inline int uiIndexFromScopeViewMode (ScopeViewMode mode) noexcept
+{
+    switch (mode)
+    {
+        case ScopeViewMode::FreeRun:    return 1;
+        case ScopeViewMode::PhaseDelta: return 2;
+        case ScopeViewMode::Separate:   return 3;
+        case ScopeViewMode::Spectrum:   return 4;
+        default:                         return 0;
+    }
+}
+
+inline bool scopeFullModeShowsGrid (ScopeViewMode mode) noexcept
+{
+    return mode != ScopeViewMode::Spectrum;
+}
+
+inline bool scopeModeAcceptsZoom (ScopeViewMode mode) noexcept
+{
+    return mode != ScopeViewMode::Spectrum;
+}
+
+inline float scopeZoomTargetFromWheelDelta (float currentTarget, float wheelDelta,
+                                            float minimum, float maximum) noexcept
+{
+    const float step = 1.0f + std::clamp (wheelDelta, -0.5f, 0.5f) * 0.6f;
+    return std::clamp (currentTarget * step, minimum, maximum);
+}
+
+inline float scopeZoomTargetFromMagnify (float currentTarget, float scaleFactor,
+                                         float minimum, float maximum) noexcept
+{
+    return std::clamp (currentTarget * scaleFactor, minimum, maximum);
+}
+
+inline std::string formatScopeHoverDbBadge (ScopeViewMode mode, int lane, float db)
+{
+    std::string text;
+    if (mode == ScopeViewMode::Separate)
+        text = lane == 0 ? "BASS " : "KICK ";
+
+    if (db <= -144.0f)
+        return text + "-inf dB";
+
+    char value[32] {};
+    std::snprintf (value, sizeof (value), "%+.1f dB", db);
+    text += value;
+    return text;
 }
 
 inline float scopeDragPixelsToDelayDeltaMs (float pixelDelta, bool fine) noexcept
@@ -412,11 +493,12 @@ inline bool shouldAutoRelockKickReference (KickReferenceState state,
                                            bool wasTriggeredMode,
                                            bool triggeredMode) noexcept
 {
-    if (state == KickReferenceState::RelockPending || ! sidechainAvailable)
+    if (state == KickReferenceState::RelockPending)
         return false;
 
-    return (sidechainAvailable && ! wasSidechainAvailable)
-        || (triggeredMode && ! wasTriggeredMode);
+    return triggeredMode
+        && sidechainAvailable
+        && (! wasSidechainAvailable || ! wasTriggeredMode);
 }
 
 inline const char* triggeredScopeEmptyText (KickReferenceState state) noexcept

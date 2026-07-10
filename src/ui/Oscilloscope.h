@@ -50,6 +50,7 @@ public:
         if (visualOffsetSamples != offset) {
             visualOffsetSamples = offset;
             visibleBuffersDirty = true;
+            repaint();
         }
     }
 

@@ -197,7 +197,6 @@ private:
     std::unique_ptr<ButtonAttachment> crossoverEnableAttachment;
     std::unique_ptr<SliderAttachment> crossoverAttachment;
     std::unique_ptr<ComboAttachment>  gridAttachment;
-    std::unique_ptr<ComboAttachment>  viewAttachment;
     std::unique_ptr<ComboAttachment>  delayInterpAttachment;
     std::unique_ptr<ComboAttachment>  phaseStagesAttachment;
 

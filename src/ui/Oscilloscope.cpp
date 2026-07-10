@@ -362,6 +362,9 @@ void Oscilloscope::vblankCallback()
     {
         const int oldVisible = calculateVisibleScopeSamples (historyLength, sampleRate, decimationFactor,
                                                              timeZoom, gridDivision, tempoAvailable, bpm);
+        const int triggeredSamples = sweepWindowSamples > 1 ? sweepWindowSamples : hitCapture.getWindowSamples();
+        const int triggeredIndex = juce::jlimit (0, juce::jmax (0, triggeredSamples - 1), sweepTriggerSample);
+        const auto oldTriggeredRange = computeTriggeredVisibleRange (triggeredSamples, triggeredIndex, timeZoom);
 
         timeZoom += 0.35f * (targetTimeZoom - timeZoom);
         ampZoom  += 0.35f * (targetAmpZoom  - ampZoom);
@@ -386,10 +389,16 @@ void Oscilloscope::vblankCallback()
         }
         else
         {
-            const int n = sweepWindowSamples > 1 ? sweepWindowSamples : hitCapture.getWindowSamples();
-            const int trigger = juce::jlimit (0, juce::jmax (0, n - 1), sweepTriggerSample);
-            const auto range = computeTriggeredVisibleRange (n, trigger, timeZoom);
-            displayScrollMs = clampTriggeredPanScrollMs (displayScrollMs, n, range.visible, range.first, sampleRate);
+            const auto range = computeTriggeredVisibleRange (triggeredSamples, triggeredIndex, timeZoom);
+            if (isDisplayFrozen() || displayScrollMs > 0.01f)
+            {
+                const float oldMs = samplesToMs (oldTriggeredRange.visible, sampleRate);
+                const float newMs = samplesToMs (range.visible, sampleRate);
+                displayScrollMs = scopeAnchoredZoomScrollMs (displayScrollMs, oldMs, newMs, zoomAnchorFraction);
+            }
+
+            displayScrollMs = clampTriggeredPanScrollMs (displayScrollMs, triggeredSamples,
+                                                          range.visible, range.first, sampleRate);
         }
 
         repaint();
@@ -527,10 +536,7 @@ void Oscilloscope::drawHoverCrosshair (juce::Graphics& g, juce::Rectangle<float>
         const float amplitude = std::abs (crosshairY - midY) / (halfHeight * gain);
         float db = juce::Decibels::gainToDecibels (amplitude, -144.0f);
         
-        if (db <= -144.0f)
-            text = "-inf dB";
-        else
-            text = (db > 0.0f ? "+" : "") + juce::String (db, 1) + " dB";
+        text = juce::String (formatScopeHoverDbBadge (viewMode, lane, db));
             
         g.setColour (crosshairCol);
         g.drawHorizontalLine ((int) std::round (crosshairY), bounds.getX(), bounds.getRight());
@@ -2035,15 +2041,6 @@ void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
 {
     juce::ignoreUnused (e);
 
-    // Universal scope convention: double-click returns to the default view.
-    // The zoom glides back via the timer animation rather than snapping.
-    displayScrollMs = 0.0f;
-    targetTimeZoom = 1.0f;
-    targetAmpZoom = 1.0f;
-
-    if (onZoomChanged != nullptr)
-        onZoomChanged();
-
     if (onToggleCleanMode != nullptr)
         onToggleCleanMode();
 
@@ -2052,6 +2049,9 @@ void Oscilloscope::mouseDoubleClick (const juce::MouseEvent& e)
 
 void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
+    if (! scopeModeAcceptsZoom (viewMode))
+        return;
+
     // Some Windows drivers translate Shift+scroll into a horizontal wheel
     // event (deltaX only), which would make Shift+wheel amplitude zoom go
     // dead — fall back to deltaX as the zoom delta in that case.
@@ -2064,14 +2064,15 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
         // Adjust the TARGET zoom; the timer glides the live value toward it.
         // Remember where the cursor sat so a held/scrolled view zooms around
         // that point instead of the right edge.
-        const float step = 1.0f + juce::jlimit (-0.5f, 0.5f, zoomDelta) * 0.6f;
         zoomAnchorFraction = juce::jlimit (0.0f, 1.0f,
                                            e.position.x / (float) juce::jmax (1, getWidth()));
 
         if (e.mods.isShiftDown())
-            targetAmpZoom = juce::jlimit (1.0f, 8.0f, targetAmpZoom * step);
+            targetAmpZoom = scopeZoomTargetFromWheelDelta (targetAmpZoom, zoomDelta, 1.0f, 8.0f);
         else
-            targetTimeZoom = juce::jlimit (1.0f, 16.0f, targetTimeZoom * step);
+            targetTimeZoom = scopeZoomTargetFromWheelDelta (targetTimeZoom, zoomDelta, 1.0f, 16.0f);
+
+        visibleBuffersDirty = true;
 
         if (onZoomChanged != nullptr)
             onZoomChanged();
@@ -2104,15 +2105,22 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
 
 void Oscilloscope::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
 {
+    if (! scopeModeAcceptsZoom (viewMode))
+        return;
+
     if (e.mods.isShiftDown())
     {
-        targetAmpZoom = juce::jlimit (1.0f, 8.0f, targetAmpZoom * scaleFactor);
+        targetAmpZoom = scopeZoomTargetFromMagnify (targetAmpZoom, scaleFactor, 1.0f, 8.0f);
     }
     else
     {
-        targetTimeZoom = juce::jlimit (1.0f, 16.0f, targetTimeZoom * scaleFactor);
-        zoomAnchorFraction = e.position.x / (float) juce::jmax (1, getWidth());
+        targetTimeZoom = scopeZoomTargetFromMagnify (targetTimeZoom, scaleFactor, 1.0f, 16.0f);
+        zoomAnchorFraction = juce::jlimit (0.0f, 1.0f,
+                                           e.position.x / (float) juce::jmax (1, getWidth()));
     }
+    visibleBuffersDirty = true;
+    if (onZoomChanged != nullptr)
+        onZoomChanged();
     repaint();
 }
 

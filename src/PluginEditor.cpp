@@ -184,7 +184,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
 
     // --- Top bar controls --------------------------------------------------
     configureCombo (gridCombo, { "1/4", "1/2", "1", "4", "Bar", "ms" });
-    configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Spectrum", "Separate" });
+    configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Separate", "Spectrum" });
     gridCombo.setTooltip ("Sets the scope time grid.");
     viewCombo.setTooltip ("Scope view: Triggered, Free-run (raw live scope, no offset), "
                           "Phase Delta, Spectrum (aligned bass/kick comparison), or Separate lanes.");
@@ -426,6 +426,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     phaseFreqAttachment    = std::make_unique<SliderAttachment> (apvts, "allpass_freq", phaseFreqSlider);
     phaseQAttachment       = std::make_unique<SliderAttachment> (apvts, "rotatorQ", phaseQSlider);
     visualOffsetAttachment = std::make_unique<SliderAttachment> (apvts, "visualOffsetSamples", visualOffsetSlider);
+    visualOffsetSlider.onValueChange = [this]
+    {
+        oscilloscope.setVisualOffsetSamples ((int) std::lround (visualOffsetSlider.getValue()));
+    };
     crossoverEnableAttachment = std::make_unique<ButtonAttachment> (apvts, "crossover_enable", crossoverEnableButton);
     
     crossoverEnableButton.onClick = [this]
@@ -439,7 +443,19 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     crossoverAttachment    = std::make_unique<SliderAttachment> (apvts, "crossover_freq", crossoverSlider);
 
     gridAttachment         = std::make_unique<ComboAttachment> (apvts, "gridDivision", gridCombo);
-    viewAttachment         = std::make_unique<ComboAttachment> (apvts, "scopeViewMode", viewCombo);
+    viewCombo.onChange = [this]
+    {
+        if (auto* parameter = audioProcessor.apvts.getParameter ("scopeViewMode"))
+        {
+            const auto mode = scopeViewModeFromUiIndex (viewCombo.getSelectedItemIndex());
+            const float persistedIndex = (float) scopeViewModeToChoiceIndex (mode);
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (persistedIndex));
+            parameter->endChangeGesture();
+        }
+
+        pushScopeSettings();
+    };
     delayInterpAttachment  = std::make_unique<ComboAttachment> (apvts, "delayInterp", delayInterpCombo);
     phaseStagesAttachment  = std::make_unique<ComboAttachment> (apvts, "rotatorStages", phaseStagesCombo);
 
@@ -522,7 +538,7 @@ void KickLockAudioProcessorEditor::configureCombo (juce::ComboBox& combo, const 
 void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 {
     gridCombo.setVisible (shouldBeVisible);
-    viewCombo.setVisible (shouldBeVisible);
+    viewCombo.setVisible (true);
     freezeButton.setVisible (shouldBeVisible);
     relockKickButton.setVisible (shouldBeVisible);
     analyzeButton.setVisible (shouldBeVisible);
@@ -573,11 +589,18 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 
 void KickLockAudioProcessorEditor::pushScopeSettings()
 {
-    const int viewIdx = viewCombo.getSelectedItemIndex();
-    const auto requestedMode = scopeViewModeFromChoiceIndex (viewIdx);
-    const auto mode = requestedMode;
+    int persistedViewIndex = 0;
+    if (const auto* view = audioProcessor.apvts.getRawParameterValue ("scopeViewMode"))
+        persistedViewIndex = (int) std::lround (view->load());
+
+    const auto mode = scopeViewModeFromChoiceIndex (persistedViewIndex);
+    const int uiIndex = uiIndexFromScopeViewMode (mode);
+    if (viewCombo.getSelectedItemIndex() != uiIndex)
+        viewCombo.setSelectedItemIndex (uiIndex, juce::dontSendNotification);
+
     oscilloscope.setViewMode (mode);
     updateVisualOffsetAvailability (mode);
+    gridCombo.setVisible (! cleanScopeMode || scopeFullModeShowsGrid (mode));
     
     if (mode == ScopeViewMode::Spectrum)
     {
@@ -973,14 +996,15 @@ void KickLockAudioProcessorEditor::resized()
     {
         manualPanelBounds = {};
         analyzerPanelBounds = {};
-        viewCombo.setVisible (true);
-
-        auto cleanControls = bounds.removeFromTop (38);
-        viewCombo.setBounds (cleanControls.removeFromLeft (132).reduced (8, 6));
+        auto cleanToolbar = bounds.removeFromTop (38);
+        viewCombo.setBounds (cleanToolbar.getX() + 12, cleanToolbar.getY() + 7, 126, 24);
+        gridCombo.setBounds (cleanToolbar.getX() + 146, cleanToolbar.getY() + 7, 70, 24);
 
         const auto scopeBounds = bounds.reduced (8);
         oscilloscope.setBounds (scopeBounds);
         spectrumAnalyzer.setBounds (scopeBounds);
+        viewCombo.toFront (false);
+        gridCombo.toFront (false);
         pushScopeSettings();
         repaint();
         return;

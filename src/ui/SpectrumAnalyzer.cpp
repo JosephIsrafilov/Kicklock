@@ -8,8 +8,8 @@ SpectrumAnalyzer::SpectrumAnalyzer(SpectrumFifo& fifoToUse)
 {
     setOpaque (false);
     startTimerHz (30);
-    spectrumMain.fill (0.0f);
-    spectrumSide.fill (0.0f);
+    spectrumMain.fill (SpectrumAnalysis::minimumDb);
+    spectrumSide.fill (SpectrumAnalysis::minimumDb);
 
     speedComboBox.addItem("Slow", 1);
     speedComboBox.addItem("Medium", 2);
