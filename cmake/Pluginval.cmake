@@ -5,7 +5,7 @@
 
 set(PLUGINVAL_VERSION "v1.0.4" CACHE STRING "pluginval release tag to download")
 set(PLUGINVAL_EXECUTABLE "" CACHE FILEPATH "Path to an existing pluginval binary (skips download)")
-set(PLUGINVAL_STRICTNESS "8" CACHE STRING "pluginval strictness level 1-10")
+set(PLUGINVAL_STRICTNESS "10" CACHE STRING "pluginval strictness level 1-10")
 
 # Resolve the platform-specific release asset and the path to the executable
 # inside the extracted archive.

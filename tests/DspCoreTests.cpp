@@ -1342,6 +1342,38 @@ public:
             expectEquals (total, 80);
         }
 
+        beginTest ("Reset fence discards queued pre-relock samples");
+        {
+            HitCaptureBuffer buffer;
+            buffer.prepare (1000.0, 2.0f, 3.0f);
+
+            buffer.pushSample (1.0f, 11.0f, false);
+            buffer.pushSample (2.0f, 12.0f, false);
+            buffer.pushSample (3.0f, 13.0f, true);
+            buffer.requestReset();
+            buffer.pushSample (100.0f, 110.0f, false);
+            buffer.pushSample (101.0f, 111.0f, false);
+            buffer.pushSample (102.0f, 112.0f, true);
+
+            std::array<float, 32> bass {}, kick {};
+            std::array<unsigned char, 32> flags {};
+            const int n = buffer.readSweepStream (bass.data(), kick.data(), flags.data(), 32);
+            int resetStart = -1;
+            for (int i = 0; i < n; ++i)
+                if ((flags[(size_t) i] & HitCaptureBuffer::sweepResetFlag) != 0)
+                {
+                    resetStart = i;
+                    break;
+                }
+
+            expect (resetStart >= 0, "the first post-relock hit must carry a reset fence");
+            if (resetStart >= 0)
+            {
+                expectWithinAbsoluteError (bass[(size_t) resetStart], 100.0f, 1.0e-7f);
+                expectWithinAbsoluteError (kick[(size_t) resetStart], 110.0f, 1.0e-7f);
+            }
+        }
+
         beginTest ("Sweep stream retriggers before a long window completes");
         {
             HitCaptureBuffer buffer;

@@ -601,6 +601,24 @@ public:
             expect (! shouldAutoRelockKickReference (KickReferenceState::RelockPending, false, true, false, true));
         }
 
+        beginTest ("Triggered mode has no live-history fallback");
+        {
+            expectEquals ((int) triggeredSweepSourceFor (false),
+                          (int) TriggeredSweepSource::None);
+            expectEquals ((int) triggeredSweepSourceFor (true),
+                          (int) TriggeredSweepSource::HitCaptureSweep);
+        }
+
+        beginTest ("A relock edge is one-shot while pending");
+        {
+            expect (shouldAutoRelockKickReference (KickReferenceState::Locked,
+                                                   false, true, true, true));
+            expect (! shouldAutoRelockKickReference (KickReferenceState::RelockPending,
+                                                    true, true, true, true));
+            expect (! shouldAutoRelockKickReference (KickReferenceState::RelockPending,
+                                                    true, true, true, true));
+        }
+
         beginTest ("Triggered rendering is capped to screen-resolution points");
         {
             expectEquals (calculateTriggeredRenderPointCount (0, 800), 0);

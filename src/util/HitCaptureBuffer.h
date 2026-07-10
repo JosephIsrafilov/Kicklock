@@ -14,6 +14,16 @@ public:
     // window (i.e. the first pre-roll sample of a fresh hit), so the UI can
     // restart its left-to-right sweep exactly at hit boundaries.
     static constexpr unsigned char sweepStartFlag = 1;
+    // Marks the first sample of the first capture after the UI requested a
+    // fresh reference.  The UI uses this as a lock-free fence so samples
+    // already queued before a disconnect/reconnect can never become the new
+    // reference.
+    static constexpr unsigned char sweepResetFlag = 2;
+
+    void requestReset() noexcept
+    {
+        resetRequested.store (true, std::memory_order_release);
+    }
 
     void prepare (double sampleRate, float preRollMs, float postRollMs)
     {
@@ -57,6 +67,8 @@ public:
         captureIndex = 0;
         capturing = false;
         streamWindowDropped = false;
+        resetMarkerPending = false;
+        resetRequested.store (false, std::memory_order_relaxed);
         streamFifo.reset();
         sequence.store (0, std::memory_order_relaxed);
         publishedSlot.store (0, std::memory_order_release);
@@ -66,6 +78,17 @@ public:
     {
         if (windowSamples <= 0 || preRollSamples <= 0)
             return;
+
+        if (resetRequested.exchange (false, std::memory_order_acq_rel))
+        {
+            std::fill (preBass.begin(), preBass.end(), 0.0f);
+            std::fill (preKick.begin(), preKick.end(), 0.0f);
+            preWriteIndex = 0;
+            captureIndex = 0;
+            capturing = false;
+            streamWindowDropped = false;
+            resetMarkerPending = true;
+        }
 
         if (transientDetected)
             startCapture();
@@ -177,7 +200,10 @@ private:
         streamWindowDropped = false;
         for (int i = 0; i < preRollSamples; ++i)
             pushStreamSample (captureBass[(size_t) i], captureKick[(size_t) i],
-                              i == 0 ? sweepStartFlag : 0);
+                              i == 0 ? (unsigned char) (sweepStartFlag
+                                  | (resetMarkerPending ? sweepResetFlag : 0)) : 0);
+
+        resetMarkerPending = false;
     }
 
     // Audio thread. Drops the REST of the current window on overflow (instead
@@ -230,6 +256,8 @@ private:
     int captureIndex = 0;
     bool capturing = false;
     bool streamWindowDropped = false;   // audio-thread-only overflow latch
+    bool resetMarkerPending = false;    // audio-thread-only capture fence
+    std::atomic<bool> resetRequested { false };
 
     std::vector<float> preBass;
     std::vector<float> preKick;

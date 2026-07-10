@@ -38,6 +38,12 @@ enum class KickReferenceState
     RelockPending
 };
 
+enum class TriggeredSweepSource
+{
+    None,
+    HitCaptureSweep
+};
+
 struct ScopePeakMarkers
 {
     int bassPeakIndex = -1;
@@ -867,4 +873,10 @@ inline ScopeLaneGeometry calculateSeparateModeGeometry (float height) noexcept
 inline int getSeparateLaneForY (float y, const ScopeLaneGeometry& geom) noexcept
 {
     return y < geom.dividerY ? 0 : 1;
+}
+
+inline TriggeredSweepSource triggeredSweepSourceFor (bool hasCapturedSweep) noexcept
+{
+    return hasCapturedSweep ? TriggeredSweepSource::HitCaptureSweep
+                             : TriggeredSweepSource::None;
 }

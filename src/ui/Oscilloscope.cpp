@@ -185,11 +185,14 @@ void Oscilloscope::evaluateAutoRelockEdge()
     const bool sidechainAvailable = fifo.getSideChannels() > 0;
     const bool triggeredMode = viewMode == ScopeViewMode::Triggered;
 
+    const bool sidechainDisconnected = wasSidechainAvailable && ! sidechainAvailable;
+
     if (shouldAutoRelockKickReference (kickReferenceState,
                                        wasSidechainAvailable,
                                        sidechainAvailable,
                                        wasTriggeredMode,
-                                       triggeredMode))
+                                       triggeredMode)
+        || (sidechainDisconnected && triggeredMode))
         relockKickReference();
 
     wasSidechainAvailable = sidechainAvailable;
@@ -284,26 +287,6 @@ void Oscilloscope::vblankCallback()
     // next hit (matching the old snapshot behaviour).
     const bool consumeSweep = ! isDisplayFrozen() || relockPending;
     bool triggeredDirty = drainSweepStream (consumeSweep);
-
-    if (viewMode == ScopeViewMode::Triggered && consumeSweep)
-    {
-        if (triggeredDirty)
-        {
-            freeRunTicks = 0;
-        }
-        else if (anyRead && kickReferenceState == KickReferenceState::NoReference
-                 && sweepFill == 0
-                 && ++freeRunTicks >= freeRunWatchdogTicks)
-        {
-            // The watchdog fallback only exists to show SOMETHING before the
-            // first kick is detected. It must (a) require samples to actually
-            // be flowing — a stopped transport is not "no trigger detected" —
-            // and (b) never engage once a sweep has started or a reference is
-            // locked, so a gap in the material can't destroy the display.
-            buildWaitingFallback();
-            triggeredDirty = true;
-        }
-    }
 
     if (viewMode == ScopeViewMode::Triggered)
     {
@@ -576,45 +559,37 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
 
     drawYAxisGrid (g, bounds, midY, halfHeight, gain, gridMajor, gridMinor);
 
-    // Pick the data source: the live full-rate sweep once hits are flowing,
-    // or the decimated-ring fallback before the first hit so the view is
-    // never blank. Both share the exact same rendering path below.
+    // Triggered mode has one source of truth: the full-rate HitCaptureBuffer
+    // sweep assembled below. In particular, never substitute live history
+    // for Bass while Kick is coming from a captured frame.
     bool anyGhost = false;
     for (int fill : ghostFill)
         anyGhost = anyGhost || fill > 1;
 
     const bool sweepHasContent = sweepFill > 1 || anyGhost || kickReferenceValid;
-    const bool fallbackActive = ! sweepHasContent && (int) fallbackBass.size() > 1;
+    const int n = sweepWindowSamples;
 
-    const int n = fallbackActive ? (int) fallbackBass.size() : sweepWindowSamples;
-
-    if (n <= 1 || (! sweepHasContent && ! fallbackActive))
+    const auto triggeredSource = triggeredSweepSourceFor (sweepHasContent);
+    if (n <= 1 || triggeredSource == TriggeredSweepSource::None)
     {
         g.setColour (labelColour);
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-        g.drawText (triggeredScopeEmptyText (kickReferenceState),
+        g.drawText (fifo.getSideChannels() > 0 ? triggeredScopeEmptyText (kickReferenceState)
+                                               : "WAITING FOR SIDECHAIN",
                     bounds.withSizeKeepingCentre (220.0f, 18.0f).toNearestInt(),
                     juce::Justification::centred);
         return;
     }
 
-    const float* bassData = fallbackActive ? fallbackBass.data() : sweepBass.data();
-    const int bassFillCount = fallbackActive ? n : sweepFill;
-    const float* kickData = fallbackActive ? fallbackKick.data()
-                          : kickReferenceValid ? kickReference.data()
-                                               : sweepKick.data();
-    const int kickFillCount = fallbackActive ? n : (kickReferenceValid ? n : sweepFill);
-    const int liveTriggerSample = fallbackActive ? fallbackPreRoll : sweepTriggerSample;
-    const int preRoll = fallbackActive ? fallbackPreRoll
-                      : kickReferenceValid ? kickReferenceTriggerSample
-                                           : liveTriggerSample;
-    const double rate = fallbackActive ? fallbackRate : sampleRate;
+    const float* bassData = sweepBass.data();
+    const int bassFillCount = sweepFill;
+    const float* kickData = sweepKick.data();
+    const int kickFillCount = sweepFill;
+    const int preRoll = sweepTriggerSample;
+    const double rate = sampleRate;
 
     const int triggerSample = juce::jlimit (0, n - 1, preRoll);
-    const bool referenceCompatible = fallbackActive
-                                  || ! kickReferenceValid
-                                  || triggeredReferenceSharesFrameGeometry (kickReferenceTriggerSample,
-                                                                            liveTriggerSample, n);
+    const bool referenceCompatible = true;
 
     if (! referenceCompatible)
     {
@@ -628,7 +603,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
 
     // Time zoom: select the visible slice of the capture window, keeping the
     // visual 0 ms line at a fixed fractional x. The ms axis uses the source's own
-    // sample rate (full-rate sweep vs the decimated fallback ring).
+    // sample rate of the full-rate capture.
     const auto range = computeTriggeredVisibleRange (n, triggerSample, timeZoom);
     const int first = computeTriggeredPannedFirst (n, range.visible, range.first, displayScrollMs, rate);
     const int visible = range.visible;
@@ -665,7 +640,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // (oldest first, so the most recent sits brightest just under the live
     // sweep) — phosphor persistence instead of an abrupt swap, so every hit
     // visibly redraws in place without blinking.
-    if (! fallbackActive)
     {
         GhostsCacheKey currentGhostsKey;
         currentGhostsKey.first = first;
@@ -698,9 +672,11 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         g.drawImageAt (ghostsCache, (int) bounds.getX(), (int) bounds.getY());
     }
 
-    // Kick lane: the locked reference (or, before the first lock completes,
-    // the kick assembling live alongside the sweep).
-    if (kickReferenceValid && ! fallbackActive)
+    // Kick and Bass are deliberately read from the same captured sweep. The
+    // locked reference state controls capture policy, not a second render
+    // source; using kickReference here would pair an older hit with the live
+    // Bass sweep and reintroduce the synchronization bug.
+    if (kickReferenceValid)
     {
         KickRefCacheKey currentKickKey;
         currentKickKey.fill = kickFillCount;
@@ -710,7 +686,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         currentKickKey.timeZoom = timeZoom;
         currentKickKey.boundsW = (int) bounds.getWidth();
         currentKickKey.boundsH = (int) bounds.getHeight();
-        currentKickKey.hitId = kickReferenceHitId;
+        currentKickKey.hitId = sweepHitId;
 
         if (kickRefKey != currentKickKey || kickRefCache.isNull())
         {
@@ -746,7 +722,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
 
     // Sweep head: while the current hit's window is still filling, a bright
     // leading edge shows exactly where the live redraw has got to.
-    if (! fallbackActive && sweepFill > 1 && sweepFill < n
+    if (sweepFill > 1 && sweepFill < n
         && ! isDisplayFrozen() && refreshingSweepIsLive())
     {
         const int headIndex = sweepFill - 1;
@@ -849,8 +825,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     // ONCE per completed hit (see finishSweep) over the full window, so the
     // read-out never jitters frame-to-frame and doesn't change with zoom;
     // here it is only mapped into the visible slice.
-    if (! fallbackActive
-        && referenceCompatible
+    if (referenceCompatible
         && sweepMarkers.valid
         && triggeredMarkersBelongToFrame (sweepMarkersHitId, sweepHitId,
                                           sweepFill, sweepWindowSamples))
@@ -890,9 +865,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         const bool receiving = refreshingSweepIsLive();
         juce::String status;
 
-        if (fallbackActive)
-            status = juce::String::fromUTF8 ("waiting for kick \xE2\x80\x94 showing live input");
-        else if (! kickReferenceValid && kickReferenceState == KickReferenceState::NoReference)
+        if (! kickReferenceValid && kickReferenceState == KickReferenceState::NoReference)
             status = "locking kick reference...";
         else if (kickReferenceState == KickReferenceState::RelockPending)
             status = juce::String::fromUTF8 ("re-lock armed \xE2\x80\x94 waiting for next kick");
@@ -1576,8 +1549,6 @@ void Oscilloscope::ensureSweepBuffersSized()
     kickReferenceHitId = 0;
     sweepMarkersHitId = 0;
     kickReferenceState = KickReferenceState::RelockPending;
-    fallbackBass.clear();
-    fallbackKick.clear();
 }
 
 bool Oscilloscope::drainSweepStream (bool consume)
@@ -1612,6 +1583,14 @@ bool Oscilloscope::drainSweepStream (bool consume)
 
         for (int i = 0; i < count; ++i)
         {
+            if (discardingSweepUntilRelock)
+            {
+                if ((flagScratch[(size_t) i] & HitCaptureBuffer::sweepResetFlag) == 0)
+                    continue;
+
+                discardingSweepUntilRelock = false;
+            }
+
             if ((flagScratch[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
             {
                 if (kickReferenceState == KickReferenceState::RelockPending && kickReferenceValid)
@@ -1705,10 +1684,6 @@ void Oscilloscope::beginNewSweep()
     sweepMarkers = {};
     sweepMarkersHitId = 0;
 
-    // A real hit is on screen now — the pre-first-kick fallback is done for
-    // good (it must never replace a captured display again).
-    fallbackBass.clear();
-    fallbackKick.clear();
 }
 
 void Oscilloscope::beginPendingRelockSweep()
@@ -1845,49 +1820,35 @@ bool Oscilloscope::glideTriggeredAutoGain() noexcept
 
 void Oscilloscope::relockKickReference() noexcept
 {
+    hitCapture.requestReset();
     kickReferenceState = kickReferenceStateAfterRelock();
+    kickReferenceValid = false;
+    kickReferencePeak = 0.0f;
+    kickReferenceTriggerSample = 0;
+    kickReferenceHitId = 0;
+    sweepFill = 0;
+    sweepPeak = 0.0f;
+    sweepDiscarding = true;
+    sweepTriggerSample = sweepPreRollSamples;
+    sweepMarkers = {};
+    sweepMarkersHitId = 0;
     pendingRelockFill = 0;
     pendingRelockPeak = 0.0f;
     pendingRelockDiscarding = true;
     pendingRelockHitId = 0;
-
-    // Deliberately keeps the current traces on screen while the re-lock waits
-    // for the next hit — the reference swaps in place when the next sweep
-    // completes, so re-locking never blanks or flickers the view.
+    for (auto& fill : ghostFill)
+        fill = 0;
+    std::fill (sweepBass.begin(), sweepBass.end(), 0.0f);
+    std::fill (sweepKick.begin(), sweepKick.end(), 0.0f);
+    std::fill (pendingRelockBass.begin(), pendingRelockBass.end(), 0.0f);
+    std::fill (pendingRelockKick.begin(), pendingRelockKick.end(), 0.0f);
+    for (auto& buffer : ghostBass)
+        std::fill (buffer.begin(), buffer.end(), 0.0f);
+    targetDisplayGain = 0.0f;
+    discardingSweepUntilRelock = true;
+    visibleBuffersDirty = true;
+    ++ghostsVersion;
     repaint();
-}
-
-void Oscilloscope::buildWaitingFallback()
-{
-    const int desiredSamples = juce::jlimit (2, historyLength,
-                                            msToSamples (170.0f, sampleRate) / juce::jmax (1, decimationFactor));
-    fallbackBass.resize ((size_t) desiredSamples);
-    fallbackKick.resize ((size_t) desiredSamples);
-
-    const auto& currentMain = snapshotActive ? snapshotMainHistory : mainHistory;
-    const auto& currentSide = snapshotActive ? snapshotSidechainHistory : sidechainHistory;
-    const int currentWriteIndex = snapshotActive ? snapshotWriteIndex : writeIndex;
-    const int start = currentWriteIndex - desiredSamples;
-    float peak = 0.0f;
-    for (int i = 0; i < desiredSamples; ++i)
-    {
-        const int idx = wrapHistoryIndex (start + i, historyLength);
-        fallbackBass[(size_t) i] = currentMain[(size_t) idx];
-        fallbackKick[(size_t) i] = currentSide[(size_t) idx];
-        peak = juce::jmax (peak, std::abs (fallbackBass[(size_t) i]),
-                           std::abs (fallbackKick[(size_t) i]));
-    }
-
-    fallbackPreRoll = juce::jlimit (0, desiredSamples - 1,
-                                    msToSamples (20.0f, sampleRate) / juce::jmax (1, decimationFactor));
-    // The fallback fills from the DECIMATED scope ring, so its ms axis must
-    // use the decimated rate or the labels/grid come out ~decimation× wrong.
-    fallbackRate = sampleRate / (double) juce::jmax (1, decimationFactor);
-    freeRunTicks = freeRunWatchdogTicks;
-
-    // No completed hit exists yet to retarget from, so aim the auto-gain at
-    // the live ring content directly (still glided by the timer).
-    targetDisplayGain = scopeAutoGainTargetFromPeak (peak);
 }
 
 void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)

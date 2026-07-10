@@ -161,7 +161,6 @@ private:
     void finishPendingRelockSweep();
     void promoteCurrentSweepToGhost();
     void ensureSweepBuffersSized();
-    void buildWaitingFallback();
 
     bool glideTriggeredAutoGain() noexcept;
 
@@ -213,6 +212,7 @@ private:
     bool visibleBuffersDirty = true;
     bool wasSidechainAvailable = false;
     bool wasTriggeredMode = false;
+    bool discardingSweepUntilRelock = false;
 
     void updateSnapshotOwnership();
     void evaluateAutoRelockEdge();
@@ -337,18 +337,6 @@ private:
     int sweepTriggerSample = 0;       // visual 0 ms: first meaningful kick onset
     int kickReferenceTriggerSample = 0;
     KickReferenceState kickReferenceState = KickReferenceState::RelockPending;
-
-    // Pre-first-kick fallback: the decimated ring shown live so the triggered
-    // view is never blank while waiting for the first hit. Cleared for good
-    // once a real sweep starts. Its ms axis runs at the DECIMATED ring rate,
-    // not the full rate, hence the separate rate field.
-    std::vector<float> fallbackBass;
-    std::vector<float> fallbackKick;
-    int fallbackPreRoll = 0;
-    double fallbackRate = 44100.0;
-
-    int freeRunTicks = 0;
-    static constexpr int freeRunWatchdogTicks = 120;
 
     // Ticks since the FIFO last delivered samples. Drives the triggered view's
     // status line ("bass live" vs "input idle — showing last capture") so a
