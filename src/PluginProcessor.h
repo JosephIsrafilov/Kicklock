@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "util/ScopeFifo.h"
+#include "util/SpectrumFifo.h"
 #include "util/RawCaptureBuffer.h"
 #include "util/HitCaptureBuffer.h"
 #include "dsp/CorrelationMeter.h"
@@ -111,8 +112,9 @@ public:
     std::atomic<float> latestVerificationDeltaPercent { 0.0f };
     std::atomic<float> latestFixConfidence { 0.0f };
     ScopeFifo scopeFifo;
+    SpectrumFifo spectrumFifo;
+    juce::dsp::DelayLine<float> spectrumSidechainDelay;
     ScopeFifo rawScopeFifo;
-    ScopeFifo spectrumFifo;
 
     // UI sets this when the Spectrum view is visible so the audio thread can
     // skip full-rate spectrum FIFO traffic (and the dual FFT) the rest of the time.

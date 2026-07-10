@@ -116,6 +116,7 @@ private:
     void refreshAnalyzeWorkflow();
     void refreshCompareButtons();
     void pushScopeSettings();
+    void updateVisualOffsetAvailability (ScopeViewMode mode);
     void setChromeVisible (bool shouldBeVisible);
 
     KickLockAudioProcessor& audioProcessor;

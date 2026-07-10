@@ -298,11 +298,13 @@ public:
             // Root cause of the old duplication was that FreeRun and Spectrum both
             // called drawSpectrumMode, so they were indistinguishable. They must now
             // differ in a real drawing decision: Free-run ignores the visual/PDC
-            // offset (raw signal) while Spectrum applies it (aligned comparison).
-            expect (! scopeModeAppliesVisualOffset (ScopeViewMode::FreeRun));
-            expect (scopeModeAppliesVisualOffset (ScopeViewMode::Spectrum));
-            expect (scopeModeAppliesVisualOffset (ScopeViewMode::PhaseDelta));
-            expect (scopeModeAppliesVisualOffset (ScopeViewMode::Separate));
+            // offset so the waveform matches what the user is hearing *now*,
+            // while Triggered aligns the display to a fixed past event.
+            expect (! scopeModeSupportsVisualOffset (ScopeViewMode::FreeRun));
+            expect (! scopeModeSupportsVisualOffset (ScopeViewMode::Spectrum));
+            expect (! scopeModeSupportsVisualOffset (ScopeViewMode::Triggered));
+            expect (scopeModeSupportsVisualOffset (ScopeViewMode::PhaseDelta));
+            expect (scopeModeSupportsVisualOffset (ScopeViewMode::Separate));
 
             expectEquals (juce::String (scopeModeCaption (ScopeViewMode::FreeRun)),
                           juce::String ("FREE-RUN: live raw scope"));
@@ -310,6 +312,113 @@ public:
                           juce::String ("SPECTRUM ANALYZER"));
             expect (juce::String (scopeModeCaption (ScopeViewMode::FreeRun))
                     != juce::String (scopeModeCaption (ScopeViewMode::Spectrum)));
+        }
+
+        beginTest ("Visual offset gating preserves the saved value outside supported modes");
+        {
+            expect (scopeModeSupportsVisualOffset (ScopeViewMode::Separate));
+            expect (scopeModeSupportsVisualOffset (ScopeViewMode::PhaseDelta));
+            expect (! scopeModeSupportsVisualOffset (ScopeViewMode::Triggered));
+            expect (! scopeModeSupportsVisualOffset (ScopeViewMode::FreeRun));
+            expect (! scopeModeSupportsVisualOffset (ScopeViewMode::Spectrum));
+            expect (! scopeModeSupportsVisualOffset (static_cast<ScopeViewMode> (999)));
+
+            const int savedOffset = -256;
+            expectEquals (effectiveVisualOffsetSamples (ScopeViewMode::Triggered, savedOffset), 0);
+            expectEquals (effectiveVisualOffsetSamples (ScopeViewMode::FreeRun, savedOffset), 0);
+            expectEquals (effectiveVisualOffsetSamples (ScopeViewMode::Spectrum, savedOffset), 0);
+            expectEquals (effectiveVisualOffsetSamples (ScopeViewMode::Separate, savedOffset), savedOffset);
+            expectEquals (effectiveVisualOffsetSamples (ScopeViewMode::PhaseDelta, savedOffset), savedOffset);
+            expectEquals (savedOffset, -256);
+        }
+
+        auto checkHighFrequencyBins = [this] (double sampleRate,
+                                              std::array<int, 3> bins,
+                                              std::array<double, 3> targetFrequencies)
+        {
+            for (size_t caseIndex = 0; caseIndex < bins.size(); ++caseIndex)
+            {
+                const int bin = bins[caseIndex];
+                const double frequency = (double) bin * sampleRate / (double) SpectrumAnalysis::fftSize;
+                std::array<float, SpectrumAnalysis::fftSize * 2> left {};
+                std::array<float, SpectrumAnalysis::fftSize * 2> right {};
+                for (int i = 0; i < SpectrumAnalysis::fftSize; ++i)
+                {
+                    const float phase = juce::MathConstants<float>::twoPi
+                                      * (float) bin * (float) i / (float) SpectrumAnalysis::fftSize;
+                    left[(size_t) i] = std::sin (phase);
+                    right[(size_t) i] = left[(size_t) i];
+                }
+
+                juce::dsp::WindowingFunction<float> window (SpectrumAnalysis::fftSize,
+                                                            juce::dsp::WindowingFunction<float>::hann,
+                                                            false);
+                std::array<float, SpectrumAnalysis::fftSize> db {};
+                SpectrumAnalysis::calculatePowerSpectrumDb (left.data(), right.data(),
+                                                            window, db.data(), 1.0f);
+
+                int detectedBin = bin;
+                for (int candidate = juce::jmax (0, bin - 2);
+                     candidate <= juce::jmin (SpectrumAnalysis::maximumBin, bin + 2);
+                     ++candidate)
+                    if (db[(size_t) candidate] > db[(size_t) detectedBin])
+                        detectedBin = candidate;
+
+                expect (db[(size_t) bin] > -20.0f);
+                expectWithinAbsoluteError (detectedBin, bin, 2);
+                expect (bin <= SpectrumAnalysis::maximumBin);
+                expectWithinAbsoluteError ((float) frequency,
+                                           (float) targetFrequencies[caseIndex],
+                                           (float) sampleRate / (float) SpectrumAnalysis::fftSize);
+            }
+        };
+
+        beginTest ("Spectrum preserves 15-20 kHz bin-centred peaks at 48 kHz");
+        {
+            checkHighFrequencyBins (48000.0, { 2560, 3072, 3413 }, { 15000.0, 18000.0, 20000.0 });
+        }
+
+        beginTest ("Spectrum preserves 15-20 kHz bin-centred peaks at 96 kHz");
+        {
+            checkHighFrequencyBins (96000.0, { 1280, 1536, 1706 }, { 15000.0, 18000.0, 20000.0 });
+        }
+
+        beginTest ("Opposite-phase stereo high-frequency tones remain visible");
+        {
+            constexpr int bin = 3072;
+            std::array<float, SpectrumAnalysis::fftSize * 2> left {};
+            std::array<float, SpectrumAnalysis::fftSize * 2> right {};
+            for (int i = 0; i < SpectrumAnalysis::fftSize; ++i)
+            {
+                const float phase = juce::MathConstants<float>::twoPi
+                                  * (float) bin * (float) i / (float) SpectrumAnalysis::fftSize;
+                left[(size_t) i] = std::sin (phase);
+                right[(size_t) i] = -left[(size_t) i];
+            }
+
+            juce::dsp::WindowingFunction<float> window (SpectrumAnalysis::fftSize,
+                                                        juce::dsp::WindowingFunction<float>::hann,
+                                                        false);
+            std::array<float, SpectrumAnalysis::fftSize> db {};
+            SpectrumAnalysis::calculatePowerSpectrumDb (left.data(), right.data(),
+                                                        window, db.data(), 1.0f);
+            expect (db[(size_t) bin] > -20.0f);
+        }
+
+        beginTest ("Spectrum display maximum follows the Nyquist guard");
+        {
+            expectWithinAbsoluteError (spectrumDisplayMaximumFrequency (32000.0f), 15680.0f, 1.0e-4f);
+            expectWithinAbsoluteError (spectrumDisplayMaximumFrequency (44100.0f), 20000.0f, 1.0e-4f);
+            expectWithinAbsoluteError (spectrumDisplayMaximumFrequency (48000.0f), 20000.0f, 1.0e-4f);
+            expectWithinAbsoluteError (spectrumDisplayMaximumFrequency (96000.0f), 20000.0f, 1.0e-4f);
+        }
+
+        beginTest ("Separate mode lane helper follows shared geometry");
+        {
+            const auto geometry = calculateSeparateModeGeometry (100.0f);
+            expectEquals (getSeparateLaneForY (10.0f, geometry), 0);
+            expectEquals (getSeparateLaneForY (90.0f, geometry), 1);
+            expectEquals (getSeparateLaneForY (geometry.dividerY, geometry), 1);
         }
 
         beginTest ("Scope scroll clamps to the valid history range");
@@ -409,6 +518,20 @@ public:
                           (int) KickReferenceState::Locked);
             expectEquals (juce::String (triggeredScopeEmptyText (KickReferenceState::NoReference)),
                           juce::String ("WAITING FOR KICK"));
+        }
+
+        beginTest ("Auto re-lock is edge-triggered and stable at steady state");
+        {
+            expect (shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, false, false));
+            expect (shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, false, true));
+            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, false, false));
+            expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, false, false, true));
+            expect (! shouldAutoRelockKickReference (KickReferenceState::RelockPending, false, true, false, true));
+
+            const bool firstEdge = shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, false, false);
+            const bool steadyState = shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, false, false);
+            expect (firstEdge);
+            expect (! steadyState);
         }
 
         beginTest ("Triggered rendering is capped to screen-resolution points");

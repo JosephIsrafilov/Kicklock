@@ -32,6 +32,7 @@
 #include "PluginProcessor.h"
 #include "util/HitCaptureBuffer.h"
 #include "util/RawCaptureBuffer.h"
+#include "util/SpectrumAnalysis.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/StatusHelpers.h"
 

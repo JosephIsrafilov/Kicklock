@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <vector>
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -15,12 +16,24 @@ public:
         fifo.setTotalSize (capacitySamples);
         mainBuffer.assign ((size_t) capacitySamples, 0.0f);
         sidechainBuffer.assign ((size_t) capacitySamples, 0.0f);
+        setChannelCounts (0, 0);
         reset();
     }
 
     void reset()
     {
         fifo.reset();
+    }
+
+    void setChannelCounts (int mainChannels, int sideChannels) noexcept
+    {
+        mainChannelCount.store (juce::jlimit (0, 2, mainChannels), std::memory_order_release);
+        sideChannelCount.store (juce::jlimit (0, 2, sideChannels), std::memory_order_release);
+    }
+
+    int getSideChannels() const noexcept
+    {
+        return sideChannelCount.load (std::memory_order_acquire);
     }
 
     // Audio thread. Drops the sample (no blocking, no growing) if the
@@ -71,4 +84,6 @@ private:
     juce::AbstractFifo fifo { 1 };
     std::vector<float> mainBuffer;
     std::vector<float> sidechainBuffer;
+    std::atomic<int> mainChannelCount { 0 };
+    std::atomic<int> sideChannelCount { 0 };
 };

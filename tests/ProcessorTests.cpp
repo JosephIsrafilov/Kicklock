@@ -747,26 +747,57 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "visualOffsetSamples"), -128.0f, 1.0e-7f);
         }
 
-        beginTest ("Visual offset does not change analyzer output");
+        beginTest ("Visual offset is fully transparent to the audio path");
         {
             KickLockAudioProcessor baseline;
             baseline.enableAllBuses();
-            baseline.setRateAndBufferSizeDetails (kSampleRate, 8192);
-            baseline.prepareToPlay (kSampleRate, 8192);
-            feedAnalyzableInvertedSignal (baseline, 8192);
-            const auto baselineFix = baseline.analyzeFix();
+            baseline.setRateAndBufferSizeDetails (kSampleRate, 512);
+            baseline.prepareToPlay (kSampleRate, 512);
+            setFloatParam (baseline, "visualOffsetSamples", 0.0f);
 
             KickLockAudioProcessor shifted;
             shifted.enableAllBuses();
-            shifted.setRateAndBufferSizeDetails (kSampleRate, 8192);
-            shifted.prepareToPlay (kSampleRate, 8192);
+            shifted.setRateAndBufferSizeDetails (kSampleRate, 512);
+            shifted.prepareToPlay (kSampleRate, 512);
             setFloatParam (shifted, "visualOffsetSamples", -256.0f);
-            feedAnalyzableInvertedSignal (shifted, 8192);
-            const auto shiftedFix = shifted.analyzeFix();
 
-            expectWithinAbsoluteError (shiftedFix.bassDelayMs, baselineFix.bassDelayMs, 1.0e-4f);
-            expect (shiftedFix.phaseFilterEnabled == baselineFix.phaseFilterEnabled);
-            expect (shiftedFix.requiresTimelineMove == baselineFix.requiresTimelineMove);
+            juce::MidiBuffer midi;
+            bool outputsMatch = true;
+            const int numBufferChannels = juce::jmax (baseline.getTotalNumInputChannels(),
+                                                      baseline.getTotalNumOutputChannels());
+            const int numOutputChannels = baseline.getTotalNumOutputChannels();
+
+            for (int block = 0; block < 3; ++block)
+            {
+                juce::AudioBuffer<float> baselineBuffer (numBufferChannels, 512);
+                juce::AudioBuffer<float> shiftedBuffer (numBufferChannels, 512);
+
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float value = std::sin (0.1f * (float) (block * 512 + i))
+                                      + 0.2f * std::cos (0.037f * (float) (block * 512 + i));
+                    baselineBuffer.setSample (0, i, value);
+                    baselineBuffer.setSample (1, i, value * 0.8f);
+                    shiftedBuffer.setSample (0, i, value);
+                    shiftedBuffer.setSample (1, i, value * 0.8f);
+                }
+
+                baseline.processBlock (baselineBuffer, midi);
+                shifted.processBlock (shiftedBuffer, midi);
+
+                for (int ch = 0; ch < numOutputChannels; ++ch)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        if (std::abs (baselineBuffer.getSample (ch, i) - shiftedBuffer.getSample (ch, i)) > 1.0e-6f)
+                        {
+                            outputsMatch = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            expect (outputsMatch);
         }
 
         beginTest ("PDC latency headroom is reported to the host (20 ms)");

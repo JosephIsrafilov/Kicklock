@@ -1,7 +1,9 @@
 #include "SpectrumAnalyzer.h"
 #include "../dsp/FftPlanCache.h"
+#include "../util/SpectrumAnalysis.h"
+#include "ScopeVisuals.h"
 
-SpectrumAnalyzer::SpectrumAnalyzer(ScopeFifo& fifoToUse)
+SpectrumAnalyzer::SpectrumAnalyzer(SpectrumFifo& fifoToUse)
     : spectrumFifo (fifoToUse)
 {
     setOpaque (false);
@@ -51,16 +53,23 @@ void SpectrumAnalyzer::setColours (juce::Colour mainCol, juce::Colour sideCol)
 
 void SpectrumAnalyzer::timerCallback()
 {
-    std::array<float, 8192> mainBuf {};
-    std::array<float, 8192> sideBuf {};
+    std::array<float, 8192> mainLBuf {};
+    std::array<float, 8192> mainRBuf {};
+    std::array<float, 8192> sideLBuf {};
+    std::array<float, 8192> sideRBuf {};
     
-    int numRead = spectrumFifo.readAvailable (mainBuf.data(), sideBuf.data(), 8192);
+    const int mainChannels = juce::jlimit (0, 2, spectrumFifo.getMainChannels());
+    const int sideChannels = juce::jlimit (0, 2, spectrumFifo.getSideChannels());
+    const int numRead = spectrumFifo.readAvailable (mainLBuf.data(), mainRBuf.data(),
+                                                    sideLBuf.data(), sideRBuf.data(), 8192);
     if (numRead > 0)
     {
         for (int i = 0; i < numRead; ++i)
         {
-            mainHistory[(size_t)writeIndex] = mainBuf[(size_t)i];
-            sidechainHistory[(size_t)writeIndex] = sideBuf[(size_t)i];
+            mainLHistory[(size_t) writeIndex] = mainLBuf[(size_t) i];
+            mainRHistory[(size_t) writeIndex] = mainChannels > 1 ? mainRBuf[(size_t) i] : mainLBuf[(size_t) i];
+            sideLHistory[(size_t) writeIndex] = sideLBuf[(size_t) i];
+            sideRHistory[(size_t) writeIndex] = sideChannels > 1 ? sideRBuf[(size_t) i] : sideLBuf[(size_t) i];
             writeIndex = (writeIndex + 1) % historyLength;
         }
         calculateSpectrum();
@@ -73,37 +82,16 @@ void SpectrumAnalyzer::calculateSpectrum()
     for (int i = 0; i < historyLength; ++i)
     {
         int readIdx = (writeIndex + i) % historyLength;
-        fftScratchMain[(size_t)i] = mainHistory[(size_t)readIdx];
-        fftScratchSide[(size_t)i] = sidechainHistory[(size_t)readIdx];
+        fftScratchMainL[(size_t) i] = mainLHistory[(size_t) readIdx];
+        fftScratchMainR[(size_t) i] = mainRHistory[(size_t) readIdx];
+        fftScratchSideL[(size_t) i] = sideLHistory[(size_t) readIdx];
+        fftScratchSideR[(size_t) i] = sideRHistory[(size_t) readIdx];
     }
-    
-    fftWindow.multiplyWithWindowingTable (fftScratchMain.data(), historyLength);
-    fftWindow.multiplyWithWindowingTable (fftScratchSide.data(), historyLength);
-    
-    std::fill (fftScratchMain.begin() + historyLength, fftScratchMain.end(), 0.0f);
-    std::fill (fftScratchSide.begin() + historyLength, fftScratchSide.end(), 0.0f);
 
-    auto& fft = FftPlanCache::get(13); // 2^13 = 8192
-    
-    fft.performFrequencyOnlyForwardTransform (fftScratchMain.data());
-    fft.performFrequencyOnlyForwardTransform (fftScratchSide.data());
-    
-    const float minDb = -144.0f;
-    // Calibration offset to match DAW metering (-0.8dB compensation)
-    const float calibrationDbOffset = -0.8f; 
-    
-    for (int i = 0; i < historyLength; ++i)
-    {
-        // Multiply by 4 to compensate for Hann window coherent gain (0.5) 
-        // and real-to-complex FFT energy split (0.5)
-        float magM = (fftScratchMain[(size_t)i] / (float)historyLength) * 4.0f;
-        float dbM = juce::Decibels::gainToDecibels (magM, minDb) + calibrationDbOffset;
-        spectrumMain[(size_t)i] += (dbM - spectrumMain[(size_t)i]) * smoothingFactor;
-        
-        float magS = (fftScratchSide[(size_t)i] / (float)historyLength) * 4.0f;
-        float dbS = juce::Decibels::gainToDecibels (magS, minDb) + calibrationDbOffset;
-        spectrumSide[(size_t)i] += (dbS - spectrumSide[(size_t)i]) * smoothingFactor;
-    }
+    SpectrumAnalysis::calculatePowerSpectrumDb (fftScratchMainL.data(), fftScratchMainR.data(),
+                                                fftWindow, spectrumMain.data(), smoothingFactor);
+    SpectrumAnalysis::calculatePowerSpectrumDb (fftScratchSideL.data(), fftScratchSideR.data(),
+                                                fftWindow, spectrumSide.data(), smoothingFactor);
 }
 
 void SpectrumAnalyzer::paint (juce::Graphics& g)
@@ -138,7 +126,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                 juce::Justification::centredLeft);
                 
     const float minFreq = 20.0f;
-    const float maxFreq = 20000.0f;
+    const float maxFreq = spectrumDisplayMaximumFrequency ((float) sampleRate);
     const float minDb = -108.0f;
     const float maxDb = 0.0f;
     
@@ -149,6 +137,9 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     const float freqs[] = { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f };
     for (float f : freqs)
     {
+        if (f > maxFreq)
+            continue;
+
         float x = plotBounds.getX() + plotBounds.getWidth() * (std::log (f / minFreq) / std::log (maxFreq / minFreq));
         g.drawVerticalLine ((int) std::round (x), plotBounds.getY(), plotBounds.getBottom());
     }
@@ -170,6 +161,8 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
             juce::Path path;
             bool first = true;
             
+            const int maxBin = historyLength / 2;
+
             for (const auto& cacheItem : binCache)
             {
                 float x = cacheItem.x;
@@ -181,8 +174,8 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                 if (binEnd - binStart < 1.0f)
                 {
                     float binCenter = (binStart + binEnd) * 0.5f;
-                    int idx1 = juce::jlimit (0, historyLength - 1, (int) std::floor (binCenter));
-                    int idx2 = juce::jlimit (0, historyLength - 1, idx1 + 1);
+                    int idx1 = juce::jlimit (0, maxBin, (int) std::floor (binCenter));
+                    int idx2 = juce::jlimit (0, maxBin, idx1 + 1);
                     float frac = binCenter - (float)idx1;
                     
                     float db1 = spectrumData[(size_t)idx1];
@@ -194,8 +187,8 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                 }
                 else
                 {
-                    int startIdx = juce::jlimit (0, historyLength - 1, (int) std::floor (binStart));
-                    int endIdx   = juce::jlimit (0, historyLength - 1, (int) std::ceil (binEnd));
+                    int startIdx = juce::jlimit (0, maxBin, (int) std::floor (binStart));
+                    int endIdx   = juce::jlimit (0, maxBin, (int) std::ceil (binEnd));
                     for (int i = startIdx; i <= endIdx; ++i)
                     {
                         if (spectrumData[(size_t)i] > db)
@@ -238,6 +231,9 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     // Frequency labels
     for (float f : freqs)
     {
+        if (f > maxFreq)
+            continue;
+
         float x = plotBounds.getX() + plotBounds.getWidth() * (std::log (f / minFreq) / std::log (maxFreq / minFreq));
         juce::String text = f >= 1000.0f ? juce::String (f / 1000.0f, 0) + "k" : juce::String (f, 0);
         
@@ -323,15 +319,16 @@ void SpectrumAnalyzer::rebuildBinCache()
     
     binCache.clear();
     const float minFreq = 20.0f;
-    const float maxFreq = 20000.0f;
+    const float maxFreq = spectrumDisplayMaximumFrequency ((float) sampleRate);
     
     for (float x = plotBounds.getX(); x <= plotBounds.getRight(); x += 1.0f)
     {
         float freqStart = minFreq * std::pow (maxFreq / minFreq, (x - 0.5f - plotBounds.getX()) / plotBounds.getWidth());
         float freqEnd   = minFreq * std::pow (maxFreq / minFreq, (x + 0.5f - plotBounds.getX()) / plotBounds.getWidth());
         
-        float binStart = freqStart * (float)historyLength / (float)sampleRate;
-        float binEnd   = freqEnd   * (float)historyLength / (float)sampleRate;
+        const float maxBin = (float) (historyLength / 2);
+        float binStart = juce::jlimit (0.0f, maxBin, freqStart * (float) historyLength / (float) sampleRate);
+        float binEnd   = juce::jlimit (0.0f, maxBin, freqEnd * (float) historyLength / (float) sampleRate);
         
         binCache.push_back ({x, binStart, binEnd});
     }

@@ -151,7 +151,9 @@ Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, HitCaptureBuffer& hitCaptureT
     : fifo (fifoToRead),
       hitCapture (hitCaptureToRead),
       mainHistory ((size_t) historyLength, 0.0f),
-      sidechainHistory ((size_t) historyLength, 0.0f)
+      sidechainHistory ((size_t) historyLength, 0.0f),
+      snapshotMainHistory ((size_t) historyLength, 0.0f),
+      snapshotSidechainHistory ((size_t) historyLength, 0.0f)
 {
     vblankAttachment = std::make_unique<juce::VBlankAttachment> (this, [this] { vblankCallback(); });
     startTimerHz (15);
@@ -160,6 +162,38 @@ Oscilloscope::Oscilloscope (ScopeFifo& fifoToRead, HitCaptureBuffer& hitCaptureT
 Oscilloscope::~Oscilloscope()
 {
     stopTimer();
+}
+
+void Oscilloscope::updateSnapshotOwnership()
+{
+    const bool shouldBeActive = isDisplayFrozen();
+    if (snapshotActive != shouldBeActive)
+    {
+        snapshotActive = shouldBeActive;
+        if (snapshotActive)
+        {
+            snapshotMainHistory = mainHistory;
+            snapshotSidechainHistory = sidechainHistory;
+            snapshotWriteIndex = writeIndex;
+        }
+        visibleBuffersDirty = true;
+    }
+}
+
+void Oscilloscope::evaluateAutoRelockEdge()
+{
+    const bool sidechainAvailable = fifo.getSideChannels() > 0;
+    const bool triggeredMode = viewMode == ScopeViewMode::Triggered;
+
+    if (shouldAutoRelockKickReference (kickReferenceState,
+                                       wasSidechainAvailable,
+                                       sidechainAvailable,
+                                       wasTriggeredMode,
+                                       triggeredMode))
+        relockKickReference();
+
+    wasSidechainAvailable = sidechainAvailable;
+    wasTriggeredMode = triggeredMode;
 }
 
 void Oscilloscope::setTimebase (double newSampleRate, int newDecimationFactor) noexcept
@@ -206,6 +240,8 @@ void Oscilloscope::vblankCallback()
     if (! isShowing())
         return;
 
+    evaluateAutoRelockEdge();
+
     std::array<float, scratchSize> mainScratch {};
     std::array<float, scratchSize> sidechainScratch {};
 
@@ -219,18 +255,11 @@ void Oscilloscope::vblankCallback()
 
         anyRead = true;
 
-        // Always keep draining the FIFO so it never overflows, but only advance
-        // the displayed history when the display isn't held (manual freeze or a
-        // temporary mouse-hold inspection). Held => the on-screen snapshot stays
-        // put so a drag/scrub has a stable reference underneath it.
-        if (! isDisplayFrozen())
+        for (int i = 0; i < count; ++i)
         {
-            for (int i = 0; i < count; ++i)
-            {
-                mainHistory[(size_t) writeIndex]      = mainScratch[(size_t) i];
-                sidechainHistory[(size_t) writeIndex] = sidechainScratch[(size_t) i];
-                writeIndex = (writeIndex + 1) % historyLength;
-            }
+            mainHistory[(size_t) writeIndex]      = mainScratch[(size_t) i];
+            sidechainHistory[(size_t) writeIndex] = sidechainScratch[(size_t) i];
+            writeIndex = (writeIndex + 1) % historyLength;
         }
     }
 
@@ -297,10 +326,11 @@ void Oscilloscope::vblankCallback()
         const bool isGliding = std::abs (targetTimeZoom - timeZoom) > 1.0e-3f || std::abs (targetAmpZoom - ampZoom) > 1.0e-3f;
         const bool scrollChanged = displayScrollMs != lastDisplayScrollMs;
 
-        if ((! isDisplayFrozen() && anyRead) || panGestureActive || isGliding || scrollChanged)
+        if ((! isDisplayFrozen() && anyRead) || panGestureActive || isGliding || scrollChanged || visibleBuffersDirty)
         {
-            rebuildVisibleBuffers (visible, scopeModeAppliesVisualOffset (viewMode),
+            rebuildVisibleBuffers (visible, scopeModeSupportsVisualOffset (viewMode),
                                    viewMode == ScopeViewMode::PhaseDelta);
+            visibleBuffersDirty = false;
 
             if (! isDisplayFrozen())
             {
@@ -434,9 +464,11 @@ void Oscilloscope::paint (juce::Graphics& g)
 
     if (viewMode == ScopeViewMode::Separate)
     {
-        const float laneHalfHeight = plotBounds.getHeight() * 0.22f;
-        drawYAxisLabels (g, plotBounds, plotBounds.getY() + plotBounds.getHeight() * 0.25f, laneHalfHeight, gain, labelColour);
-        drawYAxisLabels (g, plotBounds, plotBounds.getY() + plotBounds.getHeight() * 0.75f, laneHalfHeight, gain, labelColour);
+        const auto geom = calculateSeparateModeGeometry (plotBounds.getHeight());
+        drawYAxisLabels (g, plotBounds, plotBounds.getY() + geom.bassCenterY,
+                         geom.bassHeight * 0.5f, gain, labelColour);
+        drawYAxisLabels (g, plotBounds, plotBounds.getY() + geom.kickCenterY,
+                         geom.kickHeight * 0.5f, gain, labelColour);
     }
     else
     {
@@ -479,10 +511,20 @@ void Oscilloscope::drawHoverCrosshair (juce::Graphics& g, juce::Rectangle<float>
     juce::Colour crosshairCol = juce::Colours::lightgreen.withAlpha (0.75f);
     
 
-        const float midY = bounds.getCentreY();
-        const float halfHeight = bounds.getHeight() * 0.46f;
+        const bool separateMode = viewMode == ScopeViewMode::Separate;
+        const auto geom = calculateSeparateModeGeometry (bounds.getHeight());
+        const int lane = separateMode ? getSeparateLaneForY (lastMousePos.y - bounds.getY(), geom) : 0;
+        const float midY = separateMode
+                             ? bounds.getY() + (lane == 0 ? geom.bassCenterY : geom.kickCenterY)
+                             : bounds.getCentreY();
+        const float halfHeight = separateMode
+                                   ? 0.5f * (lane == 0 ? geom.bassHeight : geom.kickHeight)
+                                   : bounds.getHeight() * 0.46f;
         
-        const float amplitude = std::abs (lastMousePos.y - midY) / (halfHeight * gain);
+        const float laneTop = separateMode ? midY - halfHeight : bounds.getY();
+        const float laneBottom = separateMode ? midY + halfHeight : bounds.getBottom();
+        const float crosshairY = juce::jlimit (laneTop, laneBottom, lastMousePos.y);
+        const float amplitude = std::abs (crosshairY - midY) / (halfHeight * gain);
         float db = juce::Decibels::gainToDecibels (amplitude, -144.0f);
         
         if (db <= -144.0f)
@@ -491,7 +533,7 @@ void Oscilloscope::drawHoverCrosshair (juce::Graphics& g, juce::Rectangle<float>
             text = (db > 0.0f ? "+" : "") + juce::String (db, 1) + " dB";
             
         g.setColour (crosshairCol);
-        g.drawHorizontalLine ((int) std::round (lastMousePos.y), bounds.getX(), bounds.getRight());
+        g.drawHorizontalLine ((int) std::round (crosshairY), bounds.getX(), bounds.getRight());
 
     juce::Font font (juce::FontOptions(10.0f).withStyle("bold"));
     g.setFont (font);
@@ -1097,12 +1139,12 @@ void Oscilloscope::drawGrid (juce::Graphics& g,
 
             if (separateMode)
             {
-                const float laneHalfHeight = bounds.getHeight() * 0.22f;
-                drawHorizontalMarkers (bounds.getY() + bounds.getHeight() * 0.25f, laneHalfHeight);
-                drawHorizontalMarkers (bounds.getY() + bounds.getHeight() * 0.75f, laneHalfHeight);
+                const auto geom = calculateSeparateModeGeometry (bounds.getHeight());
+                drawHorizontalMarkers (bounds.getY() + geom.bassCenterY, geom.bassHeight * 0.5f);
+                drawHorizontalMarkers (bounds.getY() + geom.kickCenterY, geom.kickHeight * 0.5f);
 
                 gCache.setColour (gridMajor.withAlpha (0.65f));
-                gCache.drawHorizontalLine ((int) std::round (bounds.getCentreY()), bounds.getX(), bounds.getRight());
+                gCache.drawHorizontalLine ((int) std::round (bounds.getY() + geom.dividerY), bounds.getX(), bounds.getRight());
             }
             else
             {
@@ -1243,7 +1285,7 @@ void Oscilloscope::drawFreeRunMode (juce::Graphics& g,
 {
     // Raw live scope. Unlike Overlay this draws thin unfilled traces (no
     // alignment fills) and, crucially, the visible buffers were rebuilt with
-    // NO visual/PDC offset applied — see scopeModeAppliesVisualOffset — so it
+    // NO visual/PDC offset applied — see scopeModeSupportsVisualOffset — so it
     // shows the untouched incoming signals, continuously scrolling with the
     // newest material at the right edge.
     const float xStep = bounds.getWidth() / (float) (visible - 1);
@@ -1277,29 +1319,31 @@ void Oscilloscope::drawSeparateMode (juce::Graphics& g,
                                      float gain)
 {
     const float xStep = bounds.getWidth() / (float) (visible - 1);
-    const float laneHalfHeight = bounds.getHeight() * 0.22f;
-    const float bassCentreY = bounds.getY() + bounds.getHeight() * 0.25f;
-    const float kickCentreY = bounds.getY() + bounds.getHeight() * 0.75f;
+    const auto geom = calculateSeparateModeGeometry (bounds.getHeight());
 
+    // Draw bass in top lane
     drawTriggeredTrace (g, bounds, visibleMainBuffer.data(), visible, 0, visible, xStep,
-                        bassCentreY, laneHalfHeight, gain, bassColour.withAlpha(0.96f), 1.6f, 0.15f, 0.08f);
+                        bounds.getY() + geom.bassCenterY, geom.bassHeight * 0.5f, gain,
+                        bassColour.withAlpha(0.96f), 1.6f, 0.15f, 0.08f);
 
     g.setColour (bassColour.withAlpha (0.9f));
     g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
     g.drawText ("BASS",
                 juce::Rectangle<int> ((int) bounds.getX() + 4,
-                                      (int) (bassCentreY - laneHalfHeight - 16.0f),
+                                      (int) (bounds.getY() + geom.bassCenterY - geom.bassHeight * 0.5f - 16.0f),
                                       48, 12),
                 juce::Justification::centredLeft);
 
+    // Draw kick in bottom lane
     drawTriggeredTrace (g, bounds, visibleSideBuffer.data(), visible, 0, visible, xStep,
-                        kickCentreY, laneHalfHeight, gain, kickColour.withAlpha(0.96f), 1.6f, 0.15f, 0.08f);
+                        bounds.getY() + geom.kickCenterY, geom.kickHeight * 0.5f, gain,
+                        kickColour.withAlpha(0.96f), 1.6f, 0.15f, 0.08f);
 
     g.setColour (kickColour.withAlpha (0.9f));
     g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
     g.drawText ("KICK",
                 juce::Rectangle<int> ((int) bounds.getX() + 4,
-                                      (int) (kickCentreY - laneHalfHeight - 16.0f),
+                                      (int) (bounds.getY() + geom.kickCenterY - geom.kickHeight * 0.5f - 16.0f),
                                       48, 12),
                 juce::Justification::centredLeft);
 }
@@ -1433,7 +1477,7 @@ void Oscilloscope::drawScopeFooter (juce::Graphics& g,
                 + "  |  Zoom " + juce::String (timeZoom, 1) + "x"
                 + "  |  Amp " + juce::String (ampZoom, 1) + "x"
                 + "  |  PDC "
-                + (scopeModeAppliesVisualOffset (viewMode) ? juce::String (visualOffsetSamples) + " smp"
+                + (scopeModeSupportsVisualOffset (viewMode) ? juce::String (visualOffsetSamples) + " smp"
                                                            : juce::String ("off (raw)"));
 
     if (tempoAvailable && gridDivision != GridDivision::Milliseconds)
@@ -1450,19 +1494,25 @@ void Oscilloscope::rebuildVisibleBuffers (int visible, bool applyVisualOffset,
     // Free-run passes applyVisualOffset=false so it shows the raw incoming
     // signal; every other mode applies the display-only visual/PDC offset so
     // bass and kick line up for comparison.
-    const int effectiveOffset = applyVisualOffset ? visualOffsetSamples : 0;
+    const int effectiveOffset = applyVisualOffset
+                                  ? effectiveVisualOffsetSamples (viewMode, visualOffsetSamples)
+                                  : 0;
     const int undecimatedScrollSamples = msToSamples(displayScrollMs, sampleRate);
     const int decimatedScrollSamples = undecimatedScrollSamples / std::max(1, decimationFactor);
     const int firstVisible = historyLength - visible - decimatedScrollSamples;
 
+    const auto& currentMain = snapshotActive ? snapshotMainHistory : mainHistory;
+    const auto& currentSide = snapshotActive ? snapshotSidechainHistory : sidechainHistory;
+    const int currentWriteIndex = snapshotActive ? snapshotWriteIndex : writeIndex;
+
     for (int i = 0; i < visible; ++i)
     {
-        const auto indices = resolveRelativeDisplayHistoryIndices (writeIndex, historyLength,
+        const auto indices = resolveRelativeDisplayHistoryIndices (currentWriteIndex, historyLength,
                                                                    firstVisible, i,
                                                                    effectiveOffset,
                                                                    decimationFactor);
-        visibleMainBuffer[(size_t) i] = mainHistory[(size_t) indices.bassIndex];
-        visibleSideBuffer[(size_t) i] = sidechainHistory[(size_t) indices.kickIndex];
+        visibleMainBuffer[(size_t) i] = currentMain[(size_t) indices.bassIndex];
+        visibleSideBuffer[(size_t) i] = currentSide[(size_t) indices.kickIndex];
     }
 
     // P7: low-band envelope-smoothed copies for a musically-readable phase
@@ -1808,13 +1858,16 @@ void Oscilloscope::buildWaitingFallback()
     fallbackBass.resize ((size_t) desiredSamples);
     fallbackKick.resize ((size_t) desiredSamples);
 
-    const int start = writeIndex - desiredSamples;
+    const auto& currentMain = snapshotActive ? snapshotMainHistory : mainHistory;
+    const auto& currentSide = snapshotActive ? snapshotSidechainHistory : sidechainHistory;
+    const int currentWriteIndex = snapshotActive ? snapshotWriteIndex : writeIndex;
+    const int start = currentWriteIndex - desiredSamples;
     float peak = 0.0f;
     for (int i = 0; i < desiredSamples; ++i)
     {
         const int idx = wrapHistoryIndex (start + i, historyLength);
-        fallbackBass[(size_t) i] = mainHistory[(size_t) idx];
-        fallbackKick[(size_t) i] = sidechainHistory[(size_t) idx];
+        fallbackBass[(size_t) i] = currentMain[(size_t) idx];
+        fallbackKick[(size_t) i] = currentSide[(size_t) idx];
         peak = juce::jmax (peak, std::abs (fallbackBass[(size_t) i]),
                            std::abs (fallbackKick[(size_t) i]));
     }
@@ -1836,10 +1889,6 @@ void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)
     if (delayParameter == nullptr)
         return;
 
-    // Shift is now the gesture that starts a delay-drag at all (it must be held
-    // for mouseDown to have entered this gesture in the first place), so it can
-    // no longer double as a separate "fine steps" modifier — use coarse
-    // sensitivity throughout the drag.
     const float deltaMs = scopeDragPixelsToDelayDeltaMs (e.position.x - dragStartX, false);
     const float nextValue = juce::jlimit (-20.0f, 20.0f, dragStartDelayMs + deltaMs);
     delayParameter->setValueNotifyingHost (delayParameter->convertTo0to1 (nextValue));
@@ -1858,6 +1907,7 @@ void Oscilloscope::beginInspectionHold (float mouseX) noexcept
     // and anchor the pan to this mouse position + the current scroll so the
     // whole drag is computed deterministically from here.
     interactionHoldActive = true;
+    updateSnapshotOwnership();
     panGestureActive = true;
     dragStartX = mouseX;
     panStartScrollMs = displayScrollMs;
@@ -1901,6 +1951,7 @@ void Oscilloscope::endInspectionHold() noexcept
     // Resume live movement. Deliberately does NOT clear `frozen`, so a manual
     // freeze set before the click stays active after releasing the mouse.
     interactionHoldActive = false;
+    updateSnapshotOwnership();
     panGestureActive = false;
     
     repaint();

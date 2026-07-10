@@ -5,13 +5,13 @@
 #include <array>
 #include <functional>
 
-#include "../util/ScopeFifo.h"
+#include "../util/SpectrumFifo.h"
 
 class SpectrumAnalyzer : public juce::Component,
                          public juce::Timer
 {
 public:
-    SpectrumAnalyzer(ScopeFifo& fifoToUse);
+    SpectrumAnalyzer(SpectrumFifo& fifoToUse);
     ~SpectrumAnalyzer() override;
 
     void paint (juce::Graphics& g) override;
@@ -32,7 +32,7 @@ private:
     void rebuildBinCache();
     void drawWaveLegend(juce::Graphics& g, juce::Rectangle<float> bounds) const;
 
-    ScopeFifo& spectrumFifo;
+    SpectrumFifo& spectrumFifo;
 
     double sampleRate = 44100.0;
     
@@ -43,12 +43,16 @@ private:
     juce::Point<float> lastMousePos;
 
     static constexpr int historyLength = 8192;
-    std::array<float, historyLength> mainHistory {};
-    std::array<float, historyLength> sidechainHistory {};
+    std::array<float, historyLength> mainLHistory {};
+    std::array<float, historyLength> mainRHistory {};
+    std::array<float, historyLength> sideLHistory {};
+    std::array<float, historyLength> sideRHistory {};
     int writeIndex = 0;
 
-    std::array<float, historyLength * 2> fftScratchMain {};
-    std::array<float, historyLength * 2> fftScratchSide {};
+    std::array<float, historyLength * 2> fftScratchMainL {};
+    std::array<float, historyLength * 2> fftScratchMainR {};
+    std::array<float, historyLength * 2> fftScratchSideL {};
+    std::array<float, historyLength * 2> fftScratchSideR {};
     juce::dsp::WindowingFunction<float> fftWindow { historyLength, juce::dsp::WindowingFunction<float>::hann, false };
 
     std::array<float, historyLength> spectrumMain {};

@@ -347,9 +347,19 @@ inline bool scopeDisplayHeld (bool manualFrozen, bool interactionHoldActive) noe
 // mode applies the offset so the bass and kick line up for comparison. This is
 // the semantic that makes Free-run and Overlay genuinely different rather than
 // two labels over identical drawing.
-inline bool scopeModeAppliesVisualOffset (ScopeViewMode mode) noexcept
+inline bool scopeModeSupportsVisualOffset (ScopeViewMode mode) noexcept
 {
-    return mode != ScopeViewMode::FreeRun;
+    return mode == ScopeViewMode::Separate || mode == ScopeViewMode::PhaseDelta;
+}
+
+inline int effectiveVisualOffsetSamples (ScopeViewMode mode, int storedOffsetSamples) noexcept
+{
+    return scopeModeSupportsVisualOffset (mode) ? storedOffsetSamples : 0;
+}
+
+inline float spectrumDisplayMaximumFrequency (float sampleRate) noexcept
+{
+    return std::min (20000.0f, 0.98f * 0.5f * sampleRate);
 }
 
 // Only the triggered view maps a horizontal drag to the Delay parameter, and
@@ -394,6 +404,19 @@ inline bool kickReferenceShouldReplaceOnCapture (KickReferenceState state) noexc
 inline KickReferenceState kickReferenceStateAfterCapture (KickReferenceState state) noexcept
 {
     return kickReferenceShouldReplaceOnCapture (state) ? KickReferenceState::Locked : state;
+}
+
+inline bool shouldAutoRelockKickReference (KickReferenceState state,
+                                           bool wasSidechainAvailable,
+                                           bool sidechainAvailable,
+                                           bool wasTriggeredMode,
+                                           bool triggeredMode) noexcept
+{
+    if (state == KickReferenceState::RelockPending || ! sidechainAvailable)
+        return false;
+
+    return (sidechainAvailable && ! wasSidechainAvailable)
+        || (triggeredMode && ! wasTriggeredMode);
 }
 
 inline const char* triggeredScopeEmptyText (KickReferenceState state) noexcept
@@ -735,4 +758,31 @@ inline ScopePeakMarkers findEnvelopePeakMarkers (const float* bass,
     markers.valid = true;
     markers.deltaMs = samplesToMs (markers.bassPeakIndex - markers.kickPeakIndex, sampleRate);
     return markers;
+}
+
+
+struct ScopeLaneGeometry {
+    float bassCenterY;
+    float bassHeight;
+    float kickCenterY;
+    float kickHeight;
+    float dividerY;
+};
+
+inline ScopeLaneGeometry calculateSeparateModeGeometry (float height) noexcept
+{
+    const float laneHeight = height * 0.45f;
+    const float margin = height * 0.05f;
+    return {
+        margin + laneHeight * 0.5f,
+        laneHeight,
+        height - margin - laneHeight * 0.5f,
+        laneHeight,
+        height * 0.5f
+    };
+}
+
+inline int getSeparateLaneForY (float y, const ScopeLaneGeometry& geom) noexcept
+{
+    return y < geom.dividerY ? 0 : 1;
 }

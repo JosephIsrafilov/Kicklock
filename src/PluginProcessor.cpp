@@ -985,6 +985,10 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   processedKickLowpass.reset();
   analysisBassCrossoverSim.reset();
   scopeFifo.prepare(8192);
+
+  spectrumSidechainDelay.setMaximumDelayInSamples(maxDelaySamples + 4);
+  spectrumSidechainDelay.prepare({sampleRate, (juce::uint32)juce::jmax(1, samplesPerBlock), 2});
+  spectrumSidechainDelay.reset();
   rawScopeFifo.prepare(8192);
   spectrumFifo.prepare(16384);
 
@@ -1267,10 +1271,6 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState(
     scopeDecimationCounter = 0;
     scopeFifo.pushSample(mainMono, meteredSidechainMono);
   }
-
-  if (spectrumCaptureEnabled.load(std::memory_order_relaxed)) {
-    spectrumFifo.pushSample(mainMono, meteredSidechainMono);
-  }
 }
 
 void KickLockAudioProcessor::processBlockBypassed(
@@ -1286,6 +1286,10 @@ void KickLockAudioProcessor::processBlockBypassed(
   // below is skipped (a fixed-delay passthrough only, to preserve PDC).
   const bool hasSidechain = isSidechainBusActive(sidechainBuffer);
   sidechainReferenceAvailable.store(hasSidechain);
+  scopeFifo.setChannelCounts (mainBuffer.getNumChannels(),
+                              hasSidechain ? sidechainBuffer.getNumChannels() : 0);
+  rawScopeFifo.setChannelCounts (mainBuffer.getNumChannels(),
+                                 hasSidechain ? sidechainBuffer.getNumChannels() : 0);
 
   const int numSamples = mainBuffer.getNumSamples();
   BlockObservationStats observationStats;
@@ -1352,6 +1356,21 @@ void KickLockAudioProcessor::processBlockBypassed(
                                       : 0.0f;
 
       pushMetersScopeAndTransientState(mainMono, sidechainMono);
+      if (spectrumCaptureEnabled.load(std::memory_order_relaxed)) {
+        const float rawBassL = numChannels > 0 ? mainWrite[0][i] : 0.0f;
+        const float rawBassR = numChannels > 1 ? mainWrite[1][i] : rawBassL;
+        const float sideRawL = scRead[0] != nullptr ? scRead[0][i] : 0.0f;
+        const float sideRawR = scRead[1] != nullptr ? scRead[1][i] : sideRawL;
+
+        spectrumSidechainDelay.pushSample (0, sideRawL);
+        spectrumSidechainDelay.pushSample (1, sideRawR);
+        const float alignedKickL = spectrumSidechainDelay.popSample (0, (float) getLatencySamples());
+        const float alignedKickR = spectrumSidechainDelay.popSample (1, (float) getLatencySamples());
+
+        spectrumFifo.pushSample (rawBassL, rawBassR, alignedKickL, alignedKickR,
+                                 juce::jlimit (0, 2, numChannels),
+                                 juce::jlimit (0, 2, sidechainChannels));
+      }
     }
   }
 
@@ -1428,6 +1447,10 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
 
   const bool hasSidechain = isSidechainBusActive(sidechainBuffer);
   sidechainReferenceAvailable.store(hasSidechain);
+  scopeFifo.setChannelCounts (mainBuffer.getNumChannels(),
+                              hasSidechain ? sidechainBuffer.getNumChannels() : 0);
+  rawScopeFifo.setChannelCounts (mainBuffer.getNumChannels(),
+                                 hasSidechain ? sidechainBuffer.getNumChannels() : 0);
 
   const int numSamples = mainBuffer.getNumSamples();
 
@@ -1606,8 +1629,21 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
         scopeFifo.pushSample(mainMono, meteredSidechainMono);
       }
 
-      if (captureSpectrum) {
-        spectrumFifo.pushSample(mainMono, meteredSidechainMono);
+      if (captureSpectrum)
+      {
+        const float bassL = mainChannels > 0 ? mainBuffer.getReadPointer (0)[i] : 0.0f;
+        const float bassR = mainChannels > 1 ? mainBuffer.getReadPointer (1)[i] : bassL;
+        const float kickL = sidechainBuffer.getNumChannels() > 0 ? sidechainBuffer.getReadPointer (0)[i] : 0.0f;
+        const float kickR = sidechainBuffer.getNumChannels() > 1 ? sidechainBuffer.getReadPointer (1)[i] : kickL;
+
+        spectrumSidechainDelay.pushSample (0, kickL);
+        spectrumSidechainDelay.pushSample (1, kickR);
+        const float alignedKickL = spectrumSidechainDelay.popSample (0, latencySamplesF);
+        const float alignedKickR = spectrumSidechainDelay.popSample (1, latencySamplesF);
+
+        spectrumFifo.pushSample (bassL, bassR, alignedKickL, alignedKickR,
+                                 juce::jlimit (0, 2, mainChannels),
+                                 juce::jlimit (0, 2, sidechainBuffer.getNumChannels()));
       }
     }
   }

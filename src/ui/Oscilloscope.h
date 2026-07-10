@@ -36,20 +36,34 @@ public:
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseMagnify (const juce::MouseEvent&, float scaleFactor) override;
 
-    void setFrozen (bool shouldFreeze) noexcept { frozen = shouldFreeze; }
+    void setFrozen (bool shouldFreeze) noexcept
+    {
+        if (frozen != shouldFreeze) {
+            frozen = shouldFreeze;
+            updateSnapshotOwnership();
+        }
+    }
     bool isFrozen() const noexcept              { return frozen; }
+
+    void setVisualOffsetSamples(int offset) noexcept
+    {
+        if (visualOffsetSamples != offset) {
+            visualOffsetSamples = offset;
+            visibleBuffersDirty = true;
+        }
+    }
 
     // Effective display freeze: manual Freeze button OR a temporary mouse-hold
     // paint gate on this, but they are stored separately so ending an
     // inspection hold never clears a manual freeze the user set on purpose.
     bool isDisplayFrozen() const noexcept { return scopeDisplayHeld (frozen, interactionHoldActive); }
 
-    void setViewMode (ScopeViewMode mode) noexcept
+    void setViewMode (ScopeViewMode newMode) noexcept
     {
-        if (viewMode != mode)
-        {
-            viewMode = mode;
+        if (viewMode != newMode) {
+            viewMode = newMode;
             displayScrollMs = 0.0f;
+            visibleBuffersDirty = true;
             repaint();
         }
     }
@@ -67,14 +81,7 @@ public:
 
     void setTempoInfo (double bpm, bool available) noexcept;
 
-    void setVisualOffsetSamples (int offset) noexcept
-    {
-        if (visualOffsetSamples != offset)
-        {
-            visualOffsetSamples = offset;
-            repaint();
-        }
-    }
+
     void setTimebase (double newSampleRate, int newDecimationFactor) noexcept;
     void setDelayParameter (juce::RangedAudioParameter* parameter) noexcept { delayParameter = parameter; }
     void setVisualOffsetParameter (juce::RangedAudioParameter* parameter) noexcept { visualOffsetParameter = parameter; }
@@ -197,6 +204,18 @@ private:
 
     bool  frozen               = false;   // manual Freeze button
     bool  interactionHoldActive = false;  // temporary mouse-hold inspection
+
+    std::vector<float> snapshotMainHistory;
+    std::vector<float> snapshotSidechainHistory;
+    int snapshotWriteIndex = 0;
+    bool snapshotActive = false;
+    bool visibleBuffersDirty = true;
+    bool wasSidechainAvailable = false;
+    bool wasTriggeredMode = false;
+
+    void updateSnapshotOwnership();
+    void evaluateAutoRelockEdge();
+
     float displayGain = 1.0f;   // smoothed auto-gain applied to both traces
     float timeZoom    = 1.0f;   // horizontal zoom (1..16), glides toward target
     float ampZoom     = 1.0f;   // vertical zoom (1..8), glides toward target

@@ -577,6 +577,7 @@ void KickLockAudioProcessorEditor::pushScopeSettings()
     const auto requestedMode = scopeViewModeFromChoiceIndex (viewIdx);
     const auto mode = requestedMode;
     oscilloscope.setViewMode (mode);
+    updateVisualOffsetAvailability (mode);
     
     if (mode == ScopeViewMode::Spectrum)
     {
@@ -594,6 +595,17 @@ void KickLockAudioProcessorEditor::pushScopeSettings()
 
     if (const auto* offset = audioProcessor.apvts.getRawParameterValue ("visualOffsetSamples"))
         oscilloscope.setVisualOffsetSamples ((int) std::lround (offset->load()));
+}
+
+void KickLockAudioProcessorEditor::updateVisualOffsetAvailability (ScopeViewMode mode)
+{
+    const bool supported = scopeModeSupportsVisualOffset (mode);
+    visualOffsetSlider.setEnabled (supported);
+    visualOffsetSlider.setAlpha (supported ? 1.0f : 0.35f);
+    visualOffsetLabel.setAlpha (supported ? 1.0f : 0.35f);
+    visualOffsetSlider.setTooltip (supported
+                                     ? "Display-only sample shift applied to the bass wave on the scope so you can align phases visually. Does not affect the sound."
+                                     : "Visual Offset is available only in Separate and Phase Delta modes.");
 }
 
 void KickLockAudioProcessorEditor::refreshStatusStrings()
@@ -769,6 +781,13 @@ void KickLockAudioProcessorEditor::timerCallback()
     oscilloscope.setTempoInfo (audioProcessor.getLatestBpm(),
                                audioProcessor.isTempoAvailable());
     pushScopeSettings();
+
+    const bool relockPending = oscilloscope.getKickReferenceState() == KickReferenceState::RelockPending;
+    relockKickButton.setButtonText (relockPending ? "Re-locking..." : "Re-lock");
+    relockKickButton.setEnabled (! relockPending);
+    relockKickButton.setTooltip (relockPending
+                                   ? "Waiting for the next valid kick transient to replace the reference."
+                                   : "Waits for the next kick transient and stores it as the triggered-scope reference.");
 
     const bool hasSidechainForPunch = audioProcessor.hasSidechainReference();
     const bool punchValid = hasSidechainForPunch && audioProcessor.isTransientPunchValid();
