@@ -579,6 +579,42 @@ public:
             expectGreaterThan (result.confidence, 0.1f);
         }
 
+        beginTest ("Canonical WTD stays weighted when one band is stronger");
+        {
+            constexpr int n = 16384;
+            constexpr float amplitude = 0.08f;
+            const double frequencies[] = { 40.0, 90.0, 180.0, 350.0 };
+            const double weakPhase = std::acos (0.025);
+            const double phases[] = { weakPhase, std::acos (0.36), weakPhase, weakPhase };
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = (double) i / kSampleRate;
+                for (int band = 0; band < PhaseBands::numBands; ++band)
+                {
+                    const double phase = kTwoPi * frequencies[band] * t;
+                    bass[(size_t) i] += amplitude * (float) std::sin (phase);
+                    kick[(size_t) i] += amplitude * (float) std::sin (phase + phases[band]);
+                }
+            }
+
+            const auto multi = MultiBandCorrelation::analyze (bass.data(), kick.data(), n, kSampleRate);
+            const auto canonical = PhaseFixEngine::scoreSettings (
+                bass.data(), kick.data(), n, kSampleRate, {},
+                PhaseFixEngine::absoluteManualMaxDelayMs);
+
+            expectWithinAbsoluteError (multi.bands[PhaseBands::lowBand].matchPercent, 68.0f, 4.0f);
+            expectWithinAbsoluteError (multi.weightedMatchPercent, 57.0f, 4.0f);
+            expectWithinAbsoluteError (canonical.matchPercent, multi.weightedMatchPercent, 1.0e-4f);
+            expectLessThan (multi.weightedMatchPercent,
+                            multi.bands[PhaseBands::lowBand].matchPercent);
+
+            const int roundedPredicted = (int) std::round (canonical.matchPercent);
+            const int roundedVerified = (int) std::round (multi.weightedMatchPercent);
+            expectEquals (roundedPredicted, roundedVerified);
+        }
+
     }
 };
 

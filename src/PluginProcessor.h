@@ -274,7 +274,13 @@ private:
     PhaseFixResult latestFixResult;
     std::vector<float> lastAnalyzedBassWindow;
     std::vector<float> lastAnalyzedKickWindow;
+    // The exact pair used for the offline recommendation.  Apply verification
+    // must use this same hit-concatenated material, not a fresh capture or the
+    // full rolling buffer.
     float lastAnalyzedCrossoverHz = 150.0f;
+    double lastAnalyzedSampleRate = 0.0;
+    InterpolationType lastAnalyzedDelayInterpolation = InterpolationType::Linear;
+    bool lastAnalyzedCrossoverEnabled = false;
     ParameterSnapshot latestRevertSnapshot;
     std::atomic<bool> revertSnapshotValid { false };
     std::array<ParameterSnapshot, 2> compareSlots {};

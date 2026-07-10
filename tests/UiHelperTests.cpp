@@ -310,6 +310,14 @@ public:
             expect (! scopeFullModeShowsGrid (ScopeViewMode::Spectrum));
         }
 
+        beginTest ("Generic transient markers are disabled in every scope mode");
+        {
+            for (const auto mode : { ScopeViewMode::Triggered, ScopeViewMode::FreeRun,
+                                     ScopeViewMode::PhaseDelta, ScopeViewMode::Separate,
+                                     ScopeViewMode::Spectrum })
+                expect (! scopeModeShowsGenericTransientMarkers (mode));
+        }
+
         beginTest ("Scope zoom helpers preserve direction, limits, and Spectrum gating");
         {
             expectWithinAbsoluteError (scopeZoomTargetFromWheelDelta (2.0f, 1.0f, 1.0f, 16.0f),
@@ -598,7 +606,9 @@ public:
             expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, true, true, false)); // Spectrum
             expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, true, true, true, true));
             expect (! shouldAutoRelockKickReference (KickReferenceState::Locked, false, false, false, true));
-            expect (! shouldAutoRelockKickReference (KickReferenceState::RelockPending, false, true, false, true));
+            // Initial Triggered state is pending, but the first sidechain edge
+            // still needs the shared reset-fenced transition.
+            expect (shouldAutoRelockKickReference (KickReferenceState::RelockPending, false, true, false, true));
         }
 
         beginTest ("Triggered mode has no live-history fallback");
@@ -682,18 +692,13 @@ public:
             expect (scopeKickReferenceCaptureIsValid (0.7f));
         }
 
-        beginTest ("Pending re-lock accepts a valid partial retriggered window");
+        beginTest ("Incomplete re-lock windows cannot become a locked reference");
         {
-            const int preRoll = msToSamples (20.0f, kSampleRate);
-            const int sixtyMs = msToSamples (60.0f, kSampleRate);
             const float validPeak = (float) std::pow (10.0, -30.0 / 20.0);
 
-            expect (! scopePendingRelockCaptureIsReady (preRoll + sixtyMs - 1,
-                                                        preRoll, kSampleRate, validPeak));
-            expect (! scopePendingRelockCaptureIsReady (preRoll + sixtyMs,
-                                                        preRoll, kSampleRate, 1.0e-5f));
-            expect (scopePendingRelockCaptureIsReady (preRoll + sixtyMs,
-                                                      preRoll, kSampleRate, validPeak));
+            expect (! scopeCompletedCaptureCanLock (8159, 8160, validPeak));
+            expect (! scopeCompletedCaptureCanLock (8160, 8160, 1.0e-5f));
+            expect (scopeCompletedCaptureCanLock (8160, 8160, validPeak));
         }
         beginTest ("Triggered Kick source selection uses locked reference when valid");
         {

@@ -719,8 +719,8 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
                 || latestResult.quality == PhaseFixQuality::PartialImprovement)
             {
                 body << (latestResult.quality == PhaseFixQuality::StrongImprovement
-                             ? "Fix found: Live match "
-                             : "Partial fix found: Live match ")
+                             ? "Fix found: Predicted WTD "
+                             : "Partial fix: Predicted WTD ")
                      << juce::String (beforePercent) << "% -> "
                      << juce::String (afterPercent) << "%"
                      << (latestResult.quality == PhaseFixQuality::PartialImprovement
@@ -752,7 +752,7 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
                 else
                     body << "\n\nNo applicable bass-path change was found.";
 
-                body << "\n\nCurrent low-end match: " << juce::String (beforePercent) << "%";
+                body << "\n\nCurrent Predicted WTD: " << juce::String (beforePercent) << "%";
             }
 
             if (resultCanApply && latestResult.largeTimingOffset)
@@ -776,6 +776,18 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
     }
 
     lastAnalyzeState = state;
+
+    const auto verification = audioProcessor.getLatestFixResult();
+    if (verification.verifiedAfterMatchPercent >= 0.0f
+        && std::abs (verification.verifiedAfterMatchPercent - latestResult.verifiedAfterMatchPercent) > 1.0e-4f)
+    {
+        latestResult = verification;
+        analyzerBody.setText (analyzerBody.getText() + "\n\nVerified WTD: "
+                                  + juce::String ((int) std::round (juce::jlimit (0.0f, 100.0f,
+                                                                                  verification.verifiedAfterMatchPercent)))
+                                  + "%",
+                              juce::dontSendNotification);
+    }
 
     const bool canApply = applyFixAvailable (hasSidechain, haveResult);
     applyFixButton.setEnabled (canApply);

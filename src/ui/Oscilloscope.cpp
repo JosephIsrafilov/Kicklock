@@ -187,13 +187,16 @@ void Oscilloscope::evaluateAutoRelockEdge()
 
     const bool sidechainDisconnected = wasSidechainAvailable && ! sidechainAvailable;
 
-    if (shouldAutoRelockKickReference (kickReferenceState,
-                                       wasSidechainAvailable,
-                                       sidechainAvailable,
-                                       wasTriggeredMode,
-                                       triggeredMode)
+    const bool enteredTriggeredWithSidechain = shouldAutoRelockKickReference (
+        kickReferenceState, wasSidechainAvailable, sidechainAvailable,
+        wasTriggeredMode, triggeredMode);
+
+    // Disconnects clear stale Triggered state immediately.  A reconnect does
+    // not re-arm a second fence if that transition is already pending; the
+    // pending reset marker fences the first post-reconnect hit.
+    if ((enteredTriggeredWithSidechain && ! relockFencePending)
         || (sidechainDisconnected && triggeredMode))
-        relockKickReference();
+        beginTriggeredRelockTransition();
 
     wasSidechainAvailable = sidechainAvailable;
     wasTriggeredMode = triggeredMode;
@@ -446,11 +449,6 @@ void Oscilloscope::paint (juce::Graphics& g)
             case ScopeViewMode::Separate:   drawSeparateMode (g, plotBounds, visible, gain); break;
         }
 
-        // Transient markers read the aligned relationship, so they only make sense
-        // in the alignment views — not in the raw Free-run scope.
-        if (viewMode != ScopeViewMode::FreeRun)
-            drawTransientMarkers (g, plotBounds, visible);
-
         drawHoverCrosshair (g, plotBounds, gain);
     }
 
@@ -574,9 +572,6 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     {
         g.setColour (labelColour);
         g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
-    {
-        g.setColour (labelColour);
-        g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
         g.drawText (fifo.getSideChannels() > 0 ? triggeredScopeEmptyText (kickReferenceState)
                                                : "WAITING FOR SIDECHAIN",
                     bounds.withSizeKeepingCentre (220.0f, 18.0f).toNearestInt(),
@@ -596,6 +591,10 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
     const double rate = sampleRate;
 
     const int triggerSample = juce::jlimit (0, n - 1, preRoll);
+    const bool referenceCompatible = kickReferenceValid
+        && triggeredReferenceSharesFrameGeometry (kickReferenceTriggerSample,
+                                                  triggerSample,
+                                                  n);
 
     // Time zoom: select the visible slice of the capture window, keeping the
     // visual 0 ms line at a fixed fractional x. The ms axis uses the source's own
@@ -640,6 +639,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         GhostsCacheKey currentGhostsKey;
         currentGhostsKey.first = first;
         currentGhostsKey.visible = visible;
+        currentGhostsKey.triggerSample = triggerSample;
         currentGhostsKey.gain = gain;
         currentGhostsKey.timeZoom = timeZoom;
         currentGhostsKey.boundsW = (int) bounds.getWidth();
@@ -678,6 +678,7 @@ void Oscilloscope::drawTriggeredMode (juce::Graphics& g,
         currentKickKey.fill = kickFillCount;
         currentKickKey.first = first;
         currentKickKey.visible = visible;
+        currentKickKey.triggerSample = triggerSample;
         currentKickKey.gain = gain;
         currentKickKey.timeZoom = timeZoom;
         currentKickKey.boundsW = (int) bounds.getWidth();
@@ -1397,46 +1398,6 @@ void Oscilloscope::strokeMinMaxBand (juce::Graphics& g, juce::Rectangle<float> b
                                               juce::PathStrokeType::rounded));
 }
 
-void Oscilloscope::drawTransientMarkers (juce::Graphics& g,
-                                         juce::Rectangle<float> bounds,
-                                         int visible)
-{
-    // P7: markers sit on the amplitude ENVELOPE peak (rectify + centered smooth)
-    // rather than the raw broadband peak sample, so the Δ-ms read-out reflects
-    // the musical kick/bass body offset and stays stable frame to frame. Δ is
-    // computed at the scope's effective (decimated) sample rate.
-    const double scopeRate = sampleRate / (double) juce::jmax (1, decimationFactor);
-    const auto markers = findEnvelopePeakMarkers (visibleMainBuffer.data(),
-                                                 visibleSideBuffer.data(),
-                                                 visible, scopeRate);
-    if (! markers.valid || visible <= 1)
-        return;
-
-    const float xStep = bounds.getWidth() / (float) (visible - 1);
-    const float bassX = bounds.getX() + (float) markers.bassPeakIndex * xStep;
-    const float kickX = bounds.getX() + (float) markers.kickPeakIndex * xStep;
-
-    g.setColour (kickColour.withAlpha (0.45f));
-    g.drawLine (kickX, bounds.getY(), kickX, bounds.getBottom(), 1.0f);
-    drawMarkerTriangle (g, kickX, bounds.getY() + 10.0f, kickColour);
-
-    g.setColour (bassColour.withAlpha (0.7f));
-    g.drawLine (bassX, bounds.getY(), bassX, bounds.getBottom(), 1.0f);
-    drawMarkerTriangle (g, bassX, bounds.getY() + 22.0f, bassColour);
-
-    g.setColour (juce::Colours::white.withAlpha (0.92f));
-    g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-    const juce::String deltaLabel = juce::String::fromUTF8 ("\xCE\x94 ")
-                                  + (markers.deltaMs >= 0.0f ? "+" : "")
-                                  + juce::String (markers.deltaMs, 2) + " ms · "
-                                  + timingVerdictText (markers.deltaMs);
-    g.drawText (deltaLabel,
-                juce::Rectangle<int> ((int) (bounds.getRight() - 172.0f),
-                                      (int) (bounds.getY() + 4.0f),
-                                      164, 14),
-                juce::Justification::centredRight);
-}
-
 void Oscilloscope::drawScopeFooter (juce::Graphics& g,
                                     juce::Rectangle<float> footerStrip,
                                     int visible) const
@@ -1545,6 +1506,9 @@ void Oscilloscope::ensureSweepBuffersSized()
     kickReferenceHitId = 0;
     sweepMarkersHitId = 0;
     kickReferenceState = KickReferenceState::RelockPending;
+    relockFencePending = false;
+    triggeredPanUserSet = false;
+    invalidateTriggeredRenderCaches();
 }
 
 bool Oscilloscope::drainSweepStream (bool consume)
@@ -1585,6 +1549,7 @@ bool Oscilloscope::drainSweepStream (bool consume)
                     continue;
 
                 discardingSweepUntilRelock = false;
+                relockFencePending = false;
             }
 
             if ((flagScratch[(size_t) i] & HitCaptureBuffer::sweepStartFlag) != 0)
@@ -1592,10 +1557,7 @@ bool Oscilloscope::drainSweepStream (bool consume)
                 if (kickReferenceState == KickReferenceState::RelockPending && kickReferenceValid)
                 {
                     if (! pendingRelockDiscarding
-                        && scopePendingRelockCaptureIsReady (pendingRelockFill,
-                                                             sweepPreRollSamples,
-                                                             sampleRate,
-                                                             pendingRelockPeak))
+                        && pendingRelockFill >= sweepWindowSamples)
                     {
                         finishPendingRelockSweep();
                         dirty = true;
@@ -1608,14 +1570,7 @@ bool Oscilloscope::drainSweepStream (bool consume)
                          && kickReferenceShouldReplaceOnCapture (kickReferenceState)
                          && ! sweepDiscarding)
                 {
-                    float kickPeak = 0.0f;
-                    for (int k = 0; k < sweepFill; ++k)
-                        kickPeak = juce::jmax (kickPeak, std::abs (sweepKick[(size_t) k]));
-
-                    if (scopePendingRelockCaptureIsReady (sweepFill,
-                                                          sweepPreRollSamples,
-                                                          sampleRate,
-                                                          kickPeak))
+                    if (sweepFill >= sweepWindowSamples)
                     {
                         finishSweep();
                         dirty = true;
@@ -1712,6 +1667,9 @@ void Oscilloscope::promoteCurrentSweepToGhost()
 
 void Oscilloscope::finishSweep()
 {
+    if (! scopeCompletedCaptureCanLock (sweepFill, sweepWindowSamples, sweepPeak))
+        return;
+
     if (kickReferenceShouldReplaceOnCapture (kickReferenceState))
     {
         float peak = 0.0f;
@@ -1725,21 +1683,19 @@ void Oscilloscope::finishSweep()
             kickReferencePeak = peak;
             kickReferenceHitId = sweepHitId;
             kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
+            commitTriggeredReferenceFrame();
         }
     }
 
     // Δ markers are computed ONCE per completed hit over the full window (not
     // the zoomed slice), so the read-out can't jitter frame-to-frame and
     // doesn't change with zoom. Bass from this sweep, kick from the reference.
-    const float* triggerSource = kickReferenceValid ? kickReference.data()
-                                                    : sweepKick.data();
-    sweepTriggerSample = findTriggeredKickOnsetIndex (triggerSource,
-                                                      sweepWindowSamples,
-                                                      sweepPreRollSamples);
-    if (kickReferenceValid && kickReferenceHitId == sweepHitId)
-        kickReferenceTriggerSample = sweepTriggerSample;
-    else if (kickReferenceValid)
+    if (kickReferenceValid && kickReferenceHitId != sweepHitId)
         sweepTriggerSample = kickReferenceTriggerSample;
+    else if (! kickReferenceValid)
+        sweepTriggerSample = findTriggeredKickOnsetIndex (sweepKick.data(),
+                                                          sweepWindowSamples,
+                                                          sweepPreRollSamples);
 
     sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
                                             kickReferenceValid ? kickReference.data()
@@ -1761,7 +1717,7 @@ void Oscilloscope::finishPendingRelockSweep()
     for (float value : pendingRelockKick)
         kickPeak = juce::jmax (kickPeak, std::abs (value));
 
-    if (! scopeKickReferenceCaptureIsValid (kickPeak))
+    if (! scopeCompletedCaptureCanLock (pendingRelockFill, sweepWindowSamples, kickPeak))
     {
         pendingRelockFill = 0;
         pendingRelockPeak = 0.0f;
@@ -1784,15 +1740,7 @@ void Oscilloscope::finishPendingRelockSweep()
     kickReferencePeak = kickPeak;
     kickReferenceHitId = sweepHitId;
     kickReferenceState = kickReferenceStateAfterCapture (kickReferenceState);
-    sweepTriggerSample = findTriggeredKickOnsetIndex (kickReference.data(),
-                                                      sweepWindowSamples,
-                                                      sweepPreRollSamples);
-    kickReferenceTriggerSample = sweepTriggerSample;
-
-    sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(),
-                                            kickReference.data(),
-                                            sweepWindowSamples, sampleRate);
-    sweepMarkersHitId = sweepHitId;
+    commitTriggeredReferenceFrame();
 
     const float candidate = scopeAutoGainTargetFromPeak (juce::jmax (sweepPeak, kickReferencePeak));
     if (scopeAutoGainShouldRetarget (targetDisplayGain, candidate))
@@ -1814,9 +1762,56 @@ bool Oscilloscope::glideTriggeredAutoGain() noexcept
     return std::abs (displayGain - before) > 1.0e-3f;
 }
 
-void Oscilloscope::relockKickReference() noexcept
+void Oscilloscope::commitTriggeredReferenceFrame()
+{
+    if (! kickReferenceValid || sweepWindowSamples <= 1 || sweepFill < sweepWindowSamples)
+        return;
+
+    // The 20 ms pre-roll remains internal capture context.  Once the complete
+    // frame exists, replace that provisional index with the detected onset and
+    // commit one geometry value to both lanes.
+    const int detectedTrigger = findTriggeredKickOnsetIndex (kickReference.data(),
+                                                              sweepWindowSamples,
+                                                              sweepPreRollSamples);
+    sweepTriggerSample = detectedTrigger;
+    kickReferenceTriggerSample = detectedTrigger;
+    sweepMarkers = findEnvelopePeakMarkers (sweepBass.data(), kickReference.data(),
+                                            sweepWindowSamples, sampleRate);
+    sweepMarkersHitId = sweepHitId;
+    updateTriggeredDisplayRange();
+    invalidateTriggeredRenderCaches();
+}
+
+void Oscilloscope::updateTriggeredDisplayRange() noexcept
+{
+    const int n = sweepWindowSamples;
+    if (n <= 1)
+        return;
+
+    const int trigger = juce::jlimit (0, n - 1, sweepTriggerSample);
+    const auto range = computeTriggeredVisibleRange (n, trigger, timeZoom);
+    if (! triggeredPanUserSet)
+        displayScrollMs = 0.0f;
+    displayScrollMs = clampTriggeredPanScrollMs (displayScrollMs, n, range.visible,
+                                                  range.first, sampleRate);
+}
+
+void Oscilloscope::invalidateTriggeredRenderCaches()
+{
+    kickRefCache = {};
+    ghostsCache = {};
+    gridCache = {};
+    kickRefKey = {};
+    ghostsKey = {};
+    gridKey = {};
+    visibleBuffersDirty = true;
+    lastDisplayScrollMs = -1.0f;
+}
+
+void Oscilloscope::beginTriggeredRelockTransition() noexcept
 {
     hitCapture.requestReset();
+    relockFencePending = true;
     kickReferenceState = kickReferenceStateAfterRelock();
     kickReferenceValid = false;
     kickReferencePeak = 0.0f;
@@ -1828,6 +1823,7 @@ void Oscilloscope::relockKickReference() noexcept
     sweepTriggerSample = sweepPreRollSamples;
     sweepMarkers = {};
     sweepMarkersHitId = 0;
+    sweepHitId = 0;
     pendingRelockFill = 0;
     pendingRelockPeak = 0.0f;
     pendingRelockDiscarding = true;
@@ -1842,9 +1838,16 @@ void Oscilloscope::relockKickReference() noexcept
         std::fill (buffer.begin(), buffer.end(), 0.0f);
     targetDisplayGain = 0.0f;
     discardingSweepUntilRelock = true;
-    visibleBuffersDirty = true;
+    if (! triggeredPanUserSet)
+        displayScrollMs = 0.0f;
+    invalidateTriggeredRenderCaches();
     ++ghostsVersion;
     repaint();
+}
+
+void Oscilloscope::relockKickReference() noexcept
+{
+    beginTriggeredRelockTransition();
 }
 
 void Oscilloscope::setDelayFromDrag (const juce::MouseEvent& e)
@@ -1895,6 +1898,7 @@ void Oscilloscope::updateInspectionPan (float mouseX) noexcept
         
         const float next = scopeDragToScrollMs (panStartScrollMs, pixelsMoved, msPerPixel);
         displayScrollMs = clampTriggeredPanScrollMs (next, n, range.visible, range.first, sampleRate);
+        triggeredPanUserSet = true;
         
         repaint();
         return;
@@ -2047,6 +2051,7 @@ void Oscilloscope::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
             const float msPerPixel = samplesToMs (range.visible, sampleRate) / (float) componentWidth;
             const float next = displayScrollMs - wheel.deltaX * 100.0f * msPerPixel;
             displayScrollMs = clampTriggeredPanScrollMs (next, n, range.visible, range.first, sampleRate);
+            triggeredPanUserSet = true;
             repaint();
             return;
         }

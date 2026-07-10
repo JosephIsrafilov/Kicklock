@@ -611,6 +611,12 @@ public:
 
             expectGreaterThan (verified.verifiedAfterMatchPercent, 0.0f);
             expectLessThan (verified.verificationDeltaPercent, 10.0f);
+            expectWithinAbsoluteError (predicted.displayAfterMatchPercent,
+                                       predicted.predictedAfterMatchPercent, 1.0e-4f);
+            expectWithinAbsoluteError (verified.verifiedAfterMatchPercent,
+                                       predicted.predictedAfterMatchPercent, 0.01f);
+            expectEquals ((int) std::round (predicted.displayAfterMatchPercent),
+                          (int) std::round (verified.verifiedAfterMatchPercent));
         }
 
         beginTest ("Multi-hit stable analysis aggregates consistent hits");

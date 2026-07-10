@@ -116,6 +116,13 @@ inline bool scopeFullModeShowsGrid (ScopeViewMode mode) noexcept
     return mode != ScopeViewMode::Spectrum;
 }
 
+// Triggered mode owns its dedicated trigger/reference visualization.  Generic
+// transient markers are intentionally disabled in all modes.
+inline bool scopeModeShowsGenericTransientMarkers (ScopeViewMode) noexcept
+{
+    return false;
+}
+
 inline bool scopeModeAcceptsZoom (ScopeViewMode mode) noexcept
 {
     return mode != ScopeViewMode::Spectrum;
@@ -499,9 +506,7 @@ inline bool shouldAutoRelockKickReference (KickReferenceState state,
                                            bool wasTriggeredMode,
                                            bool triggeredMode) noexcept
 {
-    if (state == KickReferenceState::RelockPending)
-        return false;
-
+    (void) state;
     return triggeredMode
         && sidechainAvailable
         && (! wasSidechainAvailable || ! wasTriggeredMode);
@@ -572,21 +577,16 @@ inline bool scopeKickReferenceCaptureIsValid (float kickPeak) noexcept
     return kickPeak > 1.0e-4f;
 }
 
-// Re-lock must also work on fast material where the next kick arrives before a
-// full post-roll window can complete. Once the candidate contains the trigger
-// plus enough kick body to draw a stable reference, the next retrigger may
-// promote it instead of resetting forever.
-inline bool scopePendingRelockCaptureIsReady (int fillSamples,
-                                              int preRollSamples,
-                                              double sampleRate,
-                                              float kickPeak) noexcept
+// A reference can only be committed from a complete, valid frame.  The
+// internal pre-roll helps onset detection, but a partial post-roll is never a
+// lockable display frame.
+inline bool scopeCompletedCaptureCanLock (int fillSamples,
+                                          int windowSamples,
+                                          float kickPeak) noexcept
 {
-    if (! scopeKickReferenceCaptureIsValid (kickPeak) || sampleRate <= 0.0)
-        return false;
-
-    const int safePreRoll = std::max (0, preRollSamples);
-    const int minBodySamples = msToSamples (60.0f, sampleRate);
-    return fillSamples >= safePreRoll + std::max (1, minBodySamples);
+    return windowSamples > 0
+        && fillSamples >= windowSamples
+        && scopeKickReferenceCaptureIsValid (kickPeak);
 }
 
 inline bool triggeredMarkersBelongToFrame (unsigned long long markersHitId,

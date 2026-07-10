@@ -411,57 +411,38 @@ PhaseFixResult analyzeAggregatedHits(const std::vector<float> &bass,
   settings.phaseFilterStages = aggregated.phaseFilterStages;
   settings.delayInterpolation = delayInterpolation;
 
-  float sumBeforeMatch = 0.0f;
-  float sumAfterMatch = 0.0f;
-  int numScores = 0;
+  // Canonical evaluation policy: once the recommendation settings are chosen,
+  // score both sides on the exact concatenation of the selected hit windows.
+  // This pair is also stored by computeAndPublishFix() for Apply verification;
+  // never mix this with the full rolling capture or a live meter reading.
+  const auto *evaluationBass = allHitBass.empty() ? bass.data() : allHitBass.data();
+  const auto *evaluationKick = allHitKick.empty() ? kick.data() : allHitKick.data();
+  const int evaluationSamples = allHitBass.empty() ? (int) bass.size()
+                                                    : (int) allHitBass.size();
 
-  for (const auto &hit : hits) {
-    if (hit.start < 0 || hit.length <= 0 ||
-        hit.start + hit.length > (int)bass.size() ||
-        hit.start + hit.length > (int)kick.size()) {
-      continue;
-    }
-
-    const auto before = PhaseFixEngine::scoreSettings(
-        bass.data() + hit.start, kick.data() + hit.start, hit.length,
-        sampleRate, {}, PhaseFixEngine::absoluteManualMaxDelayMs);
-    const auto after = PhaseFixEngine::scoreSettings(
-        bass.data() + hit.start, kick.data() + hit.start, hit.length,
-        sampleRate, settings, PhaseFixEngine::absoluteManualMaxDelayMs);
-
-    sumBeforeMatch += before.matchPercent;
-    sumAfterMatch += after.matchPercent;
-    numScores++;
-  }
-
-  if (numScores > 0) {
-    aggregated.beforeMatchPercent = sumBeforeMatch / (float)numScores;
-    aggregated.afterMatchPercent = sumAfterMatch / (float)numScores;
-  } else if (!bass.empty() && !kick.empty()) {
-    const auto before = PhaseFixEngine::scoreSettings(
-        bass.data(), kick.data(), (int)bass.size(), sampleRate, {},
+  if (evaluationBass != nullptr && evaluationKick != nullptr && evaluationSamples > 0)
+  {
+    const auto before = PhaseFixEngine::scoreSettings (
+        evaluationBass, evaluationKick, evaluationSamples, sampleRate, {},
         PhaseFixEngine::absoluteManualMaxDelayMs);
-    const auto after = PhaseFixEngine::scoreSettings(
-        bass.data(), kick.data(), (int)bass.size(), sampleRate, settings,
+    const auto after = PhaseFixEngine::scoreSettings (
+        evaluationBass, evaluationKick, evaluationSamples, sampleRate, settings,
         PhaseFixEngine::absoluteManualMaxDelayMs);
+
     aggregated.beforeMatchPercent = before.matchPercent;
     aggregated.afterMatchPercent = after.matchPercent;
-  } else {
+    aggregated.predictedAfterMatchPercent = after.matchPercent;
+    aggregated.displayBeforeMatchPercent = before.matchPercent;
+    aggregated.displayAfterMatchPercent = after.matchPercent;
+  }
+  else
+  {
     aggregated.beforeMatchPercent = 0.0f;
     aggregated.afterMatchPercent = 0.0f;
+    aggregated.predictedAfterMatchPercent = 0.0f;
+    aggregated.displayBeforeMatchPercent = 0.0f;
+    aggregated.displayAfterMatchPercent = 0.0f;
   }
-
-  aggregated.predictedAfterMatchPercent = aggregated.afterMatchPercent;
-
-  const auto beforeFull = PhaseFixEngine::scoreSettings(
-      bass.data(), kick.data(), (int)bass.size(), sampleRate, {},
-      PhaseFixEngine::absoluteManualMaxDelayMs);
-  const auto afterFull = PhaseFixEngine::scoreSettings(
-      bass.data(), kick.data(), (int)bass.size(), sampleRate, settings,
-      PhaseFixEngine::absoluteManualMaxDelayMs);
-
-  aggregated.displayBeforeMatchPercent = beforeFull.matchPercent;
-  aggregated.displayAfterMatchPercent = afterFull.matchPercent;
 
   aggregated.improvementPercent =
       aggregated.afterMatchPercent - aggregated.beforeMatchPercent;
@@ -2124,16 +2105,14 @@ KickLockAudioProcessor::computeAndPublishFix(const std::vector<float> &bass,
   // a background worker and the message thread never race on them.
   {
     const std::lock_guard<std::mutex> lock(resultMutex);
-    
-    // Map the internal offline scores to the live meter scale for display
-    result.displayBeforeMatchPercent = liveLowEndMatchPercent.load();
-    const float improvement = result.predictedAfterMatchPercent - result.beforeMatchPercent;
-    result.displayAfterMatchPercent = juce::jlimit(0.0f, 100.0f, result.displayBeforeMatchPercent + improvement);
-    
+
     latestFixResult = result;
     lastAnalyzedBassWindow = std::move(analyzedBass);
     lastAnalyzedKickWindow = std::move(analyzedKick);
     lastAnalyzedCrossoverHz = analysisCrossoverHz;
+    lastAnalyzedSampleRate = getSampleRate();
+    lastAnalyzedDelayInterpolation = delayInterpolation;
+    lastAnalyzedCrossoverEnabled = analyzeWithCrossover;
   }
 
   latestAnalyzedBeforePercent.store(result.beforeMatchPercent);
@@ -2220,12 +2199,18 @@ bool KickLockAudioProcessor::applyLatestFix() {
   std::vector<float> bassWindow;
   std::vector<float> kickWindow;
   float analyzedCrossoverHz = 150.0f;
+  double analyzedSampleRate = 0.0;
+  InterpolationType analyzedDelayInterpolation = InterpolationType::Linear;
+  bool analyzedCrossoverEnabled = false;
   {
     const std::lock_guard<std::mutex> lock(resultMutex);
     fix = latestFixResult;
     bassWindow = lastAnalyzedBassWindow;
     kickWindow = lastAnalyzedKickWindow;
     analyzedCrossoverHz = lastAnalyzedCrossoverHz;
+    analyzedSampleRate = lastAnalyzedSampleRate;
+    analyzedDelayInterpolation = lastAnalyzedDelayInterpolation;
+    analyzedCrossoverEnabled = lastAnalyzedCrossoverEnabled;
   }
 
   if (!fix.applyAllowed && !fix.optionalApplyAllowed)
@@ -2233,11 +2218,17 @@ bool KickLockAudioProcessor::applyLatestFix() {
 
   const float currentCrossoverHz =
       crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
-  if (std::abs(currentCrossoverHz - analyzedCrossoverHz) > 1.0f) {
+  const auto currentInterpolation = interpolationFromChoice (
+      delayInterpParam != nullptr ? delayInterpParam->load() : 0.0f);
+  const bool hasStoredEvaluation = analyzedSampleRate > 0.0 && ! bassWindow.empty()
+      && bassWindow.size() == kickWindow.size();
+  if ((hasStoredEvaluation && std::abs(currentCrossoverHz - analyzedCrossoverHz) > 1.0f)
+      || (hasStoredEvaluation && std::abs (getSampleRate() - analyzedSampleRate) > 0.01)
+      || (hasStoredEvaluation && currentInterpolation != analyzedDelayInterpolation)) {
     const std::lock_guard<std::mutex> lock(resultMutex);
     latestFixResult.verificationWarning = true;
     latestFixResult.message =
-        "Crossover changed after analysis. Analyze again before applying.";
+        "Analysis settings changed. Analyze again before applying.";
     return false;
   }
 
@@ -2273,7 +2264,9 @@ bool KickLockAudioProcessor::applyLatestFix() {
         "rotatorStages", (float)juce::jlimit(0, 2, fix.phaseFilterStages - 2));
   }
 
-  setParameterValueWithGesture("crossover_enable", 1.0f);
+  setParameterValueWithGesture ("crossover_enable",
+                                hasStoredEvaluation ? (analyzedCrossoverEnabled ? 1.0f : 0.0f)
+                                                    : 1.0f);
 
   {
     const std::lock_guard<std::mutex> lock(resultMutex);
@@ -2290,8 +2283,7 @@ bool KickLockAudioProcessor::applyLatestFix() {
     settings.phaseFilterFreqHz = appliedSnapshot.phaseFilterFreqHz;
     settings.phaseFilterQ = appliedSnapshot.phaseFilterQ;
     settings.phaseFilterStages = 2 + appliedSnapshot.phaseFilterStageIndex;
-    settings.delayInterpolation = interpolationFromChoice(
-        delayInterpParam != nullptr ? delayInterpParam->load() : 0.0f);
+    settings.delayInterpolation = analyzedDelayInterpolation;
 
     // Verify on the analysis pool, not the message thread: scoring renders
     // the whole analyzed window through the delay + rotator and can take

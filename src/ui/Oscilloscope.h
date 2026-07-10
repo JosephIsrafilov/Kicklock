@@ -64,6 +64,7 @@ public:
         if (viewMode != newMode) {
             viewMode = newMode;
             displayScrollMs = 0.0f;
+            triggeredPanUserSet = false;
             visibleBuffersDirty = true;
             repaint();
         }
@@ -138,7 +139,6 @@ private:
                            const float* source, int visible, float gain,
                            float centreY, float halfHeight,
                            juce::Colour colour, float strokeWidth);
-    void drawTransientMarkers (juce::Graphics&, juce::Rectangle<float> bounds, int visible);
     void drawScopeFooter (juce::Graphics&, juce::Rectangle<float>, int) const;
     void drawHoldIndicator (juce::Graphics&, juce::Rectangle<float>) const;
     void drawHoverCrosshair (juce::Graphics&, juce::Rectangle<float>, float);
@@ -159,6 +159,10 @@ private:
     void finishSweep();
     void beginPendingRelockSweep();
     void finishPendingRelockSweep();
+    void commitTriggeredReferenceFrame();
+    void updateTriggeredDisplayRange() noexcept;
+    void invalidateTriggeredRenderCaches();
+    void beginTriggeredRelockTransition() noexcept;
     void promoteCurrentSweepToGhost();
     void ensureSweepBuffersSized();
 
@@ -213,6 +217,7 @@ private:
     bool wasSidechainAvailable = false;
     bool wasTriggeredMode = false;
     bool discardingSweepUntilRelock = false;
+    bool relockFencePending = false;
 
     void updateSnapshotOwnership();
     void evaluateAutoRelockEdge();
@@ -280,12 +285,13 @@ private:
         int fill = -1;
         int first = -1;
         int visible = -1;
+        int triggerSample = -1;
         float gain = -1.0f;
         float timeZoom = -1.0f;
         int boundsW = 0, boundsH = 0;
         unsigned long long hitId = 0;
         bool operator!=(const KickRefCacheKey& o) const {
-            return fill != o.fill || first != o.first || visible != o.visible ||
+            return fill != o.fill || first != o.first || visible != o.visible || triggerSample != o.triggerSample ||
                    std::abs(gain - o.gain) > 1.0e-5f || std::abs(timeZoom - o.timeZoom) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH || hitId != o.hitId;
         }
     } kickRefKey;
@@ -295,12 +301,13 @@ private:
     struct GhostsCacheKey {
         int first = -1;
         int visible = -1;
+        int triggerSample = -1;
         float gain = -1.0f;
         float timeZoom = -1.0f;
         int boundsW = 0, boundsH = 0;
         int newestGhostId = -1;
         bool operator!=(const GhostsCacheKey& o) const {
-            return first != o.first || visible != o.visible || std::abs(gain - o.gain) > 1.0e-5f ||
+            return first != o.first || visible != o.visible || triggerSample != o.triggerSample || std::abs(gain - o.gain) > 1.0e-5f ||
                    std::abs(timeZoom - o.timeZoom) > 1.0e-5f || boundsW != o.boundsW || boundsH != o.boundsH ||
                    newestGhostId != o.newestGhostId;
         }
@@ -353,6 +360,7 @@ private:
 
     float displayScrollMs = 0.0f;
     float lastDisplayScrollMs = -1.0f;
+    bool triggeredPanUserSet = false;
     bool panGestureActive = false;
     float panStartScrollMs = 0.0f;
     int panStartVisualOffsetSamples = 0;

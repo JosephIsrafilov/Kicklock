@@ -737,14 +737,14 @@ private:
                 return "Already close. Apply writes the measured low-end alignment so you can A/B it.";
 
             case PhaseFixQuality::StrongImprovement:
-                return "Fix found: Match "
+                return "Fix found: Predicted WTD "
                     + juce::String ((int) std::round (result.beforeMatchPercent))
                     + "% -> "
                     + juce::String ((int) std::round (result.afterMatchPercent))
                     + "%.";
 
             case PhaseFixQuality::PartialImprovement:
-                return "Partial fix found: Match "
+                return "Partial fix: Predicted WTD "
                     + juce::String ((int) std::round (result.beforeMatchPercent))
                     + "% -> "
                     + juce::String ((int) std::round (result.afterMatchPercent))
