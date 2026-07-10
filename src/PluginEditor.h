@@ -142,7 +142,6 @@ private:
     CorrelationDisplay correlationDisplay;
 
     // Scope overlays. Added after the scope so they draw on top of it.
-    juce::Label suggestedOverlay;
     juce::Label manualDelayOverlay;
     juce::Label noSidechainOverlay;
 
@@ -207,7 +206,6 @@ private:
     juce::Colour  sidechainStatusColour;
     juce::String bpmText { "-- BPM" };
     juce::String pdcText { "PDC --" };
-    juce::String suggestedText;
     juce::String manualDelayText { "Manual Delay: 0.00 ms" };
     bool hasSidechain = false;
     bool canStartAnalyze = false;

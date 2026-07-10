@@ -401,6 +401,7 @@ public:
             fix.phaseFilterStages = 3;
             fix.beforeMatchPercent = 42.0f;
             fix.afterMatchPercent = 91.0f;
+            fix.displayBeforeMatchPercent = 51.0f;
             fix.improvementPercent = 49.0f;
             fix.confidence = 0.9f;
             PhaseFixEngine::updateDerivedResultFields (fix);
@@ -409,7 +410,7 @@ public:
             expect (! processor.hasRevertSnapshot());
             expect (processor.applyLatestFix());
             expect (processor.hasRevertSnapshot());
-            expectWithinAbsoluteError (processor.latestAppliedBeforePercent.load(), 42.0f, 1.0e-7f);
+            expectWithinAbsoluteError (processor.latestAppliedBeforePercent.load(), 51.0f, 1.0e-7f);
 
             expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 1.5f, 0.02f);
             expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
@@ -911,6 +912,66 @@ public:
             expectEquals (formatSignedDelayMs (-0.0001f), juce::String ("0.00 ms"));
             expectEquals (formatSignedDelayMs (4.32f), juce::String ("+4.32 ms"));
             expectEquals (formatSignedDelayMs (-4.32f), juce::String ("-4.32 ms"));
+        }
+
+        beginTest ("State restore reapplies boolean parameter values");
+        {
+            KickLockAudioProcessor processor;
+            if (auto* parameter = processor.apvts.getParameter ("polarity_invert"))
+                parameter->setValueNotifyingHost (0.2f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
+
+            juce::MemoryBlock stateData;
+            processor.getStateInformation (stateData);
+
+            auto xml = juce::AudioProcessor::getXmlFromBinary (stateData.getData(),
+                                                                 (int) stateData.getSize());
+            expect (xml != nullptr);
+            if (xml == nullptr)
+                return;
+
+            auto state = juce::ValueTree::fromXml (*xml);
+            auto getStoredValue = [&state] (const char* id)
+            {
+                for (const auto& child : state)
+                    if (child.hasType ("PARAM") && child.getProperty ("id").toString() == id)
+                        return (float) child.getProperty ("value");
+
+                return -1.0f;
+            };
+            expectWithinAbsoluteError (getStoredValue ("polarity_invert"), 0.0f, 1.0e-7f);
+
+            auto setStoredValue = [&state] (const char* id, float value)
+            {
+                for (auto child : state)
+                {
+                    if (child.hasType ("PARAM") && child.getProperty ("id").toString() == id)
+                    {
+                        child.setProperty ("value", value, nullptr);
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+            expect (setStoredValue ("polarity_invert", 0.2f));
+            expect (setStoredValue ("allpass_enable", 0.3f));
+            expect (setStoredValue ("crossover_enable", 0.4f));
+            expect (setStoredValue ("pitch_track", 0.45f));
+            expect (setStoredValue ("polarityInvert", 0.49f));
+
+            auto modifiedXml = std::unique_ptr<juce::XmlElement> (state.createXml());
+            juce::MemoryBlock modifiedStateData;
+            juce::AudioProcessor::copyXmlToBinary (*modifiedXml, modifiedStateData);
+            processor.setStateInformation (modifiedStateData.getData(),
+                                           (int) modifiedStateData.getSize());
+
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "pitch_track"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "polarityInvert"), 0.0f, 1.0e-7f);
         }
     }
 

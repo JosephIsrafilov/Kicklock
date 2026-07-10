@@ -354,6 +354,14 @@ void SpectrumAnalyzer::mouseExit (const juce::MouseEvent&)
     repaint();
 }
 
+void SpectrumAnalyzer::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    juce::ignoreUnused (e);
+
+    if (onToggleCleanMode != nullptr)
+        onToggleCleanMode();
+}
+
 void SpectrumAnalyzer::drawWaveLegend(juce::Graphics& g, juce::Rectangle<float> bounds) const
 {
     auto legend = juce::Rectangle<float> (bounds.getRight() - 112.0f,

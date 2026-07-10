@@ -52,6 +52,8 @@ namespace
     void drawYAxisGrid (juce::Graphics& g, juce::Rectangle<float> bounds, float centreY, float halfHeight, float gain,
                         juce::Colour majorColor, juce::Colour minorColor)
     {
+        const float laneTop = centreY - halfHeight;
+        const float laneBottom = centreY + halfHeight;
         g.setColour (majorColor.brighter (0.25f));
         g.drawHorizontalLine ((int) std::round (centreY), bounds.getX(), bounds.getRight());
 
@@ -80,13 +82,13 @@ namespace
 
             if (scaled > 0.05f)
             {
-                if (yTop >= bounds.getY())
+                if (yTop >= laneTop)
                 {
                     g.setColour (lineCol);
                     g.drawHorizontalLine ((int) std::round (yTop), bounds.getX(), bounds.getRight());
                 }
 
-                if (yBot <= bounds.getBottom())
+                if (yBot <= laneBottom)
                 {
                     g.setColour (lineCol);
                     g.drawHorizontalLine ((int) std::round (yBot), bounds.getX(), bounds.getRight());
@@ -98,6 +100,8 @@ namespace
     void drawYAxisLabels (juce::Graphics& g, juce::Rectangle<float> bounds, float centreY, float halfHeight, float gain,
                           juce::Colour textColor)
     {
+        const float laneTop = centreY - halfHeight;
+        const float laneBottom = centreY + halfHeight;
         const float dbLevels[] = { 24.0f, 18.0f, 12.0f, 6.0f, 3.0f, 0.0f, -3.0f, -6.0f, -12.0f, -18.0f };
         g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
 
@@ -133,10 +137,10 @@ namespace
 
             if (scaled > 0.05f)
             {
-                if (yTop >= bounds.getY())
+                if (yTop >= laneTop)
                     drawLabel (yTop);
 
-                if (yBot <= bounds.getBottom())
+                if (db != 0.0f && yBot <= laneBottom)
                     drawLabel (yBot);
             }
         }

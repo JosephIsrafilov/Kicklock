@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include <array>
+#include <functional>
 
 #include "../util/ScopeFifo.h"
 
@@ -22,6 +23,9 @@ public:
 
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
+    void mouseDoubleClick (const juce::MouseEvent& e) override;
+
+    std::function<void()> onToggleCleanMode;
 
 private:
     void calculateSpectrum();

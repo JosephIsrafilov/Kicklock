@@ -49,6 +49,16 @@ public:
             expectWithinAbsoluteError ((float) gridDivisionToMs (120.0, GridDivision::Bar), 2000.0f, 1.0e-6f);
         }
 
+        beginTest ("Grid choice indices match the parameter choice list");
+        {
+            expectEquals ((int) gridDivisionFromChoiceIndex (0), (int) GridDivision::Quarter);
+            expectEquals ((int) gridDivisionFromChoiceIndex (1), (int) GridDivision::Half);
+            expectEquals ((int) gridDivisionFromChoiceIndex (2), (int) GridDivision::Whole);
+            expectEquals ((int) gridDivisionFromChoiceIndex (3), (int) GridDivision::FourBars);
+            expectEquals ((int) gridDivisionFromChoiceIndex (4), (int) GridDivision::Bar);
+            expectEquals ((int) gridDivisionFromChoiceIndex (5), (int) GridDivision::Milliseconds);
+        }
+
         beginTest ("Visible scope samples follow sample rate, decimation, zoom, and grid");
         {
             expectEquals (calculateVisibleScopeSamples (8192, kSampleRate, 24, 1.0f,
@@ -60,6 +70,12 @@ public:
             expectEquals (calculateVisibleScopeSamples (8192, kSampleRate, 24, 2.0f,
                                                         GridDivision::Milliseconds, false, 0.0),
                           4096);
+            expectEquals (calculateVisibleScopeSamples (8192, kSampleRate, 24, 1.0f,
+                                                        GridDivision::Bar, true, 120.0),
+                          4000);
+            expectEquals (calculateVisibleScopeSamples (8192, kSampleRate, 24, 1.0f,
+                                                        GridDivision::Milliseconds, true, 120.0),
+                          8192);
         }
 
         beginTest ("Timing verdict speaks producer language");

@@ -183,7 +183,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     sidechainStatusColour = mutedText;
 
     // --- Top bar controls --------------------------------------------------
-    configureCombo (gridCombo, { "1/4", "1/2", "1", "4", "8", "Bar", "ms" });
+    configureCombo (gridCombo, { "1/4", "1/2", "1", "4", "Bar", "ms" });
     configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Spectrum", "Separate" });
     gridCombo.setTooltip ("Sets the scope time grid.");
     viewCombo.setTooltip ("Scope view: Triggered, Free-run (raw live scope, no offset), "
@@ -222,7 +222,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
         latestResultAutoApplied = false;
         if (audioProcessor.beginBackgroundAnalyze())
         {
-            suggestedText.clear();
             haveResult = false;
             latestResult = {};
             analyzeButton.setButtonText ("Analyzing...");
@@ -269,7 +268,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     // --- Centre scope + live match ----------------------------------------
     addAndMakeVisible (oscilloscope);
     addAndMakeVisible (spectrumAnalyzer);
-    oscilloscope.onToggleCleanMode = [this]
+    const auto toggleCleanScopeMode = [this]
     {
         cleanScopeMode = ! cleanScopeMode;
         if (cleanScopeMode)
@@ -277,6 +276,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
         resized();
         repaint();
     };
+    oscilloscope.onToggleCleanMode = toggleCleanScopeMode;
+    spectrumAnalyzer.onToggleCleanMode = toggleCleanScopeMode;
 
     addAndMakeVisible (correlationDisplay);
     correlationDisplay.setTooltip ("Live match. Click Details to collapse or expand the detailed meters.");
@@ -291,7 +292,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
         addAndMakeVisible (label);
     };
 
-    configureOverlay (suggestedOverlay, juce::Justification::centredLeft, amber);
     configureOverlay (manualDelayOverlay, juce::Justification::centredRight, teal);
     configureOverlay (noSidechainOverlay, juce::Justification::centred, text);
     noSidechainOverlay.setText ("Route kick to sidechain to compare phase.",
@@ -534,7 +534,6 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     helpButton.setVisible (shouldBeVisible);
 
     correlationDisplay.setVisible (shouldBeVisible);
-    suggestedOverlay.setVisible (shouldBeVisible);
     manualDelayOverlay.setVisible (shouldBeVisible);
     noSidechainOverlay.setVisible (shouldBeVisible);
     splitter.setVisible (shouldBeVisible);
@@ -576,18 +575,10 @@ void KickLockAudioProcessorEditor::pushScopeSettings()
 {
     const int viewIdx = viewCombo.getSelectedItemIndex();
     const auto requestedMode = scopeViewModeFromChoiceIndex (viewIdx);
-    const auto mode = cleanScopeMode && requestedMode == ScopeViewMode::Spectrum
-                          ? ScopeViewMode::Triggered
-                          : requestedMode;
+    const auto mode = requestedMode;
     oscilloscope.setViewMode (mode);
     
-    if (cleanScopeMode)
-    {
-        oscilloscope.setVisible (true);
-        spectrumAnalyzer.setVisible (false);
-        audioProcessor.setSpectrumCaptureEnabled (false);
-    }
-    else if (mode == ScopeViewMode::Spectrum)
+    if (mode == ScopeViewMode::Spectrum)
     {
         oscilloscope.setVisible (false);
         spectrumAnalyzer.setVisible (true);
@@ -668,7 +659,6 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
 
     if (busy)
     {
-        suggestedText.clear();
         haveResult = false;
 
         if (state != lastAnalyzeState)
@@ -686,25 +676,23 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
             const int beforePercent = (int) std::round (juce::jlimit (0.0f, 100.0f, latestResult.displayBeforeMatchPercent));
             const int afterPercent = (int) std::round (juce::jlimit (0.0f, 100.0f, latestResult.displayAfterMatchPercent));
             
-            juce::String suggested;
-            if (resultCanApply)
-            {
-                if (latestResult.displayAfterMatchPercent > latestResult.displayBeforeMatchPercent)
-                {
-                    suggested << "Suggested: " << formatSignedDelayMs (latestResult.bassDelayMs) << "\n"
-                              << "Low-end match: " << juce::String (beforePercent)
-                              << "% -> " << juce::String (afterPercent) << "%";
-                }
-                else
-                {
-                    suggested << "Current alignment is optimal.\n"
-                              << "Low-end match: " << juce::String (beforePercent) << "%";
-                }
-            }
-            suggestedText = suggested;
-
             juce::String body;
-            body << latestResult.message;
+            if (latestResult.quality == PhaseFixQuality::StrongImprovement
+                || latestResult.quality == PhaseFixQuality::PartialImprovement)
+            {
+                body << (latestResult.quality == PhaseFixQuality::StrongImprovement
+                             ? "Fix found: Live match "
+                             : "Partial fix found: Live match ")
+                     << juce::String (beforePercent) << "% -> "
+                     << juce::String (afterPercent) << "%"
+                     << (latestResult.quality == PhaseFixQuality::PartialImprovement
+                             ? ". Apply if it sounds better."
+                             : ".");
+            }
+            else
+            {
+                body << latestResult.message;
+            }
 
             if (resultCanApply)
             {
@@ -740,7 +728,6 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
         }
         else
         {
-            suggestedText.clear();
             analyzerBody.setText (latestResult.message.isNotEmpty()
                                       ? latestResult.message
                                       : "Analyze did not find enough usable kick and bass material.",
@@ -751,8 +738,6 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
     }
 
     lastAnalyzeState = state;
-
-    suggestedOverlay.setText (suggestedText, juce::dontSendNotification);
 
     const bool canApply = applyFixAvailable (hasSidechain, haveResult);
     applyFixButton.setEnabled (canApply);
@@ -969,10 +954,15 @@ void KickLockAudioProcessorEditor::resized()
     {
         manualPanelBounds = {};
         analyzerPanelBounds = {};
-        oscilloscope.setVisible (true);
-        spectrumAnalyzer.setVisible (false);
-        oscilloscope.setBounds (bounds.reduced (8));
-        audioProcessor.setSpectrumCaptureEnabled (false);
+        viewCombo.setVisible (true);
+
+        auto cleanControls = bounds.removeFromTop (38);
+        viewCombo.setBounds (cleanControls.removeFromLeft (132).reduced (8, 6));
+
+        const auto scopeBounds = bounds.reduced (8);
+        oscilloscope.setBounds (scopeBounds);
+        spectrumAnalyzer.setBounds (scopeBounds);
+        pushScopeSettings();
         repaint();
         return;
     }
@@ -1026,7 +1016,6 @@ void KickLockAudioProcessorEditor::resized()
     noSidechainOverlay.setBounds (scopeArea.withSizeKeepingCentre (scopeArea.getWidth(), 24));
 
     auto markerRow = scopeArea.removeFromBottom (18);
-    suggestedOverlay.setBounds (markerRow.removeFromLeft (markerRow.getWidth() / 2).reduced (6, 0));
     manualDelayOverlay.setBounds (markerRow.reduced (6, 0));
 
     bounds.removeFromTop (2);

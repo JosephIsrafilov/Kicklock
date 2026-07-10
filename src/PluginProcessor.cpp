@@ -1941,32 +1941,59 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
 
   if (xml != nullptr && xml->hasTagName(apvts.state.getType())) {
     auto restoredState = juce::ValueTree::fromXml(*xml);
-    const bool hasDelayMs =
-        restoredState.hasProperty(juce::Identifier("delay_ms"));
-    const bool hasLegacyDelayMs =
-        restoredState.hasProperty(juce::Identifier("delayMs"));
-    const bool hasPolarityInvert =
-        restoredState.hasProperty(juce::Identifier("polarity_invert"));
-    const bool hasLegacyPolarityInvert =
-        restoredState.hasProperty(juce::Identifier("polarityInvert"));
-    const bool hasAllpassEnable =
-        restoredState.hasProperty(juce::Identifier("allpass_enable"));
-    const bool hasLegacyPhaseFilterEnabled =
-        restoredState.hasProperty(juce::Identifier("phaseFilterEnabled"));
-    const bool hasAllpassFreq =
-        restoredState.hasProperty(juce::Identifier("allpass_freq"));
-    const bool hasLegacyRotatorFreq =
-        restoredState.hasProperty(juce::Identifier("rotatorFreq"));
+    auto findParameterState = [&restoredState](const char* id) {
+      for (const auto& child : restoredState) {
+        if (child.hasType("PARAM")
+            && child.getProperty("id").toString() == id)
+          return child;
+      }
 
-    auto migrateLegacyToCanonical = [&restoredState](
+      return juce::ValueTree{};
+    };
+
+    auto hasParameterState = [&restoredState, &findParameterState](const char* id) {
+      return findParameterState(id).isValid()
+             || restoredState.hasProperty(juce::Identifier(id));
+    };
+
+    auto getParameterStateValue = [&restoredState, &findParameterState](const char* id) {
+      auto parameterState = findParameterState(id);
+      return parameterState.isValid()
+                 ? parameterState.getProperty("value")
+                 : restoredState.getProperty(juce::Identifier(id));
+    };
+
+    auto setParameterStateValue = [&restoredState, &findParameterState](const char* id,
+                                                                          const juce::var& value) {
+      auto parameterState = findParameterState(id);
+      if (parameterState.isValid()) {
+        parameterState.setProperty("value", value, nullptr);
+        return;
+      }
+
+      auto newParameterState = juce::ValueTree("PARAM");
+      newParameterState.setProperty("id", id, nullptr);
+      newParameterState.setProperty("value", value, nullptr);
+      restoredState.appendChild(newParameterState, nullptr);
+    };
+
+    const bool hasDelayMs = hasParameterState("delay_ms");
+    const bool hasLegacyDelayMs = hasParameterState("delayMs");
+    const bool hasPolarityInvert = hasParameterState("polarity_invert");
+    const bool hasLegacyPolarityInvert = hasParameterState("polarityInvert");
+    const bool hasAllpassEnable = hasParameterState("allpass_enable");
+    const bool hasLegacyPhaseFilterEnabled = hasParameterState("phaseFilterEnabled");
+    const bool hasAllpassFreq = hasParameterState("allpass_freq");
+    const bool hasLegacyRotatorFreq = hasParameterState("rotatorFreq");
+
+    auto migrateLegacyToCanonical = [&getParameterStateValue, &setParameterStateValue](
                                         bool hasCanonical, bool hasLegacy,
-                                        const char *canonicalId,
-                                        const char *legacyId) {
+                                        const char* canonicalId,
+                                        const char* legacyId) {
       if (hasCanonical || !hasLegacy)
         return;
 
-      const auto value = restoredState.getProperty(juce::Identifier(legacyId));
-      restoredState.setProperty(juce::Identifier(canonicalId), value, nullptr);
+      setParameterStateValue(canonicalId, getParameterStateValue(legacyId));
     };
 
     migrateLegacyToCanonical(hasDelayMs, hasLegacyDelayMs, "delay_ms",
@@ -1978,20 +2005,23 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
     migrateLegacyToCanonical(hasAllpassFreq, hasLegacyRotatorFreq,
                              "allpass_freq", "rotatorFreq");
 
-    auto snapBoolParameter = [&restoredState](const char *id) {
-      if (restoredState.hasProperty(id)) {
-        const float restoredValue = (float)restoredState.getProperty(id);
-        const float snappedValue = restoredValue >= 0.5f ? 1.0f : 0.0f;
-        restoredState.setProperty(id, snappedValue, nullptr);
-      }
-    };
-
-    snapBoolParameter("polarity_invert");
-    snapBoolParameter("polarityInvert");
-    snapBoolParameter("allpass_enable");
-    snapBoolParameter("phaseFilterEnabled");
-
     apvts.replaceState(restoredState);
+
+    // APVTS can skip a discrete parameter setter when its denormalised value
+    // is unchanged. Toggle it once so state restoration is still broadcast to
+    // the VST3 parameter cache before applying the stored value.
+    for (const auto* id : { "crossover_enable", "polarity_invert",
+                            "allpass_enable", "pitch_track", "polarityInvert",
+                            "phaseFilterEnabled" }) {
+      if (hasParameterState(id)) {
+        if (auto* parameter = apvts.getParameter(id)) {
+          const float value = (float)getParameterStateValue(id);
+          const float normalised = parameter->convertTo0to1(value);
+          parameter->setValueNotifyingHost(normalised >= 0.5f ? 0.0f : 1.0f);
+          parameter->setValueNotifyingHost(normalised);
+        }
+      }
+    }
 
     markRestoredParameterSources(
         hasDelayMs || hasLegacyDelayMs, hasLegacyDelayMs,
@@ -2177,7 +2207,9 @@ bool KickLockAudioProcessor::applyLatestFix() {
 
   latestRevertSnapshot = captureCurrentParameterSnapshot();
   revertSnapshotValid.store(true, std::memory_order_release);
-  latestAppliedBeforePercent.store(fix.beforeMatchPercent);
+  // The comparison displayed next to LIVE MATCH must use the same live-meter
+  // scale. The offline score remains available for the analyzer internally.
+  latestAppliedBeforePercent.store(fix.displayBeforeMatchPercent);
 
   setParameterValueWithGesture("polarity_invert",
                                fix.bassPolarityInvert ? 1.0f : 0.0f);

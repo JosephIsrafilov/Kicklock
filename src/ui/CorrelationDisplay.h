@@ -100,7 +100,7 @@ public:
         {
             g.setColour (juce::Colour (0xff97a5b2).withAlpha (0.82f));
             g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
-            g.drawText ("before: " + juce::String ((int) std::round (displayAppliedBeforePercent)) + "%",
+            g.drawText ("before apply: " + juce::String ((int) std::round (displayAppliedBeforePercent)) + "%",
                         juce::Rectangle<int> ((int) bounds.getRight() - 116,
                                               (int) bounds.getY() + 12,
                                               96,
