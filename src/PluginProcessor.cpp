@@ -2241,8 +2241,13 @@ bool KickLockAudioProcessor::applyLatestFix() {
     return false;
   }
 
-  latestRevertSnapshot = captureCurrentParameterSnapshot();
-  revertSnapshotValid.store(true, std::memory_order_release);
+  // Keep the first pre-Apply state until the user explicitly presses Revert.
+  // Re-analyzing and applying another recommendation must not move the
+  // rollback point to an already-corrected state.
+  if (!revertSnapshotValid.load(std::memory_order_acquire)) {
+    latestRevertSnapshot = captureCurrentParameterSnapshot();
+    revertSnapshotValid.store(true, std::memory_order_release);
+  }
   // The comparison displayed next to LIVE MATCH must use the same live-meter
   // scale. The offline score remains available for the analyzer internally.
   latestAppliedBeforePercent.store(fix.displayBeforeMatchPercent);

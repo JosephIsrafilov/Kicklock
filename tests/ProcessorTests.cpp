@@ -417,6 +417,14 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 60.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 2.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 1.0f, 1.0e-7f);
+
+            // A later Analyze -> Apply cycle must keep the original rollback
+            // point, rather than snapshotting the already-corrected state.
+            processor.setLatestFixResultForTesting (fix);
+            expect (processor.applyLatestFix());
+            expect (processor.hasRevertSnapshot());
+            expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 1.0f, 1.0e-7f);
 
             expect (processor.revertLatestFix());
             expect (! processor.hasRevertSnapshot());
@@ -432,6 +440,7 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 220.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 3.5f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 2.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 0.0f, 1.0e-7f);
             expect (! processor.revertLatestFix());
         }
 

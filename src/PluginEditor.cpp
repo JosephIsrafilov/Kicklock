@@ -537,10 +537,11 @@ void KickLockAudioProcessorEditor::configureCombo (juce::ComboBox& combo, const 
 
 void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 {
+    const bool showScopeToolbar = shouldBeVisible || cleanScopeMode;
     gridCombo.setVisible (shouldBeVisible);
     viewCombo.setVisible (true);
-    freezeButton.setVisible (shouldBeVisible);
-    relockKickButton.setVisible (shouldBeVisible);
+    freezeButton.setVisible (showScopeToolbar);
+    relockKickButton.setVisible (showScopeToolbar);
     analyzeButton.setVisible (shouldBeVisible);
     applyFixButton.setVisible (shouldBeVisible);
     revertButton.setVisible (shouldBeVisible);
@@ -601,6 +602,8 @@ void KickLockAudioProcessorEditor::pushScopeSettings()
     oscilloscope.setViewMode (mode);
     updateVisualOffsetAvailability (mode);
     gridCombo.setVisible (! cleanScopeMode || scopeFullModeShowsGrid (mode));
+    if (cleanScopeMode)
+        relockKickButton.setVisible (mode == ScopeViewMode::Triggered);
     
     if (mode == ScopeViewMode::Spectrum)
     {
@@ -863,7 +866,29 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
     g.fillAll (background);
 
     if (cleanScopeMode)
+    {
+        auto toolbar = getLocalBounds().removeFromTop (42);
+        g.setColour (panel);
+        g.fillRect (toolbar);
+        g.setColour (border);
+        g.drawLine ((float) toolbar.getX(), (float) toolbar.getBottom(),
+                    (float) toolbar.getRight(), (float) toolbar.getBottom(), 1.0f);
+
+        auto info = toolbar.reduced (8, 5);
+        g.setColour (text);
+        g.setFont (juce::Font (juce::FontOptions (14.0f)).boldened());
+        g.drawText ("KICKLOCK", info.removeFromLeft (94), juce::Justification::centredLeft);
+
+        g.setColour (sidechainStatusColour);
+        g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened());
+        g.drawText (sidechainStatusText, info.removeFromLeft (154), juce::Justification::centredLeft);
+
+        g.setColour (mutedText);
+        g.setFont (juce::Font (juce::FontOptions (10.0f)));
+        g.drawText (bpmText + "  |  " + pdcText, info.removeFromLeft (146),
+                    juce::Justification::centredLeft);
         return;
+    }
 
     auto bounds = getLocalBounds();
 
@@ -996,15 +1021,25 @@ void KickLockAudioProcessorEditor::resized()
     {
         manualPanelBounds = {};
         analyzerPanelBounds = {};
-        auto cleanToolbar = bounds.removeFromTop (38);
-        viewCombo.setBounds (cleanToolbar.getX() + 12, cleanToolbar.getY() + 7, 126, 24);
-        gridCombo.setBounds (cleanToolbar.getX() + 146, cleanToolbar.getY() + 7, 70, 24);
+        auto cleanToolbar = bounds.removeFromTop (42);
+        auto controls = cleanToolbar.reduced (8, 5);
+        controls.removeFromLeft (394);
+
+        gridCombo.setBounds (controls.removeFromLeft (66).reduced (0, 1));
+        controls.removeFromLeft (5);
+        viewCombo.setBounds (controls.removeFromLeft (102).reduced (0, 1));
+        controls.removeFromLeft (5);
+        freezeButton.setBounds (controls.removeFromLeft (64).reduced (0, 1));
+        controls.removeFromLeft (5);
+        relockKickButton.setBounds (controls.removeFromLeft (64).reduced (0, 1));
 
         const auto scopeBounds = bounds.reduced (8);
         oscilloscope.setBounds (scopeBounds);
         spectrumAnalyzer.setBounds (scopeBounds);
         viewCombo.toFront (false);
         gridCombo.toFront (false);
+        freezeButton.toFront (false);
+        relockKickButton.toFront (false);
         pushScopeSettings();
         repaint();
         return;
