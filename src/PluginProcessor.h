@@ -92,7 +92,6 @@ public:
     // of an abstract percentage.
     std::atomic<float> liveLowEndSubLossDb { 0.0f };
     std::array<std::atomic<float>, PhaseBands::numBands> liveBandMatchPercent {};
-    std::atomic<float> latestAppliedBeforePercent { -1.0f };
 
     // P3: one-shot seed flag for the UI-value EMAs so the first real reading is
     // taken verbatim and later readings blend, without snapping when a value
@@ -200,6 +199,8 @@ private:
         int phaseFilterStageIndex = 0;
         bool crossoverEnabled = false;
         float crossoverFreqHz = 150.0f;
+        int delayInterpolationIndex = 0;
+        bool pitchTrack = false;
     };
 
     std::atomic<float>* delayMsParam = nullptr;

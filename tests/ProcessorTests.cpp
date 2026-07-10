@@ -372,11 +372,12 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 100.0f, 0.01f);
         }
 
-        beginTest ("Apply Fix snapshots previous settings and Revert restores them");
+        beginTest ("Analyze snapshots the complete pre-analysis state for Revert");
         {
             KickLockAudioProcessor processor;
-            processor.setRateAndBufferSizeDetails (kSampleRate, 512);
-            processor.prepareToPlay (kSampleRate, 512);
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (kSampleRate, 2048);
+            processor.prepareToPlay (kSampleRate, 2048);
             if (auto* p = processor.apvts.getParameter ("crossover_enable")) p->setValueNotifyingHost (0.0f);
 
             setFloatParam (processor, "delay_ms", -3.25f);
@@ -389,46 +390,35 @@ public:
             setFloatParam (processor, "rotatorFreq", 220.0f);
             setFloatParam (processor, "rotatorQ", 3.5f);
             setFloatParam (processor, "rotatorStages", 2.0f);
-
-            PhaseFixResult fix;
-            fix.valid = true;
-            fix.enoughSignal = true;
-            fix.bassPolarityInvert = false;
-            fix.bassDelayMs = 1.5f;
-            fix.phaseFilterEnabled = true;
-            fix.phaseFilterFreqHz = 60.0f;
-            fix.phaseFilterQ = 2.0f;
-            fix.phaseFilterStages = 3;
-            fix.beforeMatchPercent = 42.0f;
-            fix.afterMatchPercent = 91.0f;
-            fix.displayBeforeMatchPercent = 51.0f;
-            fix.improvementPercent = 49.0f;
-            fix.confidence = 0.9f;
-            PhaseFixEngine::updateDerivedResultFields (fix);
-            processor.setLatestFixResultForTesting (fix);
+            setFloatParam (processor, "crossover_freq", 280.0f);
+            setFloatParam (processor, "delayInterp", 1.0f);
+            setBoolParam (processor, "pitch_track", true);
+            feedHitSeries (processor, { 0, 0, 0, 0 }, { 160, 160, 160, 160 },
+                           { false, false, false, false }, 2048);
 
             expect (! processor.hasRevertSnapshot());
-            expect (processor.applyLatestFix());
-            expect (processor.hasRevertSnapshot());
-            expectWithinAbsoluteError (processor.latestAppliedBeforePercent.load(), 51.0f, 1.0e-7f);
-
-            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 1.5f, 0.02f);
-            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 60.0f, 0.01f);
-            expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 2.0f, 0.01f);
-            expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 1.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 1.0f, 1.0e-7f);
-
-            // A later Analyze -> Apply cycle must keep the original rollback
-            // point, rather than snapshotting the already-corrected state.
-            processor.setLatestFixResultForTesting (fix);
-            expect (processor.applyLatestFix());
+            expect (processor.beginBackgroundAnalyze());
             expect (processor.hasRevertSnapshot());
             expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 1.0f, 1.0e-7f);
+
+            for (int tries = 0; tries < 200 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
+                juce::Thread::sleep (5);
+
+            expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::ResultReady);
+            expect (processor.applyLatestFix());
+            expect (processor.hasRevertSnapshot());
+
+            // A later Analyze -> Apply cycle must retain the pre-first-Analyze
+            // rollback point rather than snapshotting the corrected state.
+            expect (processor.beginBackgroundAnalyze());
+            for (int tries = 0; tries < 200 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
+                juce::Thread::sleep (5);
+            expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::ResultReady);
+            expect (processor.applyLatestFix());
+            expect (processor.hasRevertSnapshot());
 
             expect (processor.revertLatestFix());
             expect (! processor.hasRevertSnapshot());
-            expectWithinAbsoluteError (processor.latestAppliedBeforePercent.load(), -1.0f, 1.0e-7f);
 
             expectWithinAbsoluteError (rawParam (processor, "delay_ms"), -3.25f, 0.02f);
             expectWithinAbsoluteError (rawParam (processor, "delayMs"), -3.25f, 0.02f);
@@ -441,6 +431,9 @@ public:
             expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 3.5f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 2.0f, 1.0e-7f);
             expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 0.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "crossover_freq"), 280.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "delayInterp"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "pitch_track"), 1.0f, 1.0e-7f);
             expect (! processor.revertLatestFix());
         }
 

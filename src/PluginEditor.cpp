@@ -174,7 +174,6 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                           p.liveLowEndMatchPercent,
                           p.liveBroadbandMatchPercent,
                           p.liveBandMatchPercent,
-                          p.latestAppliedBeforePercent,
                           p.liveMatchValid,
                           p.liveLowEndSubLossDb),
       splitter ([this] (int h) { bottomPanelHeight = juce::jlimit (100, getHeight() - 100, h); resized(); })

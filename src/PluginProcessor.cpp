@@ -1027,7 +1027,6 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   kickSignalRms.store(0.0f);
   for (auto &bandMatch : liveBandMatchPercent)
     bandMatch.store(0.0f);
-  latestAppliedBeforePercent.store(-1.0f);
   realtimeCorrelation.store(0.0f);
   liveMatchValid.store(false);
   uiSmoothingInitialized.store(false, std::memory_order_relaxed);
@@ -1786,6 +1785,10 @@ KickLockAudioProcessor::captureCurrentParameterSnapshot() const {
                                   : false;
   snapshot.crossoverFreqHz =
       crossoverFreqParam ? crossoverFreqParam->load() : 150.0f;
+  snapshot.delayInterpolationIndex = juce::jlimit(
+      0, 1, (int)std::lround(readParameterValue("delayInterp", 0.0f)));
+  snapshot.pitchTrack = pitchTrackParam ? (pitchTrackParam->load() > 0.5f)
+                                      : false;
   return snapshot;
 }
 
@@ -1809,6 +1812,9 @@ void KickLockAudioProcessor::restoreParameterSnapshot(
   setParameterValueWithGesture("crossover_enable",
                                snapshot.crossoverEnabled ? 1.0f : 0.0f);
   setParameterValueWithGesture("crossover_freq", snapshot.crossoverFreqHz);
+  setParameterValueWithGesture("delayInterp",
+                               (float)snapshot.delayInterpolationIndex);
+  setParameterValueWithGesture("pitch_track", snapshot.pitchTrack ? 1.0f : 0.0f);
 }
 
 KickLockAudioProcessor::ParameterSnapshot
@@ -2144,6 +2150,13 @@ bool KickLockAudioProcessor::beginBackgroundAnalyze() {
     return false;
   }
 
+  // Analyze enables the crossover for its fixed-window scoring. Preserve the
+  // complete audible state first, and keep this original snapshot until
+  // Revert so later Analyze/Apply cycles cannot move the rollback point.
+  if (!revertSnapshotValid.load(std::memory_order_acquire)) {
+    latestRevertSnapshot = captureCurrentParameterSnapshot();
+    revertSnapshotValid.store(true, std::memory_order_release);
+  }
   setParameterValueWithGesture("crossover_enable", 1.0f);
 
   analyzeState.store(AnalyzeState::Preparing, std::memory_order_release);
@@ -2232,17 +2245,6 @@ bool KickLockAudioProcessor::applyLatestFix() {
     return false;
   }
 
-  // Keep the first pre-Apply state until the user explicitly presses Revert.
-  // Re-analyzing and applying another recommendation must not move the
-  // rollback point to an already-corrected state.
-  if (!revertSnapshotValid.load(std::memory_order_acquire)) {
-    latestRevertSnapshot = captureCurrentParameterSnapshot();
-    revertSnapshotValid.store(true, std::memory_order_release);
-  }
-  // The comparison displayed next to LIVE MATCH must use the same live-meter
-  // scale. The offline score remains available for the analyzer internally.
-  latestAppliedBeforePercent.store(fix.displayBeforeMatchPercent);
-
   setParameterValueWithGesture("polarity_invert",
                                fix.bassPolarityInvert ? 1.0f : 0.0f);
   setParameterValueWithGesture("polarityInvert",
@@ -2326,7 +2328,6 @@ bool KickLockAudioProcessor::revertLatestFix() {
 
   restoreParameterSnapshot(latestRevertSnapshot);
   revertSnapshotValid.store(false, std::memory_order_release);
-  latestAppliedBeforePercent.store(-1.0f);
   return true;
 }
 
