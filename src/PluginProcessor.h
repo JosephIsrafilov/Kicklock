@@ -23,6 +23,7 @@
 #include "dsp/PitchTracker.h"
 #include "dsp/PhaseFixEngine.h"
 #include "dsp/MultibandPhaseCore.h"
+#include "dsp/NotePhaseMap.h"
 #include "dsp/TransientPunchMeter.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
@@ -210,8 +211,11 @@ private:
     // (Analyze/Apply today; Learn/Apply-Learn later). Captured once by
     // ensureRevertBundleCaptured() before the first such operation and consumed
     // by Revert, so repeated Analyze/Apply cycles never move the rollback point.
-    // The learned note map will be added here in Phase 1 (a NotePhaseMapSnapshot
-    // member) so Revert can restore parameters and the map together.
+    //
+    // The noteMap member is Phase 1 MODEL PREPARATION only: it exists so a later
+    // phase can capture and restore the active map alongside the parameters.
+    // Revert does not yet read or write it, and no active map exists, so the
+    // current parameter-only rollback behaviour is unchanged.
     //
     // Validity is intentionally NOT stored in this struct: the atomic
     // revertSnapshotValid (below) is the single cross-thread validity gate.
@@ -220,6 +224,7 @@ private:
     struct RevertBundle
     {
         ParameterSnapshot parameters;
+        NotePhaseMapSnapshot noteMap;
     };
 
     std::atomic<float>* delayMsParam = nullptr;
