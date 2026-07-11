@@ -1045,7 +1045,9 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
     lastAnalyzedCrossoverHz =
         crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
   }
-  revertBundle.valid = false;
+  // Only flip the atomic validity gate here. The RevertBundle storage is
+  // message-thread-owned and must not be mutated from prepareToPlay(), which
+  // the host may call off the message thread.
   revertSnapshotValid.store(false, std::memory_order_release);
 
   // Reset the Analyze state machine unless a background job is mid-flight
@@ -2339,23 +2341,24 @@ bool KickLockAudioProcessor::applyLatestFix() {
 }
 
 void KickLockAudioProcessor::ensureRevertBundleCaptured() {
-  if (revertBundle.valid)
+  // Message thread only. revertSnapshotValid is the single validity gate, so a
+  // concurrent prepareToPlay() that clears it can never race the storage below.
+  if (revertSnapshotValid.load(std::memory_order_acquire))
     return;
 
   revertBundle.parameters = captureCurrentParameterSnapshot();
   // Phase 1 will also capture the active note map here so Revert can restore
   // parameters and the map as one bundle.
-  revertBundle.valid = true;
   revertSnapshotValid.store(true, std::memory_order_release);
 }
 
 bool KickLockAudioProcessor::revertLatestFix() {
-  if (!revertBundle.valid)
+  // Message thread only.
+  if (!revertSnapshotValid.load(std::memory_order_acquire))
     return false;
 
   restoreParameterSnapshot(revertBundle.parameters);
   // Phase 1 will also restore revertBundle.noteMap here.
-  revertBundle.valid = false;
   revertSnapshotValid.store(false, std::memory_order_release);
   return true;
 }
