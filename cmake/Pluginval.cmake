@@ -57,8 +57,16 @@ if(NOT PLUGINVAL_EXECUTABLE)
     endif()
 endif()
 
-# Validate the VST3. $<TARGET_FILE:KickLock_VST3> resolves to the built module
-# inside the .vst3 bundle for the active configuration.
+# Validate the VST3. On macOS the VST3 is a bundle and pluginval must be pointed
+# at the .vst3 bundle directory ($<TARGET_BUNDLE_DIR>); $<TARGET_FILE> there
+# resolves to the inner Mach-O (Contents/MacOS/KickLock), which pluginval rejects
+# with "No types found". Windows/Linux validate the module file directly.
+if(APPLE)
+    set(_pv_plugin_path "$<TARGET_BUNDLE_DIR:KickLock_VST3>")
+else()
+    set(_pv_plugin_path "$<TARGET_FILE:KickLock_VST3>")
+endif()
+
 add_test(
     NAME pluginval_vst3
     COMMAND "${PLUGINVAL_EXECUTABLE}"
@@ -66,7 +74,7 @@ add_test(
             --validate-in-process
             --skip-gui-tests
             --timeout-ms 300000
-            --validate "$<TARGET_FILE:KickLock_VST3>"
+            --validate "${_pv_plugin_path}"
 )
 
 # pluginval returns non-zero on validation failure; make that a test failure.

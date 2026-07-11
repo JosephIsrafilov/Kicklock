@@ -296,7 +296,10 @@ public:
 
             const bool applied = processor.applyLatestFix();
             expect (applied);
-            expectGreaterOrEqual (rawParam (processor, "delayMs"), 0.0f);
+            // The delay parameter round-trips through APVTS normalisation, which
+            // is not bit-exact across architectures (arm64 reads back ~-4.5e-7
+            // for a clamped 0 ms). Allow that negligible undershoot.
+            expectGreaterOrEqual (rawParam (processor, "delayMs"), -1.0e-4f);
             expectWithinAbsoluteError (rawParam (processor, "polarityInvert"),
                                        fix.bassPolarityInvert ? 1.0f : 0.0f, 1.0e-7f);
             expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"),
@@ -500,7 +503,9 @@ public:
 
             processor.setCurrentProgram (3);
             expectEquals (processor.getCurrentProgram(), 3);
-            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 0.0f, 1.0e-7f);
+            // Delay round-trips through APVTS normalisation (not bit-exact on
+            // arm64); 1e-4 ms is negligible for a +/-20 ms parameter.
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), 0.0f, 1.0e-4f);
             expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 0.0f, 1.0e-7f);
             expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 0.0f, 1.0e-7f);
         }
@@ -763,7 +768,9 @@ public:
             processor.setLatestFixResultForTesting (fix);
 
             expect (processor.applyLatestFix());
-            expectWithinAbsoluteError (rawParam (processor, "delayMs"), -3.25f, 1.0e-7f);
+            // Delay round-trips through APVTS normalisation (not bit-exact on
+            // arm64); 1e-4 ms is negligible for a +/-20 ms parameter.
+            expectWithinAbsoluteError (rawParam (processor, "delayMs"), -3.25f, 1.0e-4f);
             expectWithinAbsoluteError (rawParam (processor, "visualOffsetSamples"), -128.0f, 1.0e-7f);
         }
 
