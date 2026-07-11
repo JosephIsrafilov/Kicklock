@@ -8,63 +8,123 @@ on:
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
 jobs:
-  build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-latest]
-
+  windows-release:
+    name: Windows Release (build, tests, pluginval)
+    runs-on: windows-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Configure CMake
-      shell: bash
-      run: |
-        if [ "$RUNNER_OS" == "macOS" ]; then
-          # Build Universal Binary for Intel and Apple Silicon Macs
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DKICKLOCK_ENABLE_PLUGINVAL=OFF
-        else
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=OFF
-        fi
+      - name: Configure CMake
+        shell: bash
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
 
-    - name: Build Plugin
-      shell: bash
-      run: cmake --build build --config Release --parallel 4
+      - name: Build plugin
+        shell: bash
+        run: cmake --build build --config Release --parallel 4
 
-    - name: Zip VST3 (Windows)
-      if: matrix.os == 'windows-latest'
-      run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
+      - name: Build tests
+        shell: bash
+        run: cmake --build build --config Release --target KickLockDspTests --parallel 4
 
-    - name: Zip VST3 (Mac)
-      if: matrix.os == 'macos-14'
-      run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "KickLock-Mac-VST3.zip"
+      # Runs the DSP/processor/RT-safety/serialization/Stabilization unit tests
+      # and the pluginval strictness-10 VST3 validation registered by
+      # cmake/Pluginval.cmake.
+      - name: Run tests + pluginval (ctest)
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure
 
-    - name: Zip AU (Mac)
-      if: matrix.os == 'macos-14'
-      run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/AU/KickLock.component" "KickLock-Mac-AU.zip"
+      - name: Zip VST3
+        run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
 
-    - name: Upload Windows Artifacts
-      if: matrix.os == 'windows-latest'
-      uses: actions/upload-artifact@v4
-      with:
-        name: KickLock-Windows
-        path: KickLock-Windows-VST3.zip
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: KickLock-Windows
+          path: KickLock-Windows-VST3.zip
 
-    - name: Upload Mac Artifacts
-      if: matrix.os == 'macos-14'
-      uses: actions/upload-artifact@v4
-      with:
-        name: KickLock-Mac
-        path: |
-          KickLock-Mac-VST3.zip
-          KickLock-Mac-AU.zip
+  macos-release:
+    name: macOS Release (universal build, tests, pluginval)
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          # Build Universal Binary for Intel and Apple Silicon Macs.
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                -DKICKLOCK_ENABLE_PLUGINVAL=ON
+
+      - name: Build plugin
+        shell: bash
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Build tests
+        shell: bash
+        run: cmake --build build --config Release --target KickLockDspTests --parallel 4
+
+      # ctest runs the unit tests and the pluginval VST3 validation. The
+      # universal test binary runs natively on the Apple-Silicon runner.
+      - name: Run tests + pluginval (ctest)
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Zip VST3
+        run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "KickLock-Mac-VST3.zip"
+
+      - name: Zip AU
+        run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/AU/KickLock.component" "KickLock-Mac-AU.zip"
+
+      - name: Upload Mac Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: KickLock-Mac
+          path: |
+            KickLock-Mac-VST3.zip
+            KickLock-Mac-AU.zip
+
+  linux-sanitizers:
+    name: Linux Debug (ASan + UBSan, tests only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install JUCE Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libx11-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev \
+            libgl1-mesa-dev libcurl4-openssl-dev ninja-build
+
+      - name: Configure CMake (Debug + sanitizers)
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+                -DKICKLOCK_ENABLE_PLUGINVAL=OFF \
+                -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
+                -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      # Tests only under sanitizers; no release artifacts are produced here.
+      - name: Build tests
+        run: cmake --build build --target KickLockDspTests --parallel 4
+
+      # KICKLOCK_SKIP_TIMED_ASSERTS disables the two wall-clock performance
+      # gates (meaningless under instrumentation); every correctness, RT-safety,
+      # serialization and Stabilization assertion still runs under ASan/UBSan.
+      - name: Run tests (ASan + UBSan)
+        env:
+          KICKLOCK_SKIP_TIMED_ASSERTS: "1"
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: ctest --test-dir build --output-on-failure
 
   release:
     name: Publish Nightly Release
-    needs: build
+    needs: [ windows-release, macos-release, linux-sanitizers ]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     permissions:

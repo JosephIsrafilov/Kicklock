@@ -195,7 +195,11 @@ public:
             expect (processor.beginBackgroundAnalyze());
             expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 1.0f, 1.0e-7f);
 
-            for (int tries = 0; tries < 200 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
+            // Generous bound (~10 s): the loop exits the instant the worker
+            // finishes, so Release builds still complete in milliseconds, while
+            // instrumented (ASan/UBSan) CI builds get enough headroom not to
+            // time out mid-analysis.
+            for (int tries = 0; tries < 2000 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
                 juce::Thread::sleep (5);
 
             expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::ResultReady);
@@ -401,7 +405,11 @@ public:
             expect (processor.hasRevertSnapshot());
             expectWithinAbsoluteError (rawParam (processor, "crossover_enable"), 1.0f, 1.0e-7f);
 
-            for (int tries = 0; tries < 200 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
+            // Generous bound (~10 s): the loop exits the instant the worker
+            // finishes, so Release builds still complete in milliseconds, while
+            // instrumented (ASan/UBSan) CI builds get enough headroom not to
+            // time out mid-analysis.
+            for (int tries = 0; tries < 2000 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
                 juce::Thread::sleep (5);
 
             expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::ResultReady);
@@ -411,7 +419,11 @@ public:
             // A later Analyze -> Apply cycle must retain the pre-first-Analyze
             // rollback point rather than snapshotting the corrected state.
             expect (processor.beginBackgroundAnalyze());
-            for (int tries = 0; tries < 200 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
+            // Generous bound (~10 s): the loop exits the instant the worker
+            // finishes, so Release builds still complete in milliseconds, while
+            // instrumented (ASan/UBSan) CI builds get enough headroom not to
+            // time out mid-analysis.
+            for (int tries = 0; tries < 2000 && analyzeStateIsBusy (processor.getAnalyzeState()); ++tries)
                 juce::Thread::sleep (5);
             expectEquals ((int) processor.getAnalyzeState(), (int) AnalyzeState::ResultReady);
             expect (processor.applyLatestFix());

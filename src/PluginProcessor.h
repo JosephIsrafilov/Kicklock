@@ -184,6 +184,9 @@ public:
     bool isAnalysisSignalUsable() const noexcept { return analysisSignalUsable.load(); }
     bool hasEnoughMaterialForAnalysis() const noexcept { return analysisMaterialReady.load(); }
     void setLatestFixResultForTesting (const PhaseFixResult&);
+    // Test-only hook: exercises the rollback-bundle capture in isolation from the
+    // async Analyze worker (mirrors setLatestFixResultForTesting).
+    void ensureRevertBundleCapturedForTesting() { ensureRevertBundleCaptured(); }
     void requestAutoAlign();
 
 private:
@@ -201,6 +204,19 @@ private:
         float crossoverFreqHz = 150.0f;
         int delayInterpolationIndex = 0;
         bool pitchTrack = false;
+    };
+
+    // Single rollback point for every operation that can change the audible
+    // state (Analyze/Apply today; Learn/Apply-Learn later). Captured once by
+    // ensureRevertBundleCaptured() before the first such operation and cleared
+    // by Revert, so repeated Analyze/Apply cycles never move the rollback
+    // point. The learned note map will be added to this bundle in Phase 1
+    // (a NotePhaseMapSnapshot member) so Revert can restore parameters and the
+    // map together; for now it carries the parameter snapshot only.
+    struct RevertBundle
+    {
+        ParameterSnapshot parameters;
+        bool valid = false;
     };
 
     std::atomic<float>* delayMsParam = nullptr;
@@ -282,7 +298,10 @@ private:
     double lastAnalyzedSampleRate = 0.0;
     InterpolationType lastAnalyzedDelayInterpolation = InterpolationType::Linear;
     bool lastAnalyzedCrossoverEnabled = false;
-    ParameterSnapshot latestRevertSnapshot;
+    // revertBundle is owned and mutated only on the message thread.
+    // revertSnapshotValid mirrors revertBundle.valid so the editor (UI thread)
+    // can gate the Revert button via hasRevertSnapshot() without racing.
+    RevertBundle revertBundle;
     std::atomic<bool> revertSnapshotValid { false };
     std::array<ParameterSnapshot, 2> compareSlots {};
     bool compareSlotsInitialised = false;
@@ -350,6 +369,10 @@ private:
     void pushMetersScopeAndTransientState (float mainMono, float sidechainMonoRaw) noexcept;
     ParameterSnapshot captureCurrentParameterSnapshot() const;
     void restoreParameterSnapshot (const ParameterSnapshot&);
+    // Captures the rollback bundle exactly once (no-op if already valid), so the
+    // first audible-state change stores the pre-change state and later
+    // Analyze/Apply operations leave the rollback point untouched.
+    void ensureRevertBundleCaptured();
     float readParameterValue (const char* id, float fallback) const;
     void setParameterValueWithGesture (const char* id, float value);
     void initialiseCompareSlotsIfNeeded();

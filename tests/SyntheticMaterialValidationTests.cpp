@@ -238,10 +238,17 @@ public:
             // Windows scheduler jitter. Keep a meaningful wall-clock guard
             // without failing a 2.5 s analysis for a few milliseconds of
             // unrelated host activity; the Release budget remains strict.
-            expectLessThan (elapsedMs, 2750.0);
+            const double budgetMs = 2750.0;
            #else
-            expectLessThan (elapsedMs, 500.0);
+            const double budgetMs = 500.0;
            #endif
+            // Instrumented (ASan/UBSan) CI builds make wall-clock timing
+            // meaningless; the timing gate stays fully active in the Release
+            // jobs where KICKLOCK_SKIP_TIMED_ASSERTS is unset.
+            if (juce::SystemStats::getEnvironmentVariable ("KICKLOCK_SKIP_TIMED_ASSERTS", "0") == "0")
+                expectLessThan (elapsedMs, budgetMs);
+            else
+                logMessage ("Timing assertion skipped (KICKLOCK_SKIP_TIMED_ASSERTS set)");
         }
     }
 };

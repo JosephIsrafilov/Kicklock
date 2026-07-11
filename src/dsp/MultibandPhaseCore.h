@@ -5,7 +5,6 @@
 #include <cmath>
 
 #include "LinkwitzRileyCrossover.h"
-#include "DynamicTransientEQ.h"
 
 class MultibandPhaseCore
 {
@@ -32,9 +31,6 @@ public:
         lowBuffer.setSize (numChannels, scratchSamples, false, false, true);
         highBuffer.setSize (numChannels, scratchSamples, false, false, true);
         inputBuffer.setSize (numChannels, scratchSamples, false, false, true);
-        // Pre-size sidechain scratch so processChunk never allocates on the
-        // audio thread (previous path called setSize every chunk).
-        sidechainScratch.setSize (2, scratchSamples, false, false, true);
 
         const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) scratchSamples, (juce::uint32) numChannels };
         crossover.prepare (spec);
@@ -45,7 +41,6 @@ public:
         highDelay.prepare (spec);
 
         initialiseAllpassFilters();
-        transientEQ.prepare(sampleRate, maxBlock, numChannels);
 
         smoothedCrossover.reset (sampleRate, 0.030);
         smoothedDelay.reset (sampleRate, 0.020);
@@ -65,8 +60,6 @@ public:
         for (auto& channel : allpassFilters)
             for (auto& stage : channel)
                 stage.reset();
-        
-        transientEQ.reset();
 
         smoothedCrossover.setCurrentAndTargetValue (150.0f);
         smoothedDelay.setCurrentAndTargetValue (0.0f);
@@ -94,6 +87,11 @@ public:
                   const Params& params,
                   int n)
     {
+        // The high band is a latency-compensated passthrough and the low-band
+        // correction is fully self-contained, so the sidechain is no longer
+        // read here. The parameter is kept for a stable call site.
+        juce::ignoreUnused (sidechain);
+
         currentCrossoverEnabled = params.crossoverEnabled;
         smoothedCrossover.setTargetValue (juce::jlimit (40.0f, 500.0f, params.crossoverHz));
 
@@ -155,7 +153,7 @@ public:
         while (offset < n)
         {
             const int chunk = juce::jmin (scratchSamples, n - offset);
-            processChunk (main, sidechain, offset, chunk);
+            processChunk (main, offset, chunk);
             offset += chunk;
         }
     }
@@ -213,7 +211,6 @@ private:
     }
 
     void processChunk (juce::AudioBuffer<float>& main,
-                       const juce::AudioBuffer<float>& sidechain,
                        int offset,
                        int n)
     {
@@ -242,21 +239,10 @@ private:
                 highBuffer.clear (ch, 0, n);
             }
         }
-        
-        // Transient Q-enhancement on the high band — only when a sidechain is
-        // present and the high path is active. Copy into a prepare()-sized
-        // scratch; never reallocate here.
-        const int scChannels = juce::jmin (sidechain.getNumChannels(),
-                                           sidechainScratch.getNumChannels());
-        if (scChannels > 0 && currentCrossoverEnabled)
-        {
-            for (int ch = 0; ch < scChannels; ++ch)
-                sidechainScratch.copyFrom (ch, 0, sidechain, ch, offset, n);
-            if (scChannels < sidechainScratch.getNumChannels())
-                sidechainScratch.clear (scChannels, 0, n);
 
-            transientEQ.process (highBuffer, sidechainScratch, n);
-        }
+        // The high band carries no sidechain-reactive processing: it is a plain
+        // latency-compensated passthrough (see the delay below). Only the low
+        // band receives delay/polarity/phase-filter correction.
 
         // Channel write pointers for the outer sample loop.
         float* mainWrite[2] = {
@@ -402,8 +388,6 @@ private:
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lowDelay;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> highDelay;
     std::array<std::array<juce::dsp::IIR::Filter<float>, (size_t) maxAllpassStages>, 2> allpassFilters;
-    DynamicTransientEQ transientEQ;
-    juce::AudioBuffer<float> sidechainScratch;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCrossover;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedDelay;

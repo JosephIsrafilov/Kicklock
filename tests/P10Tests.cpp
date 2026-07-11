@@ -257,7 +257,13 @@ public:
            #else
             const double budgetMs = 250.0;
            #endif
-            expectLessThan (elapsedMs, budgetMs);
+            // Instrumented (ASan/UBSan) CI builds make wall-clock timing
+            // meaningless; the timing gate stays fully active in the Release
+            // jobs where KICKLOCK_SKIP_TIMED_ASSERTS is unset.
+            if (juce::SystemStats::getEnvironmentVariable ("KICKLOCK_SKIP_TIMED_ASSERTS", "0") == "0")
+                expectLessThan (elapsedMs, budgetMs);
+            else
+                logMessage ("Timing assertion skipped (KICKLOCK_SKIP_TIMED_ASSERTS set)");
         }
     }
 
