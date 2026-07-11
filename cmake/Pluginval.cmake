@@ -7,18 +7,18 @@ set(PLUGINVAL_VERSION "v1.0.4" CACHE STRING "pluginval release tag to download")
 set(PLUGINVAL_EXECUTABLE "" CACHE FILEPATH "Path to an existing pluginval binary (skips download)")
 set(PLUGINVAL_STRICTNESS "10" CACHE STRING "pluginval strictness level 1-10")
 
-# Resolve the platform-specific release asset and the path to the executable
-# inside the extracted archive.
+# Resolve the platform-specific release asset and the executable name to search
+# for inside the extracted archive.
 if(NOT PLUGINVAL_EXECUTABLE)
     if(WIN32)
         set(_pv_asset "pluginval_Windows.zip")
-        set(_pv_relpath "pluginval.exe")
+        set(_pv_name "pluginval.exe")
     elseif(APPLE)
         set(_pv_asset "pluginval_macOS.zip")
-        set(_pv_relpath "pluginval.app/Contents/MacOS/pluginval")
+        set(_pv_name "pluginval")
     elseif(UNIX)
         set(_pv_asset "pluginval_Linux.zip")
-        set(_pv_relpath "pluginval")
+        set(_pv_name "pluginval")
     else()
         message(STATUS "pluginval: unsupported platform, skipping validation target")
         return()
@@ -32,7 +32,21 @@ if(NOT PLUGINVAL_EXECUTABLE)
     )
     FetchContent_MakeAvailable(pluginval)
 
-    set(PLUGINVAL_EXECUTABLE "${pluginval_SOURCE_DIR}/${_pv_relpath}")
+    # The internal layout of the extracted archive varies by platform and across
+    # pluginval releases: a bare binary on Linux/Windows, and on macOS a
+    # pluginval.app bundle whose Mach-O lives under Contents/MacOS. Locate the
+    # executable by searching rather than hardcoding a fragile relative path
+    # (the old macOS path failed configure once pluginval was enabled in CI).
+    file(GLOB_RECURSE _pv_found LIST_DIRECTORIES false
+         "${pluginval_SOURCE_DIR}/${_pv_name}")
+
+    if(NOT _pv_found)
+        message(WARNING "pluginval: could not locate '${_pv_name}' under "
+                        "${pluginval_SOURCE_DIR}; skipping validation target")
+        return()
+    endif()
+
+    list(GET _pv_found 0 PLUGINVAL_EXECUTABLE)
 
     # The macOS/Linux binaries ship without an executable bit after extraction.
     if(UNIX)
@@ -43,8 +57,16 @@ if(NOT PLUGINVAL_EXECUTABLE)
     endif()
 endif()
 
-# Validate the VST3. $<TARGET_FILE:KickLock_VST3> resolves to the built module
-# inside the .vst3 bundle for the active configuration.
+# Validate the VST3. On macOS the VST3 is a bundle and pluginval must be pointed
+# at the .vst3 bundle directory ($<TARGET_BUNDLE_DIR>); $<TARGET_FILE> there
+# resolves to the inner Mach-O (Contents/MacOS/KickLock), which pluginval rejects
+# with "No types found". Windows/Linux validate the module file directly.
+if(APPLE)
+    set(_pv_plugin_path "$<TARGET_BUNDLE_DIR:KickLock_VST3>")
+else()
+    set(_pv_plugin_path "$<TARGET_FILE:KickLock_VST3>")
+endif()
+
 add_test(
     NAME pluginval_vst3
     COMMAND "${PLUGINVAL_EXECUTABLE}"
@@ -52,7 +74,7 @@ add_test(
             --validate-in-process
             --skip-gui-tests
             --timeout-ms 300000
-            --validate "$<TARGET_FILE:KickLock_VST3>"
+            --validate "${_pv_plugin_path}"
 )
 
 # pluginval returns non-zero on validation failure; make that a test failure.

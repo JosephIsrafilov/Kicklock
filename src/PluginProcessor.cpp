@@ -1045,6 +1045,9 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
     lastAnalyzedCrossoverHz =
         crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
   }
+  // Only flip the atomic validity gate here. The RevertBundle storage is
+  // message-thread-owned and must not be mutated from prepareToPlay(), which
+  // the host may call off the message thread.
   revertSnapshotValid.store(false, std::memory_order_release);
 
   // Reset the Analyze state machine unless a background job is mid-flight
@@ -1884,6 +1887,16 @@ void KickLockAudioProcessor::loadCompareSlotsFromState() {
         0, 2,
         (int)apvts.state.getProperty(juce::Identifier(prefix + "StageIndex"),
                                      snapshot.phaseFilterStageIndex));
+    snapshot.crossoverEnabled = (bool)apvts.state.getProperty(
+        juce::Identifier(prefix + "CrossoverEnabled"), snapshot.crossoverEnabled);
+    snapshot.crossoverFreqHz = (float)apvts.state.getProperty(
+        juce::Identifier(prefix + "CrossoverHz"), snapshot.crossoverFreqHz);
+    snapshot.delayInterpolationIndex = juce::jlimit(
+        0, 1,
+        (int)apvts.state.getProperty(juce::Identifier(prefix + "DelayInterp"),
+                                     snapshot.delayInterpolationIndex));
+    snapshot.pitchTrack = (bool)apvts.state.getProperty(
+        juce::Identifier(prefix + "PitchTrack"), snapshot.pitchTrack);
     return snapshot;
   };
 
@@ -1920,6 +1933,14 @@ void KickLockAudioProcessor::writeCompareSlotsToState() {
                             snapshot.phaseFilterQ, nullptr);
     apvts.state.setProperty(juce::Identifier(prefix + "StageIndex"),
                             snapshot.phaseFilterStageIndex, nullptr);
+    apvts.state.setProperty(juce::Identifier(prefix + "CrossoverEnabled"),
+                            snapshot.crossoverEnabled, nullptr);
+    apvts.state.setProperty(juce::Identifier(prefix + "CrossoverHz"),
+                            snapshot.crossoverFreqHz, nullptr);
+    apvts.state.setProperty(juce::Identifier(prefix + "DelayInterp"),
+                            snapshot.delayInterpolationIndex, nullptr);
+    apvts.state.setProperty(juce::Identifier(prefix + "PitchTrack"),
+                            snapshot.pitchTrack, nullptr);
   }
 }
 
@@ -2151,12 +2172,9 @@ bool KickLockAudioProcessor::beginBackgroundAnalyze() {
   }
 
   // Analyze enables the crossover for its fixed-window scoring. Preserve the
-  // complete audible state first, and keep this original snapshot until
-  // Revert so later Analyze/Apply cycles cannot move the rollback point.
-  if (!revertSnapshotValid.load(std::memory_order_acquire)) {
-    latestRevertSnapshot = captureCurrentParameterSnapshot();
-    revertSnapshotValid.store(true, std::memory_order_release);
-  }
+  // complete audible state first, and keep this original bundle until Revert
+  // so later Analyze/Apply cycles cannot move the rollback point.
+  ensureRevertBundleCaptured();
   setParameterValueWithGesture("crossover_enable", 1.0f);
 
   analyzeState.store(AnalyzeState::Preparing, std::memory_order_release);
@@ -2322,11 +2340,25 @@ bool KickLockAudioProcessor::applyLatestFix() {
   return true;
 }
 
+void KickLockAudioProcessor::ensureRevertBundleCaptured() {
+  // Message thread only. revertSnapshotValid is the single validity gate, so a
+  // concurrent prepareToPlay() that clears it can never race the storage below.
+  if (revertSnapshotValid.load(std::memory_order_acquire))
+    return;
+
+  revertBundle.parameters = captureCurrentParameterSnapshot();
+  // Phase 1 will also capture the active note map here so Revert can restore
+  // parameters and the map as one bundle.
+  revertSnapshotValid.store(true, std::memory_order_release);
+}
+
 bool KickLockAudioProcessor::revertLatestFix() {
+  // Message thread only.
   if (!revertSnapshotValid.load(std::memory_order_acquire))
     return false;
 
-  restoreParameterSnapshot(latestRevertSnapshot);
+  restoreParameterSnapshot(revertBundle.parameters);
+  // Phase 1 will also restore revertBundle.noteMap here.
   revertSnapshotValid.store(false, std::memory_order_release);
   return true;
 }
