@@ -26,6 +26,7 @@
 #include "dsp/PhaseFixEngine.h"
 #include "dsp/MultibandPhaseCore.h"
 #include "dsp/NotePhaseMap.h"
+#include "dsp/DynamicRuntimeSelector.h"
 #include "dsp/TransientPunchMeter.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
@@ -107,6 +108,9 @@ public:
     // the phase correction stays on the note as the bassline moves — the
     // dynamic behaviour a static filter setup can't provide.
     std::atomic<float> trackedBassHz { 0.0f };
+    std::atomic<bool> dynamicFallbackActive { false };
+    std::atomic<bool> dynamicMapStale { false };
+    std::atomic<int> activeMidiNote { -1 };
 
     std::atomic<float> latestAnalyzedBeforePercent { 50.0f };
     std::atomic<float> latestAnalyzedAfterPercent { 50.0f };
@@ -216,6 +220,7 @@ public:
     {
         return activeNoteMap;
     }
+    int getDynamicLastMidiForTesting() const noexcept { return dynamicNoteState.lastMidi; }
 
 private:
     class AutoAlignEngine;
@@ -232,6 +237,8 @@ private:
         float crossoverFreqHz = 150.0f;
         int delayInterpolationIndex = 0;
         bool pitchTrack = false;
+        int correctionModeIndex = 0;
+        float dynamicStrength = 1.0f;
     };
 
     // Rollback storage for every operation that can change the audible state
@@ -268,6 +275,8 @@ private:
     std::atomic<float>* crossoverFreqParam = nullptr;
     std::atomic<float>* crossoverEnableParamRaw = nullptr;
     std::atomic<float>* pitchTrackParam = nullptr;
+    std::atomic<float>* correctionModeParam = nullptr;
+    std::atomic<float>* dynamicStrengthParam = nullptr;
 
 
     void parameterChanged (const juce::String& parameterID, float newValue) override;
@@ -355,6 +364,8 @@ private:
     NoteMapUpdateQueue noteMapUpdateQueue;
     NotePhaseMapSnapshot activeNoteMap;
     std::atomic<bool> learnActive { false };
+    DynamicNoteState dynamicNoteState;
+    int dynamicSilenceResetSamples = 12000;
 
     // Background Analyze. The heavy PhaseFixEngine grid search runs on this
     // single-thread pool so the UI click returns immediately and the audio
@@ -428,6 +439,12 @@ private:
     void loadCompareSlotsFromState();
     void writeCompareSlotsToState();
     static ParameterSnapshot makeFactoryPresetSnapshot (int index);
+    RuntimeBaseSettings readCurrentRuntimeBaseSettings (float delayMs,
+                                                        bool polarityInvert,
+                                                        bool crossoverEnabled,
+                                                        float crossoverHz,
+                                                        int allpassStages,
+                                                        int delayInterpolationIndex) const noexcept;
 
     int lastInterpChoice = 0;
     int lastStageChoice = 0;
