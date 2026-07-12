@@ -3,9 +3,11 @@
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "util/ScopeFifo.h"
@@ -20,6 +22,7 @@
 #include "dsp/AllpassPhaseRotator.h"
 #include "dsp/AlignmentAnalyzer.h"
 #include "dsp/AnalyzeState.h"
+#include "dsp/LearnState.h"
 #include "dsp/TransientDetector.h"
 #include "dsp/SignalActivityTracker.h"
 #include "dsp/PitchTracker.h"
@@ -32,9 +35,41 @@
 #include "ui/UiFormatters.h"
 
 class KickLockAudioProcessor : public juce::AudioProcessor,
-                               private juce::AudioProcessorValueTreeState::Listener
+                               private juce::AudioProcessorValueTreeState::Listener,
+                               private juce::Timer
 {
 public:
+    struct CallbackPauseControlForTesting
+    {
+        void pause();
+        void release();
+        bool waitUntilEntered (int timeoutMs);
+
+    private:
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool paused = false;
+        bool entered = false;
+
+        friend class KickLockAudioProcessor;
+    };
+
+    struct LearnWorkerPauseControlForTesting
+    {
+        void pause (LearnState state, bool ignoreCancellation);
+        void release();
+        bool waitUntilEntered (int timeoutMs);
+
+    private:
+        std::mutex mutex;
+        std::condition_variable condition;
+        LearnState pausedState = LearnState::Idle;
+        bool ignoreCancellation = false;
+        bool entered = false;
+
+        friend class KickLockAudioProcessor;
+    };
+
     KickLockAudioProcessor();
     ~KickLockAudioProcessor() override;
 
@@ -145,6 +180,18 @@ public:
 
     bool applyLatestFix();
     bool revertLatestFix();
+    bool beginLearn();
+    bool stopLearn();
+    void cancelLearn();
+    LearnState getLearnState() const noexcept;
+    LearnProgressSnapshot getLearnProgress() const;
+    LearnFinalizeResult getPendingLearnResult() const;
+    bool hasPendingLearnResult() const noexcept;
+    juce::String getLearnApplyBlockedReason() const;
+    bool applyLatestLearnResult();
+    bool discardLatestLearnResult();
+    bool clearNoteMap();
+    bool hasValidNoteMap() const noexcept;
     bool hasRevertSnapshot() const noexcept { return revertSnapshotValid.load (std::memory_order_acquire); }
     void selectCompareSlot (int slotIndex);
     void copyActiveCompareSlotToOther();
@@ -191,6 +238,7 @@ public:
     bool isAnalysisSignalUsable() const noexcept { return analysisSignalUsable.load(); }
     bool hasEnoughMaterialForAnalysis() const noexcept { return analysisMaterialReady.load(); }
     void setLatestFixResultForTesting (const PhaseFixResult&);
+    void setPendingLearnResultForTesting (const LearnFinalizeResult&, const LearnSessionContext&);
     // Test-only hook: exercises the rollback-bundle capture in isolation from the
     // async Analyze worker (mirrors setLatestFixResultForTesting).
     void ensureRevertBundleCapturedForTesting() { ensureRevertBundleCaptured(); }
@@ -214,6 +262,10 @@ public:
     }
     bool publishNoteMapForTesting (const NotePhaseMapSnapshot& snapshot) noexcept
     {
+        {
+            const std::lock_guard<std::mutex> lock (mapMutex);
+            messageOwnedNoteMap = snapshot;
+        }
         return noteMapUpdateQueue.push (snapshot);
     }
     const NotePhaseMapSnapshot& getActiveNoteMapForTesting() const noexcept
@@ -221,6 +273,31 @@ public:
         return activeNoteMap;
     }
     int getDynamicLastMidiForTesting() const noexcept { return dynamicNoteState.lastMidi; }
+    NotePhaseMapSnapshot getMessageOwnedNoteMapForTesting() const;
+    uint64_t getLearnSessionIdForTesting() const noexcept
+    {
+        return activeLearnSessionId.load (std::memory_order_acquire);
+    }
+    bool serviceMapPublicationRetryForTesting();
+    void requestMapPublicationForTesting (const NotePhaseMapSnapshot& map) { requestMapPublication (map); }
+    bool isMapPublicationRetryScheduledForTesting() const noexcept { return isTimerRunning(); }
+    void setMapPublicationRetryObserverForTesting (std::shared_ptr<std::atomic<int>> observer)
+    {
+        mapPublicationRetryObserver = std::move (observer);
+    }
+    void setResolvedLearnStateForTesting (LearnState state);
+    std::shared_ptr<CallbackPauseControlForTesting> getMapTimerCallbackPauseControlForTesting() const noexcept
+    {
+        return mapTimerCallbackPauseControlForTesting;
+    }
+    std::shared_ptr<LearnWorkerPauseControlForTesting> getLearnWorkerPauseControlForTesting() const noexcept
+    {
+        return learnWorkerPauseControlForTesting;
+    }
+    void setLearnWorkerPauseStateForTesting (LearnState state, bool ignoreCancellation = false)
+    {
+        learnWorkerPauseControlForTesting->pause (state, ignoreCancellation);
+    }
 
 private:
     class AutoAlignEngine;
@@ -245,11 +322,6 @@ private:
     // (Analyze/Apply today; Learn/Apply-Learn later). Captured once by
     // ensureRevertBundleCaptured() before the first such operation and consumed
     // by Revert, so repeated Analyze/Apply cycles never move the rollback point.
-    //
-    // The noteMap member is Phase 1 MODEL PREPARATION only: it exists so a later
-    // phase can capture and restore the active map alongside the parameters.
-    // Revert does not yet read or write it, and no active map exists, so the
-    // current parameter-only rollback behaviour is unchanged.
     //
     // Validity is intentionally NOT stored in this struct: the atomic
     // revertSnapshotValid (below) is the single cross-thread validity gate.
@@ -280,6 +352,7 @@ private:
 
 
     void parameterChanged (const juce::String& parameterID, float newValue) override;
+    void timerCallback() override;
     void markRestoredParameterSources (bool hasDelayMs,
                                        bool hasLegacyDelayMs,
                                        bool hasPolarityInvert,
@@ -364,6 +437,34 @@ private:
     NoteMapUpdateQueue noteMapUpdateQueue;
     NotePhaseMapSnapshot activeNoteMap;
     std::atomic<bool> learnActive { false };
+    std::atomic<LearnState> learnState { LearnState::Idle };
+    std::atomic<uint64_t> learnSessionCounter { 0 };
+    std::atomic<uint64_t> activeLearnSessionId { 0 };
+    std::atomic<bool> learnStartRequested { false };
+    std::atomic<bool> learnStopRequested { false };
+    std::atomic<bool> learnCancelRequested { false };
+    std::atomic<bool> learnAudioCaptureAcknowledged { false };
+    std::atomic<bool> shuttingDown { false };
+    std::thread learnWorker;
+    std::mutex learnControlMutex;
+    std::mutex learnWorkerCompletionMutex;
+    std::condition_variable learnWorkerCompletionCondition;
+    bool learnWorkerFinished = true;
+    std::shared_ptr<LearnWorkerPauseControlForTesting> learnWorkerPauseControlForTesting =
+        std::make_shared<LearnWorkerPauseControlForTesting>();
+    mutable std::mutex learnMutex;
+    mutable std::mutex learnProgressMutex;
+    PendingLearnCandidate pendingLearnCandidate;
+    LearnProgressSnapshot learnProgress;
+    mutable std::mutex mapMutex;
+    NotePhaseMapSnapshot messageOwnedNoteMap = NoteMap::makeEmptyNoteMap();
+    std::mutex mapTimerCallbackMutex;
+    std::mutex mapPublicationMutex;
+    NotePhaseMapSnapshot pendingMapPublication = NoteMap::makeEmptyNoteMap();
+    bool hasPendingMapPublication = false;
+    std::shared_ptr<std::atomic<int>> mapPublicationRetryObserver;
+    std::shared_ptr<CallbackPauseControlForTesting> mapTimerCallbackPauseControlForTesting =
+        std::make_shared<CallbackPauseControlForTesting>();
     DynamicNoteState dynamicNoteState;
     int dynamicSilenceResetSamples = 12000;
 
@@ -433,6 +534,19 @@ private:
     // first audible-state change stores the pre-change state and later
     // Analyze/Apply operations leave the rollback point untouched.
     void ensureRevertBundleCaptured();
+    void serviceLearnAudioCommands() noexcept;
+    void drainPendingMapUpdates() noexcept;
+    void runLearnWorker (uint64_t sessionId, LearnSessionContext context);
+    void requestMapPublication (const NotePhaseMapSnapshot& map);
+    bool retryMapPublication();
+    bool waitForLearnWorker (int timeoutMs);
+    void waitForLearnWorkerUntilFinished();
+    void signalLearnWorkerFinished();
+    bool pauseLearnWorkerForTesting (LearnState state, uint64_t sessionId);
+    void clearPendingLearnCandidate();
+    void invalidateLearnSession();
+    void resetResolvedLearnStateToIdle();
+    bool learnStateIsActivelyMutating() const noexcept;
     float readParameterValue (const char* id, float fallback) const;
     void setParameterValueWithGesture (const char* id, float value);
     void initialiseCompareSlotsIfNeeded();

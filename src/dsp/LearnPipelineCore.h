@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <vector>
 
 #include "FixedTimingRotatorSearch.h"
 #include "FrozenCrossoverPhaseSimulation.h"
 #include "HitConsensus.h"
-#include "LearnHitQueue.h"
+#include "../util/LearnHitQueue.h"
 #include "MultiBandCorrelation.h"
 #include "NoteLearnAccumulator.h"
 #include "NoteQuantizer.h"
@@ -45,7 +46,8 @@ class LearnPipelineCore
 public:
     static LearnFinalizeResult finalize (const std::vector<LearnHitWindow>& windows,
                                          const LearnPipelineConfig& config,
-                                         const LearnDiagnostics& transportDiagnostics = {})
+                                         const LearnDiagnostics& transportDiagnostics = {},
+                                         const std::function<bool()>& shouldCancel = {})
     {
         LearnFinalizeResult result;
         result.map = NoteMap::makeEmptyNoteMap();
@@ -53,6 +55,8 @@ public:
         diag.capturedHits = (int) windows.size();
         diag.droppedQueueHits = transportDiagnostics.droppedQueueHits;
         diag.ignoredOverlappingTriggers = transportDiagnostics.ignoredOverlappingTriggers;
+        if (cancelled (shouldCancel))
+            return fail (result, "Learn cancelled.");
         if (windows.empty() || ! (config.sampleRate > 0.0) || ! std::isfinite (config.sampleRate))
             return fail (result, "No hits to learn from.");
 
@@ -63,6 +67,8 @@ public:
 
         for (const auto& window : windows)
         {
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
             AnalyzedHit hit;
             hit.analysis.sequence = window.sequence;
             hit.analysis.trackedFundamentalHz = window.trackedHzAtTrigger;
@@ -124,6 +130,8 @@ public:
             return fail (result, "Too few usable timing observations.");
 
         const auto consensus = HitConsensus::analyze (observations);
+        if (cancelled (shouldCancel))
+            return fail (result, "Learn cancelled.");
         if (! consensus.hasConsensus || consensus.dominantClusterIndex < 0)
             return fail (result, "No timing consensus across hits.");
         const auto& dominant = consensus.clusters[(size_t) consensus.dominantClusterIndex];
@@ -165,7 +173,9 @@ public:
         }
         const auto globalSearch = FixedTimingRotatorSearch::searchCombined (
             globalInputs, config.sampleRate, globalDelay, globalPolarity, config.delayInterpolation,
-            config.stages(), config.freqs(), config.qs());
+            config.stages(), config.freqs(), config.qs(), 0, shouldCancel);
+        if (cancelled (shouldCancel))
+            return fail (result, "Learn cancelled.");
         if (! globalSearch.valid)
         {
             result.globalFix = timingFix;
@@ -193,12 +203,14 @@ public:
         std::array<NoteLearnAccumulator, (size_t) NotePhaseMapSnapshot::size> buckets;
         for (const int index : dominantHits)
         {
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
             auto& hit = hits[(size_t) index];
             if (! hit.analysis.pitchAccepted)
                 continue;
             const auto perHit = FixedTimingRotatorSearch::search (hit.bass.data(), hit.kick.data(), (int) hit.bass.size(),
                 config.sampleRate, globalDelay, globalPolarity, config.delayInterpolation,
-                config.stages(), config.freqs(), config.qs(), globalStages);
+                config.stages(), config.freqs(), config.qs(), globalStages, shouldCancel);
             const auto candidate = FixedTimingRotatorSearch::candidateForStage (perHit, globalStages);
             hit.analysis.rotatorHelps = candidate.helps;
             hit.analysis.allpassFreqHz = candidate.allpassFreqHz;
@@ -247,11 +259,16 @@ public:
             diag.warning = "Multiple timing families detected; used the dominant one.";
         result.message = "Learned " + juce::String (learnedNotes) + " notes from "
                        + juce::String ((int) dominantHits.size()) + " dominant timing hits.";
+        if (cancelled (shouldCancel))
+            return fail (result, "Learn cancelled.");
         return result;
     }
 
 private:
     struct AnalyzedHit { std::vector<float> bass, kick; LearnHitAnalysis analysis; PhaseFixResult timing; };
+
+    static bool cancelled (const std::function<bool()>& shouldCancel)
+    { return shouldCancel && shouldCancel(); }
 
     static LearnFinalizeResult fail (LearnFinalizeResult& result, const juce::String& message)
     { result.valid = false; result.map = NoteMap::makeEmptyNoteMap(); result.message = message; result.diagnostics.warning = message; return result; }

@@ -2,10 +2,12 @@
 #include "PluginEditor.h"
 #include "dsp/FrequencyDomainPhaseRefiner.h"
 #include "dsp/HitConsensus.h"
+#include "dsp/LearnPipelineCore.h"
 #include "dsp/MultiBandCorrelation.h"
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <numeric>
 
@@ -642,6 +644,55 @@ private:
   std::atomic<int> captureIndex{0};
 };
 
+void KickLockAudioProcessor::CallbackPauseControlForTesting::pause()
+{
+  const std::lock_guard<std::mutex> lock (mutex);
+  paused = true;
+  entered = false;
+}
+
+void KickLockAudioProcessor::CallbackPauseControlForTesting::release()
+{
+  {
+    const std::lock_guard<std::mutex> lock (mutex);
+    paused = false;
+  }
+  condition.notify_all();
+}
+
+bool KickLockAudioProcessor::CallbackPauseControlForTesting::waitUntilEntered (int timeoutMs)
+{
+  std::unique_lock<std::mutex> lock (mutex);
+  return condition.wait_for (lock, std::chrono::milliseconds (std::max (0, timeoutMs)),
+                             [this] { return entered; });
+}
+
+void KickLockAudioProcessor::LearnWorkerPauseControlForTesting::pause (
+    LearnState state, bool shouldIgnoreCancellation)
+{
+  const std::lock_guard<std::mutex> lock (mutex);
+  pausedState = state;
+  ignoreCancellation = shouldIgnoreCancellation;
+  entered = false;
+}
+
+void KickLockAudioProcessor::LearnWorkerPauseControlForTesting::release()
+{
+  {
+    const std::lock_guard<std::mutex> lock (mutex);
+    pausedState = LearnState::Idle;
+    ignoreCancellation = false;
+  }
+  condition.notify_all();
+}
+
+bool KickLockAudioProcessor::LearnWorkerPauseControlForTesting::waitUntilEntered (int timeoutMs)
+{
+  std::unique_lock<std::mutex> lock (mutex);
+  return condition.wait_for (lock, std::chrono::milliseconds (std::max (0, timeoutMs)),
+                             [this] { return entered; });
+}
+
 KickLockAudioProcessor::KickLockAudioProcessor()
     : AudioProcessor(
           BusesProperties()
@@ -677,6 +728,19 @@ KickLockAudioProcessor::KickLockAudioProcessor()
 }
 
 KickLockAudioProcessor::~KickLockAudioProcessor() {
+  stopTimer();
+  {
+    const std::lock_guard<std::mutex> lock (mapTimerCallbackMutex);
+  }
+  shuttingDown.store(true, std::memory_order_release);
+  invalidateLearnSession();
+  learnStartRequested.store(false, std::memory_order_release);
+  learnStopRequested.store(false, std::memory_order_release);
+  learnCancelRequested.store(true, std::memory_order_release);
+  learnActive.store(false, std::memory_order_release);
+  if (! waitForLearnWorker (1500))
+    waitForLearnWorkerUntilFinished();
+
   for (const auto *id :
        {"delay_ms", "delayMs", "polarity_invert", "polarityInvert",
         "allpass_enable", "phaseFilterEnabled", "allpass_freq", "rotatorFreq"})
@@ -931,6 +995,12 @@ KickLockAudioProcessor::createParameterLayout() {
 
 void KickLockAudioProcessor::prepareToPlay(double sampleRate,
                                            int samplesPerBlock) {
+  if (learnStateIsActivelyMutating())
+    cancelLearn();
+  if (! waitForLearnWorker (1500))
+    waitForLearnWorkerUntilFinished();
+  const std::lock_guard<std::mutex> learnLifecycleLock (learnControlMutex);
+
   const int numChannels = juce::jmax(1, getTotalNumOutputChannels());
   analysisBuffer.setSize(numChannels, samplesPerBlock);
   sidechainMonoScratch.setSize(1, samplesPerBlock, false, false, true);
@@ -994,14 +1064,10 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   transientDetector.setTriggerRatio(1.35f);
   transientDetector.setHoldoffMs(90.0f);
 
-  // Phase 2 Learn transport: RT-safe SPSC infrastructure only. The Learn
-  // transient detector is dedicated to Learn (its own state, separate from the
-  // scope/punch detector) so scope triggers and Learn triggers never interfere.
-  // learnActive stays false in this phase, so the capture path below is inert
-  // and audio output is unchanged. Re-preparing resets queue storage and DSP
-  // state, but deliberately retains the audio-owned active map: F/Q are Hz/Q
-  // values and learnedSampleRate is metadata, so a host sample-rate or block
-  // size change must not silently discard an applied map.
+  // Learn uses a dedicated detector and queue. A re-prepare is a lifecycle
+  // boundary: any active worker has been joined above before queue storage is
+  // rebuilt. The applied map survives and is copied into the audio-owned map
+  // while the host has audio quiesced.
   learnTransientDetector.prepare(sampleRate);
   learnTransientDetector.setThreshold(1.0e-7f);
   learnTransientDetector.setMinimumEnergyGate(1.0e-8f);
@@ -1009,7 +1075,16 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   learnTransientDetector.setTriggerRatio(1.35f);
   learnTransientDetector.setHoldoffMs(90.0f);
   learnHitQueue.prepare(sampleRate);
-  noteMapUpdateQueue.prepare();
+  stopTimer();
+  {
+    const std::lock_guard<std::mutex> lock (mapPublicationMutex);
+    noteMapUpdateQueue.prepare();
+    hasPendingMapPublication = false;
+  }
+  {
+    const std::lock_guard<std::mutex> lock (mapMutex);
+    activeNoteMap = messageOwnedNoteMap;
+  }
   dynamicNoteState.reset();
   dynamicSilenceResetSamples = juce::jmax (1, (int) std::round (sampleRate * 0.25));
   dynamicFallbackActive.store (false, std::memory_order_release);
@@ -1303,6 +1378,8 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState(
 void KickLockAudioProcessor::processBlockBypassed(
     juce::AudioBuffer<float> &buffer, juce::MidiBuffer &) {
   juce::ScopedNoDenormals noDenormals;
+  serviceLearnAudioCommands();
+  drainPendingMapUpdates();
   dynamicNoteState.reset();
   dynamicFallbackActive.store(false, std::memory_order_release);
   dynamicMapStale.store(false, std::memory_order_release);
@@ -1446,23 +1523,10 @@ bool KickLockAudioProcessor::isBassProcessingNeutral() const noexcept {
 }
 
 void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
-                                          juce::MidiBuffer &) {
+                                           juce::MidiBuffer &) {
   juce::ScopedNoDenormals noDenormals;
-
-  // Audio thread owns activeNoteMap. Drain any published map snapshots so it
-  // always holds the latest complete one. This is RT-safe (fixed-size POD copy,
-  // no allocation). A replacement resets only the Dynamic note hysteresis;
-  // the DSP smoothers retain their state and move toward the new target.
-  bool mapReplaced = false;
-  {
-    NotePhaseMapSnapshot pendingMap;
-    while (noteMapUpdateQueue.pop(pendingMap)) {
-      activeNoteMap = pendingMap;
-      mapReplaced = true;
-    }
-  }
-  if (mapReplaced)
-    dynamicNoteState.reset();
+  serviceLearnAudioCommands();
+  drainPendingMapUpdates();
 
   bool bpmDetected = false;
   float bpmValue = 0.0f;
@@ -2093,16 +2157,36 @@ void KickLockAudioProcessor::getStateInformation(juce::MemoryBlock &destData) {
   writeCompareSlotsToState();
 
   auto state = apvts.copyState();
+  for (int i = state.getNumChildren() - 1; i >= 0; --i)
+    if (state.getChild(i).hasType(juce::Identifier(NoteMapKeys::tree)))
+      state.removeChild(i, nullptr);
+
+  NotePhaseMapSnapshot appliedMap;
+  {
+    const std::lock_guard<std::mutex> lock(mapMutex);
+    appliedMap = messageOwnedNoteMap;
+  }
+  state.appendChild(noteMapToValueTree(appliedMap), nullptr);
   std::unique_ptr<juce::XmlElement> xml(state.createXml());
   copyXmlToBinary(*xml, destData);
 }
 
 void KickLockAudioProcessor::setStateInformation(const void *data,
-                                                 int sizeInBytes) {
+                                                  int sizeInBytes) {
+  if (learnStateIsActivelyMutating())
+    cancelLearn();
+  if (! waitForLearnWorker (1500))
+    waitForLearnWorkerUntilFinished();
+  const std::lock_guard<std::mutex> learnLifecycleLock (learnControlMutex);
+
   std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
 
   if (xml != nullptr && xml->hasTagName(apvts.state.getType())) {
     auto restoredState = juce::ValueTree::fromXml(*xml);
+    NotePhaseMapSnapshot restoredMap = NoteMap::makeEmptyNoteMap();
+    for (int i = 0; i < restoredState.getNumChildren(); ++i)
+      if (restoredState.getChild(i).hasType(juce::Identifier(NoteMapKeys::tree)))
+        restoredMap = noteMapFromValueTree(restoredState.getChild(i));
     auto findParameterState = [&restoredState](const char* id) {
       for (const auto& child : restoredState) {
         if (child.hasType("PARAM")
@@ -2204,10 +2288,33 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
 
     compareSlotsInitialised = false;
     loadCompareSlotsFromState();
+
+    {
+      const std::lock_guard<std::mutex> lock(mapMutex);
+      messageOwnedNoteMap = restoredMap;
+    }
+    resetResolvedLearnStateToIdle();
+    requestMapPublication(restoredMap);
+  }
+  else
+  {
+    const auto empty = NoteMap::makeEmptyNoteMap();
+    {
+      const std::lock_guard<std::mutex> lock(mapMutex);
+      messageOwnedNoteMap = empty;
+    }
+    resetResolvedLearnStateToIdle();
+    requestMapPublication(empty);
   }
 }
 
 PhaseFixResult KickLockAudioProcessor::analyzeFix() {
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  if (learnStateIsActivelyMutating()) {
+    PhaseFixResult blocked;
+    blocked.message = "Learn is active. Stop or cancel Learn before Analyze.";
+    return blocked;
+  }
   std::vector<float> bass, kick;
   const int n = rawCapture.snapshot(bass, kick);
   return computeAndPublishFix(bass, kick, n);
@@ -2280,6 +2387,10 @@ KickLockAudioProcessor::computeAndPublishFix(const std::vector<float> &bass,
 }
 
 bool KickLockAudioProcessor::beginBackgroundAnalyze() {
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  if (learnStateIsActivelyMutating())
+    return false;
+
   // Reject re-entry while an analysis is already in flight.
   if (analyzeStateIsBusy(analyzeState.load(std::memory_order_acquire)))
     return false;
@@ -2351,6 +2462,10 @@ void KickLockAudioProcessor::acknowledgeAnalyzeState() noexcept {
 }
 
 bool KickLockAudioProcessor::applyLatestFix() {
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  if (learnStateIsActivelyMutating())
+    return false;
+
   // Snapshot the shared result + analysis windows under lock so a background
   // analysis job can't swap them out from under us mid-apply. All the heavy
   // scoring below then runs on these local copies with the lock released.
@@ -2475,20 +2590,702 @@ void KickLockAudioProcessor::ensureRevertBundleCaptured() {
     return;
 
   revertBundle.parameters = captureCurrentParameterSnapshot();
-  // Phase 1 will also capture the active note map here so Revert can restore
-  // parameters and the map as one bundle.
+  {
+    const std::lock_guard<std::mutex> lock(mapMutex);
+    revertBundle.noteMap = messageOwnedNoteMap;
+  }
   revertSnapshotValid.store(true, std::memory_order_release);
 }
 
 bool KickLockAudioProcessor::revertLatestFix() {
   // Message thread only.
-  if (!revertSnapshotValid.load(std::memory_order_acquire))
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  if (learnStateIsActivelyMutating()
+      || !revertSnapshotValid.load(std::memory_order_acquire))
     return false;
 
   restoreParameterSnapshot(revertBundle.parameters);
-  // Phase 1 will also restore revertBundle.noteMap here.
+  {
+    const std::lock_guard<std::mutex> lock(mapMutex);
+    messageOwnedNoteMap = revertBundle.noteMap;
+  }
+  resetResolvedLearnStateToIdle();
+  requestMapPublication(revertBundle.noteMap);
   revertSnapshotValid.store(false, std::memory_order_release);
   return true;
+}
+
+bool KickLockAudioProcessor::learnStateIsActivelyMutating() const noexcept
+{
+  return learnStateIsBusy (learnState.load (std::memory_order_acquire));
+}
+
+void KickLockAudioProcessor::clearPendingLearnCandidate()
+{
+  const std::lock_guard<std::mutex> lock (learnMutex);
+  pendingLearnCandidate = {};
+}
+
+void KickLockAudioProcessor::invalidateLearnSession()
+{
+  activeLearnSessionId.fetch_add (1, std::memory_order_acq_rel);
+}
+
+void KickLockAudioProcessor::resetResolvedLearnStateToIdle()
+{
+  const auto state = learnState.load (std::memory_order_acquire);
+  if (state == LearnState::ResultReady || state == LearnState::NotEnoughMaterial
+      || state == LearnState::Failed)
+    invalidateLearnSession();
+  clearPendingLearnCandidate();
+  learnState.store (LearnState::Idle, std::memory_order_release);
+  const std::lock_guard<std::mutex> lock (learnProgressMutex);
+  learnProgress = {};
+  learnProgress.state = LearnState::Idle;
+  learnProgress.stopRequested = false;
+}
+
+bool KickLockAudioProcessor::waitForLearnWorker (int timeoutMs)
+{
+  if (! learnWorker.joinable())
+    return true;
+
+  std::unique_lock<std::mutex> lock (learnWorkerCompletionMutex);
+  const bool finished = learnWorkerCompletionCondition.wait_for (
+      lock, std::chrono::milliseconds (std::max (0, timeoutMs)),
+      [this] { return learnWorkerFinished; });
+  lock.unlock();
+  if (! finished)
+    return false;
+  learnWorker.join();
+  return true;
+}
+
+void KickLockAudioProcessor::waitForLearnWorkerUntilFinished()
+{
+  if (! learnWorker.joinable())
+    return;
+
+  std::unique_lock<std::mutex> lock (learnWorkerCompletionMutex);
+  learnWorkerCompletionCondition.wait (lock, [this] { return learnWorkerFinished; });
+  lock.unlock();
+  learnWorker.join();
+}
+
+void KickLockAudioProcessor::signalLearnWorkerFinished()
+{
+  {
+    const std::lock_guard<std::mutex> lock (learnWorkerCompletionMutex);
+    learnWorkerFinished = true;
+  }
+  learnWorkerCompletionCondition.notify_all();
+}
+
+bool KickLockAudioProcessor::pauseLearnWorkerForTesting (LearnState state,
+                                                          uint64_t sessionId)
+{
+  const auto control = learnWorkerPauseControlForTesting;
+  std::unique_lock<std::mutex> lock (control->mutex);
+  if (control->pausedState != state)
+    return true;
+
+  control->entered = true;
+  control->condition.notify_all();
+  while (control->pausedState == state)
+  {
+    if (! control->ignoreCancellation
+        && (shuttingDown.load (std::memory_order_acquire)
+            || activeLearnSessionId.load (std::memory_order_acquire) != sessionId
+            || learnState.load (std::memory_order_acquire) == LearnState::Cancelling))
+      return false;
+    control->condition.wait_for (lock, std::chrono::milliseconds (1));
+  }
+  return true;
+}
+
+void KickLockAudioProcessor::serviceLearnAudioCommands() noexcept
+{
+  if (learnCancelRequested.exchange (false, std::memory_order_acq_rel))
+  {
+    learnActive.store (false, std::memory_order_release);
+    learnHitQueue.stopAcceptingNewHits();
+    learnTransientDetector.reset();
+    learnAudioCaptureAcknowledged.store (false, std::memory_order_release);
+  }
+
+  if (learnStartRequested.exchange (false, std::memory_order_acq_rel))
+  {
+    // The worker waits for this acknowledgement before consuming, so reset is
+    // producer-owned and cannot race a queue pop from the previous session.
+    learnHitQueue.reset();
+    learnTransientDetector.reset();
+    learnActive.store (true, std::memory_order_release);
+    learnAudioCaptureAcknowledged.store (true, std::memory_order_release);
+    if (learnState.load (std::memory_order_acquire) == LearnState::Preparing)
+      learnState.store (LearnState::Capturing, std::memory_order_release);
+  }
+
+  if (learnStopRequested.load (std::memory_order_acquire))
+  {
+    learnHitQueue.stopAcceptingNewHits();
+    if (! learnHitQueue.hasInProgressCapture())
+    {
+      learnActive.store (false, std::memory_order_release);
+      learnAudioCaptureAcknowledged.store (false, std::memory_order_release);
+    }
+  }
+}
+
+void KickLockAudioProcessor::drainPendingMapUpdates() noexcept
+{
+  // Audio thread owns activeNoteMap. A replacement resets only Dynamic note
+  // hysteresis; the DSP smoothers retain state and move to the new target.
+  bool replaced = false;
+  NotePhaseMapSnapshot pendingMap;
+  while (noteMapUpdateQueue.pop (pendingMap))
+  {
+    activeNoteMap = pendingMap;
+    replaced = true;
+  }
+  if (replaced)
+    dynamicNoteState.reset();
+}
+
+bool KickLockAudioProcessor::beginLearn()
+{
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  const auto currentState = learnState.load (std::memory_order_acquire);
+  if (learnStateIsBusy (currentState)
+      || analyzeStateIsBusy (analyzeState.load (std::memory_order_acquire))
+      || shuttingDown.load (std::memory_order_acquire))
+    return false;
+
+  if (! waitForLearnWorker (1500))
+    return false;
+
+  resetResolvedLearnStateToIdle();
+
+  const uint64_t sessionId = learnSessionCounter.fetch_add (1, std::memory_order_acq_rel) + 1;
+  activeLearnSessionId.store (sessionId, std::memory_order_release);
+
+  LearnSessionContext context;
+  context.sessionId = sessionId;
+  context.sampleRate = getSampleRate();
+  context.delayInterpolation = interpolationFromChoice (
+      delayInterpParam != nullptr ? delayInterpParam->load() : 0.0f);
+  context.crossoverEnabled = crossoverEnableParamRaw == nullptr
+      || crossoverEnableParamRaw->load() > 0.5f;
+  context.crossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+  context.preLearnAllpassFreqHz = getEffectiveAllpassFreqHz();
+  context.preLearnAllpassQ = rotatorQParam != nullptr ? rotatorQParam->load() : 0.7f;
+  context.preLearnAllpassEnabled = getEffectivePhaseFilterEnabled();
+  context.preLearnStages = 2 + (rotatorStagesParam != nullptr
+      ? juce::jlimit (0, 2, (int) std::lround (rotatorStagesParam->load())) : 0);
+  // The audio-thread start command resets all per-session queue counters before
+  // acknowledging capture, so each frozen baseline is zero by construction.
+  context.acceptedHitsBaseline = 0;
+  context.droppedHitsBaseline = 0;
+  context.ignoredOverlapsBaseline = 0;
+
+  {
+    const std::lock_guard<std::mutex> lock (learnProgressMutex);
+    learnProgress = {};
+    learnProgress.sessionId = sessionId;
+    learnProgress.state = LearnState::Preparing;
+  }
+
+  learnStopRequested.store (false, std::memory_order_release);
+  learnCancelRequested.store (false, std::memory_order_release);
+  learnAudioCaptureAcknowledged.store (false, std::memory_order_release);
+  learnState.store (LearnState::Preparing, std::memory_order_release);
+  learnStartRequested.store (true, std::memory_order_release);
+
+  {
+    const std::lock_guard<std::mutex> lock (learnWorkerCompletionMutex);
+    learnWorkerFinished = false;
+  }
+  learnWorker = std::thread ([this, sessionId, context] { runLearnWorker (sessionId, context); });
+  return true;
+}
+
+bool KickLockAudioProcessor::stopLearn()
+{
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  const auto state = learnState.load (std::memory_order_acquire);
+  if (state != LearnState::Preparing && state != LearnState::Capturing)
+    return false;
+
+  learnStopRequested.store (true, std::memory_order_release);
+  learnState.store (LearnState::Stopping, std::memory_order_release);
+  {
+    const std::lock_guard<std::mutex> lock (learnProgressMutex);
+    learnProgress.state = LearnState::Stopping;
+    learnProgress.stopRequested = true;
+  }
+  return true;
+}
+
+void KickLockAudioProcessor::cancelLearn()
+{
+  const std::unique_lock<std::mutex> controlLock (learnControlMutex);
+  const auto state = learnState.load (std::memory_order_acquire);
+  if (! learnStateIsBusy (state))
+    return;
+
+  learnState.store (LearnState::Cancelling, std::memory_order_release);
+  invalidateLearnSession();
+  learnStartRequested.store (false, std::memory_order_release);
+  learnStopRequested.store (true, std::memory_order_release);
+  learnCancelRequested.store (true, std::memory_order_release);
+  learnActive.store (false, std::memory_order_release);
+
+  if (! waitForLearnWorker (1500))
+    waitForLearnWorkerUntilFinished();
+
+  clearPendingLearnCandidate();
+  learnState.store (LearnState::Idle, std::memory_order_release);
+  {
+    const std::lock_guard<std::mutex> lock (learnProgressMutex);
+    learnProgress.state = LearnState::Idle;
+    learnProgress.stopRequested = false;
+  }
+}
+
+void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
+                                             LearnSessionContext context)
+{
+  const auto run = [this, sessionId, context]
+  {
+  std::vector<LearnHitWindow> windows;
+  windows.reserve (24);
+  int lastSequence = -1;
+
+  for (;;)
+  {
+    if (shuttingDown.load (std::memory_order_acquire)
+        || activeLearnSessionId.load (std::memory_order_acquire) != sessionId
+        || learnState.load (std::memory_order_acquire) == LearnState::Cancelling)
+      return;
+
+    const auto currentState = learnState.load (std::memory_order_acquire);
+    if (! learnAudioCaptureAcknowledged.load (std::memory_order_acquire))
+    {
+      if (currentState == LearnState::Stopping)
+      {
+        learnState.store (LearnState::Draining, std::memory_order_release);
+        if (! pauseLearnWorkerForTesting (LearnState::Draining, sessionId))
+          return;
+        break;
+      }
+      std::this_thread::sleep_for (std::chrono::milliseconds (2));
+      continue;
+    }
+
+    LearnHitWindow window;
+    bool drainedAny = false;
+    while (learnHitQueue.pop (window))
+    {
+      drainedAny = true;
+      if (window.sequence <= lastSequence)
+        continue;
+      lastSequence = window.sequence;
+      windows.push_back (std::move (window));
+
+      const auto accepted = learnHitQueue.getAcceptedHitCount() - context.acceptedHitsBaseline;
+      const auto dropped = learnHitQueue.getDroppedHitCount() - context.droppedHitsBaseline;
+      const auto overlaps = learnHitQueue.getIgnoredOverlapCount() - context.ignoredOverlapsBaseline;
+      const std::lock_guard<std::mutex> lock (learnProgressMutex);
+      learnProgress.state = learnState.load (std::memory_order_acquire);
+      learnProgress.capturedHits = std::max (0, accepted);
+      learnProgress.drainedHits = (int) windows.size();
+      learnProgress.pendingQueueHits = learnHitQueue.getPendingHitCount();
+      learnProgress.droppedQueueHits = std::max (0, dropped);
+      learnProgress.ignoredOverlappingTriggers = std::max (0, overlaps);
+    }
+
+    const auto state = learnState.load (std::memory_order_acquire);
+    const bool stopping = state == LearnState::Stopping || state == LearnState::Draining;
+    if (stopping && ! learnHitQueue.hasInProgressCapture()
+        && learnHitQueue.getPendingHitCount() == 0)
+    {
+      learnState.store (LearnState::Draining, std::memory_order_release);
+      if (! pauseLearnWorkerForTesting (LearnState::Draining, sessionId))
+        return;
+      break;
+    }
+
+    if (! drainedAny)
+      std::this_thread::sleep_for (std::chrono::milliseconds (2));
+  }
+
+  if (shuttingDown.load (std::memory_order_acquire)
+      || activeLearnSessionId.load (std::memory_order_acquire) != sessionId)
+    return;
+
+  learnState.store (LearnState::Finalizing, std::memory_order_release);
+  if (! pauseLearnWorkerForTesting (LearnState::Finalizing, sessionId))
+    return;
+  {
+    const std::lock_guard<std::mutex> lock (learnProgressMutex);
+    learnProgress.state = LearnState::Finalizing;
+    learnProgress.pendingQueueHits = 0;
+  }
+
+  LearnPipelineConfig config;
+  config.sampleRate = context.sampleRate;
+  config.delayInterpolation = context.delayInterpolation;
+  config.crossoverEnabled = context.crossoverEnabled;
+  config.crossoverHz = context.crossoverHz;
+  config.preLearnAllpassFreqHz = context.preLearnAllpassFreqHz;
+  config.preLearnAllpassQ = context.preLearnAllpassQ;
+
+  LearnDiagnostics diagnostics;
+  diagnostics.droppedQueueHits = std::max (0, learnHitQueue.getDroppedHitCount()
+                                              - context.droppedHitsBaseline);
+  diagnostics.ignoredOverlappingTriggers = std::max (0, learnHitQueue.getIgnoredOverlapCount()
+                                                        - context.ignoredOverlapsBaseline);
+
+  try
+  {
+    const auto cancelled = [this, sessionId]
+    {
+      return shuttingDown.load (std::memory_order_acquire)
+          || activeLearnSessionId.load (std::memory_order_acquire) != sessionId
+          || learnState.load (std::memory_order_acquire) == LearnState::Cancelling;
+    };
+    auto result = LearnPipelineCore::finalize (windows, config, diagnostics, cancelled);
+    if (shuttingDown.load (std::memory_order_acquire)
+        || activeLearnSessionId.load (std::memory_order_acquire) != sessionId)
+      return;
+
+    {
+      const std::lock_guard<std::mutex> lock (learnMutex);
+      pendingLearnCandidate = {};
+      pendingLearnCandidate.sessionId = sessionId;
+      pendingLearnCandidate.context = context;
+      pendingLearnCandidate.result = result;
+      pendingLearnCandidate.present = result.valid && NoteMap::isValidNoteMap (result.map);
+    }
+    {
+      const std::lock_guard<std::mutex> lock (learnProgressMutex);
+      learnProgress.state = result.valid ? LearnState::ResultReady : LearnState::NotEnoughMaterial;
+      learnProgress.capturedHits = result.diagnostics.capturedHits;
+      learnProgress.drainedHits = (int) windows.size();
+      learnProgress.rejectedPitchHits = result.diagnostics.rejectedPitchHits;
+      learnProgress.unusableSignalHits = result.diagnostics.unusableSignalHits;
+      learnProgress.droppedQueueHits = result.diagnostics.droppedQueueHits;
+      learnProgress.ignoredOverlappingTriggers = result.diagnostics.ignoredOverlappingTriggers;
+      for (const auto& hit : result.hitAnalyses)
+      {
+        if (! hit.pitchAccepted)
+          continue;
+        const int index = NotePhaseMapSnapshot::indexForMidi (NoteQuantizer::hzToMidi (hit.trackedFundamentalHz));
+        if (index >= 0)
+          ++learnProgress.trackedNoteHitCounts[(size_t) index];
+      }
+    }
+    learnState.store (result.valid ? LearnState::ResultReady : LearnState::NotEnoughMaterial,
+                      std::memory_order_release);
+  }
+  catch (...)
+  {
+    if (activeLearnSessionId.load (std::memory_order_acquire) != sessionId)
+      return;
+    {
+      const std::lock_guard<std::mutex> lock (learnMutex);
+      pendingLearnCandidate = {};
+      pendingLearnCandidate.sessionId = sessionId;
+      pendingLearnCandidate.context = context;
+      pendingLearnCandidate.result.message = "Learn failed. Try again with more material.";
+    }
+    learnState.store (LearnState::Failed, std::memory_order_release);
+    const std::lock_guard<std::mutex> lock (learnProgressMutex);
+    learnProgress.state = LearnState::Failed;
+  }
+  };
+
+  try
+  {
+    run();
+  }
+  catch (...)
+  {
+    if (! shuttingDown.load (std::memory_order_acquire)
+        && activeLearnSessionId.load (std::memory_order_acquire) == sessionId)
+    {
+      clearPendingLearnCandidate();
+      learnState.store (LearnState::Failed, std::memory_order_release);
+      const std::lock_guard<std::mutex> lock (learnProgressMutex);
+      learnProgress.state = LearnState::Failed;
+    }
+  }
+  signalLearnWorkerFinished();
+}
+
+LearnState KickLockAudioProcessor::getLearnState() const noexcept
+{
+  return learnState.load (std::memory_order_acquire);
+}
+
+LearnProgressSnapshot KickLockAudioProcessor::getLearnProgress() const
+{
+  const std::lock_guard<std::mutex> lock (learnProgressMutex);
+  auto copy = learnProgress;
+  copy.state = learnState.load (std::memory_order_acquire);
+  return copy;
+}
+
+LearnFinalizeResult KickLockAudioProcessor::getPendingLearnResult() const
+{
+  const std::lock_guard<std::mutex> lock (learnMutex);
+  return pendingLearnCandidate.result;
+}
+
+bool KickLockAudioProcessor::hasPendingLearnResult() const noexcept
+{
+  const std::lock_guard<std::mutex> lock (learnMutex);
+  return pendingLearnCandidate.present;
+}
+
+juce::String KickLockAudioProcessor::getLearnApplyBlockedReason() const
+{
+  const std::lock_guard<std::mutex> lock (learnMutex);
+  return pendingLearnCandidate.applyBlockedReason;
+}
+
+void KickLockAudioProcessor::setPendingLearnResultForTesting (const LearnFinalizeResult& result,
+                                                              const LearnSessionContext& suppliedContext)
+{
+  LearnSessionContext context = suppliedContext;
+  if (context.sessionId == 0)
+  {
+    context.sessionId = learnSessionCounter.fetch_add (1, std::memory_order_acq_rel) + 1;
+    activeLearnSessionId.store (context.sessionId, std::memory_order_release);
+  }
+  {
+    const std::lock_guard<std::mutex> lock (learnMutex);
+    pendingLearnCandidate.present = result.valid && NoteMap::isValidNoteMap (result.map);
+    pendingLearnCandidate.sessionId = context.sessionId;
+    pendingLearnCandidate.context = context;
+    pendingLearnCandidate.result = result;
+    pendingLearnCandidate.applyBlockedReason.clear();
+  }
+  learnState.store (LearnState::ResultReady, std::memory_order_release);
+  const std::lock_guard<std::mutex> progressLock (learnProgressMutex);
+  learnProgress.state = LearnState::ResultReady;
+}
+
+void KickLockAudioProcessor::setResolvedLearnStateForTesting (LearnState state)
+{
+  jassert (state == LearnState::ResultReady || state == LearnState::NotEnoughMaterial
+           || state == LearnState::Failed);
+  {
+    const std::lock_guard<std::mutex> lock (learnMutex);
+    pendingLearnCandidate.applyBlockedReason = "stale";
+  }
+  learnState.store (state, std::memory_order_release);
+  const std::lock_guard<std::mutex> lock (learnProgressMutex);
+  learnProgress.state = state;
+  learnProgress.stopRequested = true;
+  learnProgress.capturedHits = 9;
+}
+
+bool KickLockAudioProcessor::applyLatestLearnResult()
+{
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  PendingLearnCandidate candidate;
+  {
+    const std::lock_guard<std::mutex> lock (learnMutex);
+    candidate = pendingLearnCandidate;
+  }
+
+  auto reject = [this] (const juce::String& reason)
+  {
+    const std::lock_guard<std::mutex> lock (learnMutex);
+    pendingLearnCandidate.applyBlockedReason = reason;
+    return false;
+  };
+
+  if (learnState.load (std::memory_order_acquire) != LearnState::ResultReady)
+    return reject ("Learn has no ready result.");
+  if (! candidate.present || ! candidate.result.valid
+      || ! NoteMap::isValidNoteMap (candidate.result.map))
+    return reject ("The pending Learn result is invalid.");
+  if (candidate.sessionId != activeLearnSessionId.load (std::memory_order_acquire))
+    return reject ("The pending Learn result is stale.");
+  if (analyzeStateIsBusy (analyzeState.load (std::memory_order_acquire)))
+    return reject ("Analyze is still running.");
+
+  const double currentRate = getSampleRate();
+  const bool currentCrossover = crossoverEnableParamRaw == nullptr
+      || crossoverEnableParamRaw->load() > 0.5f;
+  const float currentCrossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+  const auto currentInterpolation = interpolationFromChoice (
+      delayInterpParam != nullptr ? delayInterpParam->load() : 0.0f);
+  if (std::abs (currentRate - candidate.context.sampleRate) > 0.01)
+    return reject ("Sample rate changed; start Learn again.");
+  if (currentCrossover != candidate.context.crossoverEnabled)
+    return reject ("Crossover enable changed; start Learn again.");
+  if (std::abs (currentCrossoverHz - candidate.context.crossoverHz) > 1.0001f)
+    return reject ("Crossover frequency changed beyond the 1 Hz tolerance.");
+  if (currentInterpolation != candidate.context.delayInterpolation)
+    return reject ("Delay interpolation changed; start Learn again.");
+
+  const auto globalFix = candidate.result.globalFix;
+  const float delay = juce::jlimit (-20.0f, 20.0f, globalFix.bassDelayMs);
+  const bool polarity = globalFix.bassPolarityInvert;
+  const int stages = juce::jlimit (2, 4, candidate.result.map.base.allpassStages);
+  const float frequency = juce::jlimit (20.0f, 500.0f, candidate.result.map.global.allpassFreqHz);
+  const float q = juce::jlimit (0.1f, 10.0f, candidate.result.map.global.allpassQ);
+  const bool rotatorRequired = candidate.result.map.global.rotatorHelps
+      || std::any_of (candidate.result.map.notes.begin(), candidate.result.map.notes.end(),
+                      [] (const NoteEntry& entry)
+                      {
+                        return NoteMap::isValidNoteEntry (entry) && entry.rotatorHelps
+                            && entry.confidence >= NoteMap::kMinRuntimeConfidence;
+                      });
+
+  NotePhaseMapSnapshot appliedMap = candidate.result.map;
+  appliedMap.valid = true;
+  appliedMap.schemaVersion = NoteMap::kSchemaVersion;
+  appliedMap.base.delayMs = delay;
+  appliedMap.base.polarityInvert = polarity;
+  appliedMap.base.crossoverEnabled = candidate.context.crossoverEnabled;
+  appliedMap.base.crossoverHz = juce::jlimit (20.0f, 500.0f, candidate.context.crossoverHz);
+  appliedMap.base.allpassStages = stages;
+  appliedMap.base.delayInterpolationIndex = candidate.context.delayInterpolation == InterpolationType::Linear ? 0 : 1;
+  appliedMap.base.learnedSampleRate = candidate.context.sampleRate;
+  appliedMap.global.allpassFreqHz = frequency;
+  appliedMap.global.allpassQ = q;
+  if (! NoteMap::isValidNoteMap (appliedMap))
+    return reject ("The final applied map failed validation.");
+
+  ensureRevertBundleCaptured();
+  const bool preserveAllpassEnabled = getEffectivePhaseFilterEnabled();
+  setParameterValueWithGesture ("delay_ms", delay);
+  setParameterValueWithGesture ("delayMs", delay);
+  setParameterValueWithGesture ("polarity_invert", polarity ? 1.0f : 0.0f);
+  setParameterValueWithGesture ("polarityInvert", polarity ? 1.0f : 0.0f);
+  setParameterValueWithGesture ("crossover_enable", candidate.context.crossoverEnabled ? 1.0f : 0.0f);
+  setParameterValueWithGesture ("crossover_freq", candidate.context.crossoverHz);
+  setParameterValueWithGesture ("delayInterp", (float) appliedMap.base.delayInterpolationIndex);
+  setParameterValueWithGesture ("rotatorStages", (float) (stages - 2));
+  setParameterValueWithGesture ("allpass_freq", frequency);
+  setParameterValueWithGesture ("rotatorFreq", frequency);
+  setParameterValueWithGesture ("rotatorQ", q);
+  setParameterValueWithGesture ("allpass_enable", rotatorRequired || preserveAllpassEnabled ? 1.0f : 0.0f);
+  setParameterValueWithGesture ("phaseFilterEnabled", rotatorRequired || preserveAllpassEnabled ? 1.0f : 0.0f);
+
+  const auto actual = captureCurrentParameterSnapshot();
+  appliedMap.base.delayMs = actual.delayMs;
+  appliedMap.base.polarityInvert = actual.polarityInvert;
+  appliedMap.base.crossoverEnabled = actual.crossoverEnabled;
+  appliedMap.base.crossoverHz = actual.crossoverFreqHz;
+  appliedMap.base.allpassStages = 2 + actual.phaseFilterStageIndex;
+  appliedMap.base.delayInterpolationIndex = actual.delayInterpolationIndex;
+  appliedMap.global.allpassFreqHz = actual.phaseFilterFreqHz;
+  appliedMap.global.allpassQ = actual.phaseFilterQ;
+  if (! NoteMap::isValidNoteMap (appliedMap))
+    return reject ("The values written by Apply did not form a valid map.");
+
+  {
+    const std::lock_guard<std::mutex> lock (mapMutex);
+    messageOwnedNoteMap = appliedMap;
+  }
+  requestMapPublication (appliedMap);
+  resetResolvedLearnStateToIdle();
+  return true;
+}
+
+bool KickLockAudioProcessor::discardLatestLearnResult()
+{
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  const auto state = learnState.load (std::memory_order_acquire);
+  if (state != LearnState::ResultReady && state != LearnState::NotEnoughMaterial
+      && state != LearnState::Failed)
+    return false;
+  resetResolvedLearnStateToIdle();
+  return true;
+}
+
+bool KickLockAudioProcessor::clearNoteMap()
+{
+  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  if (learnStateIsActivelyMutating())
+    return false;
+
+  const auto empty = NoteMap::makeEmptyNoteMap();
+  if (hasValidNoteMap())
+    ensureRevertBundleCaptured();
+  {
+    const std::lock_guard<std::mutex> lock (mapMutex);
+    messageOwnedNoteMap = empty;
+  }
+  resetResolvedLearnStateToIdle();
+  requestMapPublication (empty);
+  return true;
+}
+
+bool KickLockAudioProcessor::hasValidNoteMap() const noexcept
+{
+  const std::lock_guard<std::mutex> lock (mapMutex);
+  return NoteMap::isValidNoteMap (messageOwnedNoteMap);
+}
+
+NotePhaseMapSnapshot KickLockAudioProcessor::getMessageOwnedNoteMapForTesting() const
+{
+  const std::lock_guard<std::mutex> lock (mapMutex);
+  return messageOwnedNoteMap;
+}
+
+void KickLockAudioProcessor::requestMapPublication (const NotePhaseMapSnapshot& map)
+{
+  {
+    const std::lock_guard<std::mutex> lock (mapPublicationMutex);
+    pendingMapPublication = map;
+    hasPendingMapPublication = true;
+  }
+  if (retryMapPublication())
+  {
+    stopTimer();
+    return;
+  }
+  startTimer (10);
+}
+
+void KickLockAudioProcessor::timerCallback()
+{
+  const std::lock_guard<std::mutex> timerCallbackGuard (mapTimerCallbackMutex);
+  const auto pauseControl = mapTimerCallbackPauseControlForTesting;
+  {
+    std::unique_lock<std::mutex> pauseLock (pauseControl->mutex);
+    pauseControl->entered = true;
+    pauseControl->condition.notify_all();
+    pauseControl->condition.wait (pauseLock, [&pauseControl] { return ! pauseControl->paused; });
+  }
+  if (mapPublicationRetryObserver != nullptr)
+    mapPublicationRetryObserver->fetch_add (1, std::memory_order_relaxed);
+  if (retryMapPublication())
+    stopTimer();
+}
+
+bool KickLockAudioProcessor::retryMapPublication()
+{
+  std::lock_guard<std::mutex> lock (mapPublicationMutex);
+  if (! hasPendingMapPublication)
+    return true;
+  if (! noteMapUpdateQueue.push (pendingMapPublication))
+    return false;
+  hasPendingMapPublication = false;
+  return true;
+}
+
+bool KickLockAudioProcessor::serviceMapPublicationRetryForTesting()
+{
+  const bool published = retryMapPublication();
+  if (published)
+    stopTimer();
+  return published;
 }
 
 PhaseFixResult KickLockAudioProcessor::getLatestFixResult() const {
