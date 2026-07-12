@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 #include <juce_core/juce_core.h>
 
@@ -381,6 +382,15 @@ struct LearnHitAnalysis
 
     float lowBandEnergy = 0.0f;
 
+    bool signalUsable = false;
+    bool timingUsable = false;
+    bool dominantTimingClusterMember = false;
+    bool pitchAccepted = false;
+    bool pitchInvalid = false;
+    bool pitchDisagrees = false;
+    bool octaveAmbiguous = false;
+    float pitchCentsDifference = 0.0f;
+
     // Pass A: timing/polarity observation for HitConsensus.
     HitObservation timingObservation;
 
@@ -398,6 +408,12 @@ struct LearnDiagnostics
     int analyzedHits = 0;
     int globalOnlyHits = 0;
     int rejectedPitchHits = 0;
+    int unusableSignalHits = 0;
+    int pitchInvalidHits = 0;
+    int pitchDisagreementHits = 0;
+    int octaveAmbiguousHits = 0;
+    int timingOutlierHits = 0;
+    int dominantClusterHitCount = 0;
     int droppedQueueHits = 0;
     int ignoredOverlappingTriggers = 0;
 
@@ -414,6 +430,7 @@ struct LearnFinalizeResult
     NotePhaseMapSnapshot map;
     PhaseFixResult globalFix;
     LearnDiagnostics diagnostics;
+    std::vector<LearnHitAnalysis> hitAnalyses;
 
     juce::String message;
 };
