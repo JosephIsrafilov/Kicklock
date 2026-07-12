@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -34,7 +35,8 @@
 #include "ui/UiFormatters.h"
 
 class KickLockAudioProcessor : public juce::AudioProcessor,
-                               private juce::AudioProcessorValueTreeState::Listener
+                               private juce::AudioProcessorValueTreeState::Listener,
+                               private juce::Timer
 {
 public:
     KickLockAudioProcessor();
@@ -246,6 +248,17 @@ public:
         return activeLearnSessionId.load (std::memory_order_acquire);
     }
     bool serviceMapPublicationRetryForTesting();
+    void requestMapPublicationForTesting (const NotePhaseMapSnapshot& map) { requestMapPublication (map); }
+    bool isMapPublicationRetryScheduledForTesting() const noexcept { return isTimerRunning(); }
+    void setMapPublicationRetryObserverForTesting (std::shared_ptr<std::atomic<int>> observer)
+    {
+        mapPublicationRetryObserver = std::move (observer);
+    }
+    void setResolvedLearnStateForTesting (LearnState state);
+    void setLearnWorkerPauseStateForTesting (LearnState state) noexcept
+    {
+        learnWorkerPauseStateForTesting.store (state, std::memory_order_release);
+    }
 
 private:
     class AutoAlignEngine;
@@ -300,6 +313,7 @@ private:
 
 
     void parameterChanged (const juce::String& parameterID, float newValue) override;
+    void timerCallback() override;
     void markRestoredParameterSources (bool hasDelayMs,
                                        bool hasLegacyDelayMs,
                                        bool hasPolarityInvert,
@@ -394,6 +408,10 @@ private:
     std::atomic<bool> shuttingDown { false };
     std::thread learnWorker;
     std::mutex learnControlMutex;
+    std::mutex learnWorkerCompletionMutex;
+    std::condition_variable learnWorkerCompletionCondition;
+    bool learnWorkerFinished = true;
+    std::atomic<LearnState> learnWorkerPauseStateForTesting { LearnState::Idle };
     mutable std::mutex learnMutex;
     mutable std::mutex learnProgressMutex;
     PendingLearnCandidate pendingLearnCandidate;
@@ -401,12 +419,9 @@ private:
     mutable std::mutex mapMutex;
     NotePhaseMapSnapshot messageOwnedNoteMap = NoteMap::makeEmptyNoteMap();
     std::mutex mapPublicationMutex;
-    std::mutex mapPublicationCallbackMutex;
     NotePhaseMapSnapshot pendingMapPublication = NoteMap::makeEmptyNoteMap();
     bool hasPendingMapPublication = false;
-    std::atomic<bool> mapPublicationRetryScheduled { false };
-    std::shared_ptr<std::atomic<bool>> mapPublicationAlive =
-        std::make_shared<std::atomic<bool>> (true);
+    std::shared_ptr<std::atomic<int>> mapPublicationRetryObserver;
     DynamicNoteState dynamicNoteState;
     int dynamicSilenceResetSamples = 12000;
 
@@ -481,8 +496,12 @@ private:
     void runLearnWorker (uint64_t sessionId, LearnSessionContext context);
     void requestMapPublication (const NotePhaseMapSnapshot& map);
     bool retryMapPublication();
+    bool waitForLearnWorker (int timeoutMs);
+    void signalLearnWorkerFinished();
+    bool pauseLearnWorkerForTesting (LearnState state, uint64_t sessionId);
     void clearPendingLearnCandidate();
     void invalidateLearnSession();
+    void resetResolvedLearnStateToIdle();
     bool learnStateIsActivelyMutating() const noexcept;
     float readParameterValue (const char* id, float fallback) const;
     void setParameterValueWithGesture (const char* id, float value);

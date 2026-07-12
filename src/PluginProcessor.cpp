@@ -680,17 +680,14 @@ KickLockAudioProcessor::KickLockAudioProcessor()
 
 KickLockAudioProcessor::~KickLockAudioProcessor() {
   shuttingDown.store(true, std::memory_order_release);
+  stopTimer();
   invalidateLearnSession();
   learnStartRequested.store(false, std::memory_order_release);
   learnStopRequested.store(false, std::memory_order_release);
   learnCancelRequested.store(true, std::memory_order_release);
   learnActive.store(false, std::memory_order_release);
-  {
-    const std::lock_guard<std::mutex> lock (mapPublicationCallbackMutex);
-    mapPublicationAlive->store(false, std::memory_order_release);
-  }
-  if (learnWorker.joinable())
-    learnWorker.join();
+  if (! waitForLearnWorker (1500))
+    std::terminate();
 
   for (const auto *id :
        {"delay_ms", "delayMs", "polarity_invert", "polarityInvert",
@@ -946,16 +943,11 @@ KickLockAudioProcessor::createParameterLayout() {
 
 void KickLockAudioProcessor::prepareToPlay(double sampleRate,
                                            int samplesPerBlock) {
-  std::unique_lock<std::mutex> learnLifecycleLock;
-  for (;;)
-  {
-    if (learnStateIsActivelyMutating())
-      cancelLearn();
-    learnLifecycleLock = std::unique_lock<std::mutex> (learnControlMutex);
-    if (! learnStateIsActivelyMutating())
-      break;
-    learnLifecycleLock.unlock();
-  }
+  if (learnStateIsActivelyMutating())
+    cancelLearn();
+  if (! waitForLearnWorker (1500))
+    return;
+  const std::lock_guard<std::mutex> learnLifecycleLock (learnControlMutex);
 
   const int numChannels = juce::jmax(1, getTotalNumOutputChannels());
   analysisBuffer.setSize(numChannels, samplesPerBlock);
@@ -1031,6 +1023,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   learnTransientDetector.setTriggerRatio(1.35f);
   learnTransientDetector.setHoldoffMs(90.0f);
   learnHitQueue.prepare(sampleRate);
+  stopTimer();
   {
     const std::lock_guard<std::mutex> lock (mapPublicationMutex);
     noteMapUpdateQueue.prepare();
@@ -2128,16 +2121,11 @@ void KickLockAudioProcessor::getStateInformation(juce::MemoryBlock &destData) {
 
 void KickLockAudioProcessor::setStateInformation(const void *data,
                                                   int sizeInBytes) {
-  std::unique_lock<std::mutex> learnLifecycleLock;
-  for (;;)
-  {
-    if (learnStateIsActivelyMutating())
-      cancelLearn();
-    learnLifecycleLock = std::unique_lock<std::mutex> (learnControlMutex);
-    if (! learnStateIsActivelyMutating())
-      break;
-    learnLifecycleLock.unlock();
-  }
+  if (learnStateIsActivelyMutating())
+    cancelLearn();
+  if (! waitForLearnWorker (1500))
+    return;
+  const std::lock_guard<std::mutex> learnLifecycleLock (learnControlMutex);
 
   std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
 
@@ -2253,8 +2241,7 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
       const std::lock_guard<std::mutex> lock(mapMutex);
       messageOwnedNoteMap = restoredMap;
     }
-    clearPendingLearnCandidate();
-    invalidateLearnSession();
+    resetResolvedLearnStateToIdle();
     requestMapPublication(restoredMap);
   }
   else
@@ -2264,8 +2251,7 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
       const std::lock_guard<std::mutex> lock(mapMutex);
       messageOwnedNoteMap = empty;
     }
-    clearPendingLearnCandidate();
-    invalidateLearnSession();
+    resetResolvedLearnStateToIdle();
     requestMapPublication(empty);
   }
 }
@@ -2571,8 +2557,7 @@ bool KickLockAudioProcessor::revertLatestFix() {
     const std::lock_guard<std::mutex> lock(mapMutex);
     messageOwnedNoteMap = revertBundle.noteMap;
   }
-  clearPendingLearnCandidate();
-  invalidateLearnSession();
+  resetResolvedLearnStateToIdle();
   requestMapPublication(revertBundle.noteMap);
   revertSnapshotValid.store(false, std::memory_order_release);
   return true;
@@ -2592,6 +2577,59 @@ void KickLockAudioProcessor::clearPendingLearnCandidate()
 void KickLockAudioProcessor::invalidateLearnSession()
 {
   activeLearnSessionId.fetch_add (1, std::memory_order_acq_rel);
+}
+
+void KickLockAudioProcessor::resetResolvedLearnStateToIdle()
+{
+  const auto state = learnState.load (std::memory_order_acquire);
+  if (state == LearnState::ResultReady || state == LearnState::NotEnoughMaterial
+      || state == LearnState::Failed)
+    invalidateLearnSession();
+  clearPendingLearnCandidate();
+  learnState.store (LearnState::Idle, std::memory_order_release);
+  const std::lock_guard<std::mutex> lock (learnProgressMutex);
+  learnProgress = {};
+  learnProgress.state = LearnState::Idle;
+  learnProgress.stopRequested = false;
+}
+
+bool KickLockAudioProcessor::waitForLearnWorker (int timeoutMs)
+{
+  if (! learnWorker.joinable())
+    return true;
+
+  std::unique_lock<std::mutex> lock (learnWorkerCompletionMutex);
+  const bool finished = learnWorkerCompletionCondition.wait_for (
+      lock, std::chrono::milliseconds (std::max (0, timeoutMs)),
+      [this] { return learnWorkerFinished; });
+  lock.unlock();
+  if (! finished)
+    return false;
+  learnWorker.join();
+  return true;
+}
+
+void KickLockAudioProcessor::signalLearnWorkerFinished()
+{
+  {
+    const std::lock_guard<std::mutex> lock (learnWorkerCompletionMutex);
+    learnWorkerFinished = true;
+  }
+  learnWorkerCompletionCondition.notify_all();
+}
+
+bool KickLockAudioProcessor::pauseLearnWorkerForTesting (LearnState state,
+                                                          uint64_t sessionId)
+{
+  while (learnWorkerPauseStateForTesting.load (std::memory_order_acquire) == state)
+  {
+    if (shuttingDown.load (std::memory_order_acquire)
+        || activeLearnSessionId.load (std::memory_order_acquire) != sessionId
+        || learnState.load (std::memory_order_acquire) == LearnState::Cancelling)
+      return false;
+    std::this_thread::sleep_for (std::chrono::milliseconds (1));
+  }
+  return true;
 }
 
 void KickLockAudioProcessor::serviceLearnAudioCommands() noexcept
@@ -2651,8 +2689,10 @@ bool KickLockAudioProcessor::beginLearn()
       || shuttingDown.load (std::memory_order_acquire))
     return false;
 
-  if (learnWorker.joinable())
-    learnWorker.join();
+  if (! waitForLearnWorker (1500))
+    return false;
+
+  resetResolvedLearnStateToIdle();
 
   const uint64_t sessionId = learnSessionCounter.fetch_add (1, std::memory_order_acq_rel) + 1;
   activeLearnSessionId.store (sessionId, std::memory_order_release);
@@ -2677,10 +2717,6 @@ bool KickLockAudioProcessor::beginLearn()
   context.ignoredOverlapsBaseline = 0;
 
   {
-    const std::lock_guard<std::mutex> lock (learnMutex);
-    pendingLearnCandidate = {};
-  }
-  {
     const std::lock_guard<std::mutex> lock (learnProgressMutex);
     learnProgress = {};
     learnProgress.sessionId = sessionId;
@@ -2693,6 +2729,10 @@ bool KickLockAudioProcessor::beginLearn()
   learnState.store (LearnState::Preparing, std::memory_order_release);
   learnStartRequested.store (true, std::memory_order_release);
 
+  {
+    const std::lock_guard<std::mutex> lock (learnWorkerCompletionMutex);
+    learnWorkerFinished = false;
+  }
   learnWorker = std::thread ([this, sessionId, context] { runLearnWorker (sessionId, context); });
   return true;
 }
@@ -2716,7 +2756,7 @@ bool KickLockAudioProcessor::stopLearn()
 
 void KickLockAudioProcessor::cancelLearn()
 {
-  const std::lock_guard<std::mutex> controlLock (learnControlMutex);
+  const std::unique_lock<std::mutex> controlLock (learnControlMutex);
   const auto state = learnState.load (std::memory_order_acquire);
   if (! learnStateIsBusy (state))
     return;
@@ -2728,8 +2768,8 @@ void KickLockAudioProcessor::cancelLearn()
   learnCancelRequested.store (true, std::memory_order_release);
   learnActive.store (false, std::memory_order_release);
 
-  if (learnWorker.joinable())
-    learnWorker.join();
+  if (! waitForLearnWorker (1500))
+    return;
 
   clearPendingLearnCandidate();
   learnState.store (LearnState::Idle, std::memory_order_release);
@@ -2743,6 +2783,8 @@ void KickLockAudioProcessor::cancelLearn()
 void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
                                              LearnSessionContext context)
 {
+  const auto run = [this, sessionId, context]
+  {
   std::vector<LearnHitWindow> windows;
   windows.reserve (24);
   int lastSequence = -1;
@@ -2760,6 +2802,8 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
       if (currentState == LearnState::Stopping)
       {
         learnState.store (LearnState::Draining, std::memory_order_release);
+        if (! pauseLearnWorkerForTesting (LearnState::Draining, sessionId))
+          return;
         break;
       }
       std::this_thread::sleep_for (std::chrono::milliseconds (2));
@@ -2794,6 +2838,8 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
         && learnHitQueue.getPendingHitCount() == 0)
     {
       learnState.store (LearnState::Draining, std::memory_order_release);
+      if (! pauseLearnWorkerForTesting (LearnState::Draining, sessionId))
+        return;
       break;
     }
 
@@ -2806,6 +2852,8 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
     return;
 
   learnState.store (LearnState::Finalizing, std::memory_order_release);
+  if (! pauseLearnWorkerForTesting (LearnState::Finalizing, sessionId))
+    return;
   {
     const std::lock_guard<std::mutex> lock (learnProgressMutex);
     learnProgress.state = LearnState::Finalizing;
@@ -2828,7 +2876,13 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
 
   try
   {
-    auto result = LearnPipelineCore::finalize (windows, config, diagnostics);
+    const auto cancelled = [this, sessionId]
+    {
+      return shuttingDown.load (std::memory_order_acquire)
+          || activeLearnSessionId.load (std::memory_order_acquire) != sessionId
+          || learnState.load (std::memory_order_acquire) == LearnState::Cancelling;
+    };
+    auto result = LearnPipelineCore::finalize (windows, config, diagnostics, cancelled);
     if (shuttingDown.load (std::memory_order_acquire)
         || activeLearnSessionId.load (std::memory_order_acquire) != sessionId)
       return;
@@ -2877,6 +2931,24 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
     const std::lock_guard<std::mutex> lock (learnProgressMutex);
     learnProgress.state = LearnState::Failed;
   }
+  };
+
+  try
+  {
+    run();
+  }
+  catch (...)
+  {
+    if (! shuttingDown.load (std::memory_order_acquire)
+        && activeLearnSessionId.load (std::memory_order_acquire) == sessionId)
+    {
+      clearPendingLearnCandidate();
+      learnState.store (LearnState::Failed, std::memory_order_release);
+      const std::lock_guard<std::mutex> lock (learnProgressMutex);
+      learnProgress.state = LearnState::Failed;
+    }
+  }
+  signalLearnWorkerFinished();
 }
 
 LearnState KickLockAudioProcessor::getLearnState() const noexcept
@@ -2928,6 +3000,23 @@ void KickLockAudioProcessor::setPendingLearnResultForTesting (const LearnFinaliz
     pendingLearnCandidate.applyBlockedReason.clear();
   }
   learnState.store (LearnState::ResultReady, std::memory_order_release);
+  const std::lock_guard<std::mutex> progressLock (learnProgressMutex);
+  learnProgress.state = LearnState::ResultReady;
+}
+
+void KickLockAudioProcessor::setResolvedLearnStateForTesting (LearnState state)
+{
+  jassert (state == LearnState::ResultReady || state == LearnState::NotEnoughMaterial
+           || state == LearnState::Failed);
+  {
+    const std::lock_guard<std::mutex> lock (learnMutex);
+    pendingLearnCandidate.applyBlockedReason = "stale";
+  }
+  learnState.store (state, std::memory_order_release);
+  const std::lock_guard<std::mutex> lock (learnProgressMutex);
+  learnProgress.state = state;
+  learnProgress.stopRequested = true;
+  learnProgress.capturedHits = 9;
 }
 
 bool KickLockAudioProcessor::applyLatestLearnResult()
@@ -2966,7 +3055,7 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
     return reject ("Sample rate changed; start Learn again.");
   if (currentCrossover != candidate.context.crossoverEnabled)
     return reject ("Crossover enable changed; start Learn again.");
-  if (std::abs (currentCrossoverHz - candidate.context.crossoverHz) > 1.0f)
+  if (std::abs (currentCrossoverHz - candidate.context.crossoverHz) > 1.0001f)
     return reject ("Crossover frequency changed beyond the 1 Hz tolerance.");
   if (currentInterpolation != candidate.context.delayInterpolation)
     return reject ("Delay interpolation changed; start Learn again.");
@@ -2979,7 +3068,11 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
   const float q = juce::jlimit (0.1f, 10.0f, candidate.result.map.global.allpassQ);
   const bool rotatorRequired = candidate.result.map.global.rotatorHelps
       || std::any_of (candidate.result.map.notes.begin(), candidate.result.map.notes.end(),
-                      [] (const NoteEntry& entry) { return entry.learned && entry.rotatorHelps; });
+                      [] (const NoteEntry& entry)
+                      {
+                        return NoteMap::isValidNoteEntry (entry) && entry.rotatorHelps
+                            && entry.confidence >= NoteMap::kMinRuntimeConfidence;
+                      });
 
   NotePhaseMapSnapshot appliedMap = candidate.result.map;
   appliedMap.valid = true;
@@ -3029,9 +3122,7 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
     messageOwnedNoteMap = appliedMap;
   }
   requestMapPublication (appliedMap);
-  clearPendingLearnCandidate();
-  invalidateLearnSession();
-  learnState.store (LearnState::Idle, std::memory_order_release);
+  resetResolvedLearnStateToIdle();
   return true;
 }
 
@@ -3042,9 +3133,7 @@ bool KickLockAudioProcessor::discardLatestLearnResult()
   if (state != LearnState::ResultReady && state != LearnState::NotEnoughMaterial
       && state != LearnState::Failed)
     return false;
-  clearPendingLearnCandidate();
-  invalidateLearnSession();
-  learnState.store (LearnState::Idle, std::memory_order_release);
+  resetResolvedLearnStateToIdle();
   return true;
 }
 
@@ -3061,8 +3150,7 @@ bool KickLockAudioProcessor::clearNoteMap()
     const std::lock_guard<std::mutex> lock (mapMutex);
     messageOwnedNoteMap = empty;
   }
-  clearPendingLearnCandidate();
-  invalidateLearnSession();
+  resetResolvedLearnStateToIdle();
   requestMapPublication (empty);
   return true;
 }
@@ -3087,28 +3175,19 @@ void KickLockAudioProcessor::requestMapPublication (const NotePhaseMapSnapshot& 
     hasPendingMapPublication = true;
   }
   if (retryMapPublication())
-    return;
-
-  if (! mapPublicationRetryScheduled.exchange (true, std::memory_order_acq_rel))
   {
-    const auto alive = mapPublicationAlive;
-    juce::Timer::callAfterDelay (10, [this, alive]
-    {
-      const std::lock_guard<std::mutex> callbackLock (mapPublicationCallbackMutex);
-      if (! alive->load (std::memory_order_acquire))
-        return;
-      mapPublicationRetryScheduled.store (false, std::memory_order_release);
-      if (! retryMapPublication())
-      {
-        NotePhaseMapSnapshot latest;
-        {
-          const std::lock_guard<std::mutex> lock (mapPublicationMutex);
-          latest = pendingMapPublication;
-        }
-        requestMapPublication (latest);
-      }
-    });
+    stopTimer();
+    return;
   }
+  startTimer (10);
+}
+
+void KickLockAudioProcessor::timerCallback()
+{
+  if (mapPublicationRetryObserver != nullptr)
+    mapPublicationRetryObserver->fetch_add (1, std::memory_order_relaxed);
+  if (retryMapPublication())
+    stopTimer();
 }
 
 bool KickLockAudioProcessor::retryMapPublication()
@@ -3124,7 +3203,10 @@ bool KickLockAudioProcessor::retryMapPublication()
 
 bool KickLockAudioProcessor::serviceMapPublicationRetryForTesting()
 {
-  return retryMapPublication();
+  const bool published = retryMapPublication();
+  if (published)
+    stopTimer();
+  return published;
 }
 
 PhaseFixResult KickLockAudioProcessor::getLatestFixResult() const {

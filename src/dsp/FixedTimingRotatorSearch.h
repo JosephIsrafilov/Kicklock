@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 #include "NotePhaseMap.h"
@@ -59,11 +60,12 @@ public:
                                             const std::vector<int>& stages = defaultStages(),
                                             const std::vector<float>& freqs = defaultFrequencies(),
                                             const std::vector<float>& qs = defaultQs(),
-                                            int forcedStages = 0)
+                                            int forcedStages = 0,
+                                            const std::function<bool()>& shouldCancel = {})
     {
         const FixedTimingRotatorInput input { bass, kick, numSamples, 1.0f };
         return searchImpl ({ input }, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                           interpolation, stages, freqs, qs, forcedStages, false);
+                           interpolation, stages, freqs, qs, forcedStages, false, shouldCancel);
     }
 
     // One candidate is evaluated across every independent hit.  Filters are
@@ -77,10 +79,11 @@ public:
                                                     const std::vector<int>& stages = defaultStages(),
                                                     const std::vector<float>& freqs = defaultFrequencies(),
                                                     const std::vector<float>& qs = defaultQs(),
-                                                    int forcedStages = 0)
+                                                    int forcedStages = 0,
+                                                    const std::function<bool()>& shouldCancel = {})
     {
         return searchImpl (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                           interpolation, stages, freqs, qs, forcedStages, true);
+                           interpolation, stages, freqs, qs, forcedStages, true, shouldCancel);
     }
 
     static RotatorCandidate candidateForStage (const FixedTimingRotatorResult& result, int stageCount)
@@ -109,13 +112,16 @@ private:
                                                 InterpolationType interpolation,
                                                 const std::vector<int>& requestedStages,
                                                 const std::vector<float>& freqs,
-                                                const std::vector<float>& qs,
-                                                int forcedStages,
-                                                bool combined)
+                                                 const std::vector<float>& qs,
+                                                 int forcedStages,
+                                                 bool combined,
+                                                 const std::function<bool()>& shouldCancel)
     {
         FixedTimingRotatorResult result;
         if (! (sampleRate > 0.0) || ! std::isfinite (sampleRate) || inputs.empty()
             || freqs.empty() || qs.empty() || (forcedStages != 0 && ! validStage (forcedStages)))
+            return result;
+        if (shouldCancel && shouldCancel())
             return result;
 
         std::vector<int> stages;
@@ -127,7 +133,7 @@ private:
             return result;
 
         const auto baseline = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                                        interpolation, false, 0.0f, 0.0f, 2, combined);
+                                        interpolation, false, 0.0f, 0.0f, 2, combined, shouldCancel);
         if (! baseline.valid)
             return result;
 
@@ -138,10 +144,14 @@ private:
 
         for (const int stage : stages)
         {
+            if (shouldCancel && shouldCancel())
+                return {};
             RotatorCandidate best;
             best.stages = stage;
             for (const float freq : freqs)
             {
+                if (shouldCancel && shouldCancel())
+                    return {};
                 if (! std::isfinite (freq) || freq < NoteMap::kAllpassFreqMinHz
                     || freq > NoteMap::kAllpassFreqMaxHz || freq >= sampleRate * 0.5)
                     continue;
@@ -150,7 +160,7 @@ private:
                     if (! std::isfinite (q) || q < NoteMap::kAllpassQMin || q > NoteMap::kAllpassQMax)
                         continue;
                     const auto candidate = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                                                     interpolation, true, freq, q, stage, combined);
+                                                     interpolation, true, freq, q, stage, combined, shouldCancel);
                     if (! candidate.valid)
                         continue;
                     const float gain = candidate.effectiveMatch - baseline.effectiveMatch;
@@ -181,11 +191,14 @@ private:
     static Evaluated evaluate (const std::vector<FixedTimingRotatorInput>& inputs,
                                double sampleRate, float delayMs, bool polarity,
                                InterpolationType interpolation, bool useRotator,
-                               float freq, float q, int stages, bool)
+                               float freq, float q, int stages, bool,
+                               const std::function<bool()>& shouldCancel)
     {
         double weights = 0.0, raw = 0.0, effective = 0.0, confidence = 0.0;
         for (const auto& input : inputs)
         {
+            if (shouldCancel && shouldCancel())
+                return {};
             if (input.bass == nullptr || input.kick == nullptr || input.numSamples <= 32)
                 return {};
             PhaseFixRenderSettings settings;
