@@ -12,6 +12,8 @@
 #include "util/SpectrumFifo.h"
 #include "util/RawCaptureBuffer.h"
 #include "util/HitCaptureBuffer.h"
+#include "util/LearnHitQueue.h"
+#include "util/NoteMapUpdateQueue.h"
 #include "dsp/CorrelationMeter.h"
 #include "dsp/RealtimeMultiBandMeter.h"
 #include "dsp/FractionalDelayLine.h"
@@ -190,6 +192,31 @@ public:
     void ensureRevertBundleCapturedForTesting() { ensureRevertBundleCaptured(); }
     void requestAutoAlign();
 
+    // Phase 2 Learn-transport diagnostics (read by the worker/UI in later
+    // phases). All are approximate lifetime counters, safe to read from any
+    // thread.
+    int getLearnAcceptedHits()    const noexcept { return learnHitQueue.getAcceptedHitCount(); }
+    int getLearnIgnoredOverlaps() const noexcept { return learnHitQueue.getIgnoredOverlapCount(); }
+    int getLearnDroppedHits()     const noexcept { return learnHitQueue.getDroppedHitCount(); }
+    int getPendingMapUpdates()    const noexcept { return noteMapUpdateQueue.getPendingUpdateCount(); }
+    int getDroppedMapUpdates()    const noexcept { return noteMapUpdateQueue.getDroppedUpdateCount(); }
+
+    // Test-only hooks for the RT-safe transport (no Learn state machine exists
+    // yet). setLearnActiveForTesting flips the capture gate; the map helpers
+    // simulate the message-thread publish and read the audio-owned active map.
+    void setLearnActiveForTesting (bool active) noexcept
+    {
+        learnActive.store (active, std::memory_order_release);
+    }
+    bool publishNoteMapForTesting (const NotePhaseMapSnapshot& snapshot) noexcept
+    {
+        return noteMapUpdateQueue.push (snapshot);
+    }
+    const NotePhaseMapSnapshot& getActiveNoteMapForTesting() const noexcept
+    {
+        return activeNoteMap;
+    }
+
 private:
     class AutoAlignEngine;
 
@@ -315,6 +342,19 @@ private:
     std::array<ParameterSnapshot, 2> compareSlots {};
     bool compareSlotsInitialised = false;
     std::atomic<int> activeCompareSlot { 0 };
+
+    // Phase 2 Learn transport (RT-safe SPSC infrastructure; inert until a later
+    // phase sets learnActive). learnHitQueue: audio-thread producer / worker
+    // consumer. learnTransientDetector: dedicated Learn trigger detector, kept
+    // separate from the scope/punch detector so their states never interfere.
+    // noteMapUpdateQueue: message-thread producer / audio-thread consumer.
+    // activeNoteMap is owned by the audio thread; nothing reads it for
+    // correction in this phase.
+    LearnHitQueue learnHitQueue;
+    TransientDetector learnTransientDetector;
+    NoteMapUpdateQueue noteMapUpdateQueue;
+    NotePhaseMapSnapshot activeNoteMap;
+    std::atomic<bool> learnActive { false };
 
     // Background Analyze. The heavy PhaseFixEngine grid search runs on this
     // single-thread pool so the UI click returns immediately and the audio

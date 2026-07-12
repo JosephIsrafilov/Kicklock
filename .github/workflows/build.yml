@@ -7,6 +7,11 @@ on:
     branches: [ main, master ]
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
+# Cancel an in-flight run for the same branch/PR when a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows-release:
     name: Windows Release (build, tests, pluginval)
@@ -115,12 +120,15 @@ jobs:
       # KICKLOCK_SKIP_TIMED_ASSERTS disables the two wall-clock performance
       # gates (meaningless under instrumentation); every correctness, RT-safety,
       # serialization and Stabilization assertion still runs under ASan/UBSan.
+      # Run the whole test binary ONCE (-R '^KickLockDspTests$') instead of the
+      # per-category ctest entries, which would re-run the same binary many
+      # times under the ~3-5x sanitizer slowdown.
       - name: Run tests (ASan + UBSan)
         env:
           KICKLOCK_SKIP_TIMED_ASSERTS: "1"
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build -R '^KickLockDspTests$' --output-on-failure
 
   release:
     name: Publish Nightly Release

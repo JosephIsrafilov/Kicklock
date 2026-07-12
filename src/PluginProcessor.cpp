@@ -982,6 +982,23 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   transientDetector.setTriggerRatio(1.35f);
   transientDetector.setHoldoffMs(90.0f);
 
+  // Phase 2 Learn transport: RT-safe SPSC infrastructure only. The Learn
+  // transient detector is dedicated to Learn (its own state, separate from the
+  // scope/punch detector) so scope triggers and Learn triggers never interfere.
+  // learnActive stays false in this phase, so the capture path below is inert
+  // and audio output is unchanged; the queues and audio-owned activeNoteMap are
+  // established here for later phases (no map is active and no Dynamic
+  // correction is enabled).
+  learnTransientDetector.prepare(sampleRate);
+  learnTransientDetector.setThreshold(1.0e-7f);
+  learnTransientDetector.setMinimumEnergyGate(1.0e-8f);
+  learnTransientDetector.setAttackReleaseMs(2.0f, 60.0f);
+  learnTransientDetector.setTriggerRatio(1.35f);
+  learnTransientDetector.setHoldoffMs(90.0f);
+  learnHitQueue.prepare(sampleRate);
+  noteMapUpdateQueue.prepare();
+  activeNoteMap = NoteMap::makeEmptyNoteMap();
+
   // Triggered oscilloscope capture: keep 20 ms pre-roll internally for a
   // stable trigger, but display the post-trigger window from 0..500 ms so
   // long kicks/808s are visible instead of being cut at ~150 ms.
@@ -1129,6 +1146,16 @@ void KickLockAudioProcessor::processObservationCapture(
 
       rawCapture.push(rawBassLow, kickLow);
       pitchTracker.pushSample(bassLow);
+
+      // Learn capture (Phase 2 plumbing only; inert until a later phase sets
+      // learnActive). Uses the dedicated Learn transient detector and feeds the
+      // RT-safe hit queue with the raw low-band pair and the tracked pitch. It
+      // performs no analysis and never writes the audio output.
+      if (learnActive.load(std::memory_order_relaxed)) {
+        const bool learnTrigger = learnTransientDetector.processSample(kickLow);
+        learnHitQueue.pushSample(rawBassLow, kickLow, learnTrigger,
+                                 pitchTracker.getFrequencyHz());
+      }
 
       if (autoAlignEngine != nullptr)
         autoAlignEngine->pushSample(bassLow, kickLow);
@@ -1400,6 +1427,17 @@ bool KickLockAudioProcessor::isBassProcessingNeutral() const noexcept {
 void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
                                           juce::MidiBuffer &) {
   juce::ScopedNoDenormals noDenormals;
+
+  // Audio thread owns activeNoteMap. Drain any published map snapshots so it
+  // always holds the latest complete one. This is RT-safe (fixed-size POD copy,
+  // no allocation). No Dynamic correction reads activeNoteMap in this phase, so
+  // draining only maintains ownership for later phases; it never changes the
+  // audio output.
+  {
+    NotePhaseMapSnapshot pendingMap;
+    while (noteMapUpdateQueue.pop(pendingMap))
+      activeNoteMap = pendingMap;
+  }
 
   bool bpmDetected = false;
   float bpmValue = 0.0f;
