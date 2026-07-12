@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "util/ScopeFifo.h"
@@ -20,6 +21,7 @@
 #include "dsp/AllpassPhaseRotator.h"
 #include "dsp/AlignmentAnalyzer.h"
 #include "dsp/AnalyzeState.h"
+#include "dsp/LearnState.h"
 #include "dsp/TransientDetector.h"
 #include "dsp/SignalActivityTracker.h"
 #include "dsp/PitchTracker.h"
@@ -145,6 +147,18 @@ public:
 
     bool applyLatestFix();
     bool revertLatestFix();
+    bool beginLearn();
+    bool stopLearn();
+    void cancelLearn();
+    LearnState getLearnState() const noexcept;
+    LearnProgressSnapshot getLearnProgress() const;
+    LearnFinalizeResult getPendingLearnResult() const;
+    bool hasPendingLearnResult() const noexcept;
+    juce::String getLearnApplyBlockedReason() const;
+    bool applyLatestLearnResult();
+    bool discardLatestLearnResult();
+    bool clearNoteMap();
+    bool hasValidNoteMap() const noexcept;
     bool hasRevertSnapshot() const noexcept { return revertSnapshotValid.load (std::memory_order_acquire); }
     void selectCompareSlot (int slotIndex);
     void copyActiveCompareSlotToOther();
@@ -191,6 +205,7 @@ public:
     bool isAnalysisSignalUsable() const noexcept { return analysisSignalUsable.load(); }
     bool hasEnoughMaterialForAnalysis() const noexcept { return analysisMaterialReady.load(); }
     void setLatestFixResultForTesting (const PhaseFixResult&);
+    void setPendingLearnResultForTesting (const LearnFinalizeResult&, const LearnSessionContext&);
     // Test-only hook: exercises the rollback-bundle capture in isolation from the
     // async Analyze worker (mirrors setLatestFixResultForTesting).
     void ensureRevertBundleCapturedForTesting() { ensureRevertBundleCaptured(); }
@@ -214,6 +229,10 @@ public:
     }
     bool publishNoteMapForTesting (const NotePhaseMapSnapshot& snapshot) noexcept
     {
+        {
+            const std::lock_guard<std::mutex> lock (mapMutex);
+            messageOwnedNoteMap = snapshot;
+        }
         return noteMapUpdateQueue.push (snapshot);
     }
     const NotePhaseMapSnapshot& getActiveNoteMapForTesting() const noexcept
@@ -221,6 +240,12 @@ public:
         return activeNoteMap;
     }
     int getDynamicLastMidiForTesting() const noexcept { return dynamicNoteState.lastMidi; }
+    NotePhaseMapSnapshot getMessageOwnedNoteMapForTesting() const;
+    uint64_t getLearnSessionIdForTesting() const noexcept
+    {
+        return activeLearnSessionId.load (std::memory_order_acquire);
+    }
+    bool serviceMapPublicationRetryForTesting();
 
 private:
     class AutoAlignEngine;
@@ -245,11 +270,6 @@ private:
     // (Analyze/Apply today; Learn/Apply-Learn later). Captured once by
     // ensureRevertBundleCaptured() before the first such operation and consumed
     // by Revert, so repeated Analyze/Apply cycles never move the rollback point.
-    //
-    // The noteMap member is Phase 1 MODEL PREPARATION only: it exists so a later
-    // phase can capture and restore the active map alongside the parameters.
-    // Revert does not yet read or write it, and no active map exists, so the
-    // current parameter-only rollback behaviour is unchanged.
     //
     // Validity is intentionally NOT stored in this struct: the atomic
     // revertSnapshotValid (below) is the single cross-thread validity gate.
@@ -364,6 +384,29 @@ private:
     NoteMapUpdateQueue noteMapUpdateQueue;
     NotePhaseMapSnapshot activeNoteMap;
     std::atomic<bool> learnActive { false };
+    std::atomic<LearnState> learnState { LearnState::Idle };
+    std::atomic<uint64_t> learnSessionCounter { 0 };
+    std::atomic<uint64_t> activeLearnSessionId { 0 };
+    std::atomic<bool> learnStartRequested { false };
+    std::atomic<bool> learnStopRequested { false };
+    std::atomic<bool> learnCancelRequested { false };
+    std::atomic<bool> learnAudioCaptureAcknowledged { false };
+    std::atomic<bool> shuttingDown { false };
+    std::thread learnWorker;
+    std::mutex learnControlMutex;
+    mutable std::mutex learnMutex;
+    mutable std::mutex learnProgressMutex;
+    PendingLearnCandidate pendingLearnCandidate;
+    LearnProgressSnapshot learnProgress;
+    mutable std::mutex mapMutex;
+    NotePhaseMapSnapshot messageOwnedNoteMap = NoteMap::makeEmptyNoteMap();
+    std::mutex mapPublicationMutex;
+    std::mutex mapPublicationCallbackMutex;
+    NotePhaseMapSnapshot pendingMapPublication = NoteMap::makeEmptyNoteMap();
+    bool hasPendingMapPublication = false;
+    std::atomic<bool> mapPublicationRetryScheduled { false };
+    std::shared_ptr<std::atomic<bool>> mapPublicationAlive =
+        std::make_shared<std::atomic<bool>> (true);
     DynamicNoteState dynamicNoteState;
     int dynamicSilenceResetSamples = 12000;
 
@@ -433,6 +476,14 @@ private:
     // first audible-state change stores the pre-change state and later
     // Analyze/Apply operations leave the rollback point untouched.
     void ensureRevertBundleCaptured();
+    void serviceLearnAudioCommands() noexcept;
+    void drainPendingMapUpdates() noexcept;
+    void runLearnWorker (uint64_t sessionId, LearnSessionContext context);
+    void requestMapPublication (const NotePhaseMapSnapshot& map);
+    bool retryMapPublication();
+    void clearPendingLearnCandidate();
+    void invalidateLearnSession();
+    bool learnStateIsActivelyMutating() const noexcept;
     float readParameterValue (const char* id, float fallback) const;
     void setParameterValueWithGesture (const char* id, float value);
     void initialiseCompareSlotsIfNeeded();

@@ -8,7 +8,7 @@
 #include "FixedTimingRotatorSearch.h"
 #include "FrozenCrossoverPhaseSimulation.h"
 #include "HitConsensus.h"
-#include "LearnHitQueue.h"
+#include "../util/LearnHitQueue.h"
 #include "MultiBandCorrelation.h"
 #include "NoteLearnAccumulator.h"
 #include "NoteQuantizer.h"
