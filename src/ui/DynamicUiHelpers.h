@@ -2,7 +2,7 @@
 
 #include <JuceHeader.h>
 
-#include "dsp/LearnState.h"
+#include "../dsp/LearnState.h"
 
 enum class PrimaryWorkflowAction
 {
