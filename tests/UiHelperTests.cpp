@@ -803,3 +803,73 @@ public:
 
 static StatusHelperTests statusHelperTestsInstance;
 
+class DynamicUiHelperTests : public juce::UnitTest
+{
+public:
+    DynamicUiHelperTests() : juce::UnitTest ("DynamicUiHelpers", "UI Helpers") {}
+
+    void runTest() override
+    {
+        beginTest ("Primary workflow maps Static and Dynamic states without synthetic transitions");
+        {
+            auto staticIdle = primaryWorkflowPresentation (false, LearnState::Idle, true, false);
+            expectEquals (juce::String (staticIdle.text), juce::String ("Analyze"));
+            expect (staticIdle.enabled);
+            expectEquals ((int) staticIdle.action, (int) PrimaryWorkflowAction::StartAnalyze);
+
+            auto dynamicIdle = primaryWorkflowPresentation (true, LearnState::Idle, false, false);
+            expectEquals (juce::String (dynamicIdle.text), juce::String ("Learn"));
+            expect (dynamicIdle.enabled);
+            expectEquals ((int) dynamicIdle.action, (int) PrimaryWorkflowAction::StartLearn);
+
+            auto capturing = primaryWorkflowPresentation (true, LearnState::Capturing, false, false);
+            expectEquals (primaryWorkflowText (capturing, 6), juce::String ("Stop Learn (6 hits)"));
+            expect (capturing.enabled);
+            expectEquals ((int) capturing.action, (int) PrimaryWorkflowAction::StopLearn);
+
+            for (const auto state : { LearnState::Preparing, LearnState::Stopping, LearnState::Draining,
+                                      LearnState::Finalizing, LearnState::Cancelling })
+                expect (! primaryWorkflowPresentation (true, state, false, false).enabled);
+
+            for (const auto state : { LearnState::ResultReady, LearnState::NotEnoughMaterial, LearnState::Failed })
+            {
+                const auto resolved = primaryWorkflowPresentation (true, state, false, false);
+                expectEquals (juce::String (resolved.text), juce::String ("Learn Again"));
+                expectEquals ((int) resolved.action, (int) PrimaryWorkflowAction::LearnAgain);
+            }
+        }
+
+        beginTest ("Dynamic runtime status keeps the documented precedence");
+        {
+            expectEquals ((int) dynamicRuntimeStatus (true, true, true, true, false),
+                          (int) DynamicRuntimeStatus::MapStale);
+            expectEquals ((int) dynamicRuntimeStatus (true, false, false, true, true),
+                          (int) DynamicRuntimeStatus::NoMap);
+            expectEquals ((int) dynamicRuntimeStatus (true, false, true, false, true),
+                          (int) DynamicRuntimeStatus::PhaseFilterOff);
+            expectEquals ((int) dynamicRuntimeStatus (true, false, true, true, true),
+                          (int) DynamicRuntimeStatus::Fallback);
+            expectEquals (dynamicRuntimeStatusText (DynamicRuntimeStatus::LearnedNote, 28),
+                          juce::String ("LEARNED E1"));
+        }
+
+        beginTest ("Dynamic Strength preserves its global-to-note contract");
+        {
+            expectEquals (formatDynamicStrength (0.0f), juce::String ("0%"));
+            expectEquals (formatDynamicStrength (0.506f), juce::String ("51%"));
+            expectEquals (formatDynamicStrength (1.0f), juce::String ("100%"));
+            expectEquals (juce::String (dynamicStrengthTooltip()),
+                          juce::String ("0% uses the learned global correction. 100% uses the full per-note correction."));
+        }
+
+        beginTest ("Learn note chips use MIDI names and the shared readiness policy");
+        {
+            expectEquals (formatLearnNoteChip (28, 6), juce::String ("E1 x6"));
+            expect (! learnNoteHasEnoughMaterial (NoteMap::kMinHitsPerNote - 1));
+            expect (learnNoteHasEnoughMaterial (NoteMap::kMinHitsPerNote));
+        }
+    }
+};
+
+static DynamicUiHelperTests dynamicUiHelperTestsInstance;
+

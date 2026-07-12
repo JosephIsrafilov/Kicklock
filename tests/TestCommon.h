@@ -35,6 +35,7 @@
 #include "util/SpectrumAnalysis.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/StatusHelpers.h"
+#include "ui/DynamicUiHelpers.h"
 
 namespace
 {

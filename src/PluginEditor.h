@@ -7,6 +7,7 @@
 #include "ui/SpectrumAnalyzer.h"
 #include "ui/CorrelationDisplay.h"
 #include "ui/StatusHelpers.h"
+#include "ui/DynamicUiHelpers.h"
 #include "dsp/AnalyzeState.h"
 
 // Kick-punch transient integrity readout. Shows the signed PUNCH dB (how much
@@ -87,6 +88,40 @@ private:
     int currentBottomHeight = 0;
 };
 
+class SegmentedModeSelector : public juce::Component,
+                              private juce::ComboBox::Listener
+{
+public:
+    SegmentedModeSelector();
+    ~SegmentedModeSelector() override;
+
+    juce::ComboBox& parameterCombo() noexcept { return parameterChoice; }
+    void resized() override;
+    void paint (juce::Graphics&) override;
+
+private:
+    void comboBoxChanged (juce::ComboBox*) override;
+    void syncButtons();
+
+    juce::TextButton staticButton { "Static" };
+    juce::TextButton dynamicButton { "Dynamic" };
+    juce::ComboBox parameterChoice;
+};
+
+class LearnProgressComponent : public juce::Component
+{
+public:
+    void setModel (const LearnProgressSnapshot&, const NotePhaseMapSnapshot&, int activeMidiNote);
+    void paint (juce::Graphics&) override;
+
+private:
+    LearnProgressSnapshot progress;
+    std::array<int, NotePhaseMapSnapshot::size> noteCounts {};
+    std::array<bool, NotePhaseMapSnapshot::size> learnedNotes {};
+    std::array<juce::String, NotePhaseMapSnapshot::size> noteTexts {};
+    int activeMidi = -1;
+};
+
 // Full visual + manual phase-alignment editor. The oscilloscope is the visual
 // centre; a top status bar reports sidechain/BPM/PDC state and hosts the grid,
 // view, Analyze and Apply Fix controls; a MANUAL ALIGNMENT section drives the
@@ -114,6 +149,7 @@ private:
 
     void refreshStatusStrings();
     void refreshAnalyzeWorkflow();
+    void refreshDynamicWorkflow();
     void refreshCompareButtons();
     void pushScopeSettings();
     void updateVisualOffsetAvailability (ScopeViewMode mode);
@@ -126,11 +162,13 @@ private:
     // --- Top bar -----------------------------------------------------------
     juce::ComboBox gridCombo;
     juce::ComboBox viewCombo;
+    SegmentedModeSelector correctionModeSelector;
 
     juce::TextButton freezeButton;
     juce::TextButton relockKickButton;
     juce::TextButton analyzeButton;
     juce::TextButton applyFixButton;
+    juce::TextButton discardButton;
     juce::TextButton revertButton;
     juce::TextButton compareAButton;
     juce::TextButton compareBButton;
@@ -150,6 +188,7 @@ private:
     juce::Label analyzerTitle;
     juce::Label analyzerBody;
     TransientPunchComponent transientPunch;
+    LearnProgressComponent learnProgressDisplay;
     juce::TextButton setRefButton;
 
     // --- Manual alignment --------------------------------------------------
@@ -161,6 +200,7 @@ private:
     juce::Slider phaseFreqSlider;
     juce::Slider phaseQSlider;
     juce::Slider visualOffsetSlider;
+    juce::Slider dynamicStrengthSlider;
     juce::ToggleButton crossoverEnableButton;
     juce::Slider crossoverSlider;
 
@@ -171,6 +211,7 @@ private:
     juce::Label phaseFreqLabel;
     juce::Label phaseQLabel;
     juce::Label visualOffsetLabel;
+    juce::Label dynamicStrengthLabel;
     juce::Label crossoverEnableLabel;
     juce::Label crossoverLabel;
 
@@ -194,11 +235,13 @@ private:
     std::unique_ptr<SliderAttachment> phaseFreqAttachment;
     std::unique_ptr<SliderAttachment> phaseQAttachment;
     std::unique_ptr<SliderAttachment> visualOffsetAttachment;
+    std::unique_ptr<SliderAttachment> dynamicStrengthAttachment;
     std::unique_ptr<ButtonAttachment> crossoverEnableAttachment;
     std::unique_ptr<SliderAttachment> crossoverAttachment;
     std::unique_ptr<ComboAttachment>  gridAttachment;
     std::unique_ptr<ComboAttachment>  delayInterpAttachment;
     std::unique_ptr<ComboAttachment>  phaseStagesAttachment;
+    std::unique_ptr<ComboAttachment>  correctionModeAttachment;
 
     // Cached status/analyzer strings, recomputed on the UI timer and drawn in
     // paint(). Kept as members so paint() never touches processor internals.
@@ -219,6 +262,10 @@ private:
     AnalyzeState lastAnalyzeState = AnalyzeState::Idle;
     bool haveResult = false;
     bool latestResultAutoApplied = false;
+    bool showingLearnWorkflow = false;
+    bool dynamicModeSelected = false;
+    LearnProgressSnapshot latestLearnProgress;
+    NotePhaseMapSnapshot latestNoteMap;
 
     // Panel backgrounds computed in resized(), painted behind the child
     // controls in paint() so the geometry lives in one place.

@@ -27,6 +27,153 @@ namespace
     constexpr int kMaxEditorHeight = 1900;
 }
 
+SegmentedModeSelector::SegmentedModeSelector()
+{
+    setName ("Correction Mode");
+    setDescription ("Selects Static or Dynamic phase correction.");
+    parameterChoice.addItem ("Static", 1);
+    parameterChoice.addItem ("Dynamic", 2);
+    parameterChoice.setSelectedItemIndex (0, juce::dontSendNotification);
+    parameterChoice.addListener (this);
+    addChildComponent (parameterChoice);
+
+    for (auto* button : { &staticButton, &dynamicButton })
+    {
+        button->setWantsKeyboardFocus (true);
+        button->setTooltip ("Selects the " + button->getButtonText() + " correction mode.");
+        addAndMakeVisible (*button);
+    }
+    staticButton.setName ("Static correction mode");
+    staticButton.setDescription ("Uses the manual and Analyze correction workflow.");
+    dynamicButton.setName ("Dynamic correction mode");
+    dynamicButton.setDescription ("Uses the learned global and per-note correction workflow.");
+    staticButton.onClick = [this] { parameterChoice.setSelectedItemIndex (0, juce::sendNotification); };
+    dynamicButton.onClick = [this] { parameterChoice.setSelectedItemIndex (1, juce::sendNotification); };
+    syncButtons();
+}
+
+SegmentedModeSelector::~SegmentedModeSelector()
+{
+    parameterChoice.removeListener (this);
+}
+
+void SegmentedModeSelector::comboBoxChanged (juce::ComboBox*)
+{
+    syncButtons();
+}
+
+void SegmentedModeSelector::syncButtons()
+{
+    const bool dynamic = parameterChoice.getSelectedItemIndex() == 1;
+    auto style = [] (juce::TextButton& button, bool selected)
+    {
+        button.setToggleState (selected, juce::dontSendNotification);
+        button.setColour (juce::TextButton::buttonColourId, selected ? teal : panel);
+        button.setColour (juce::TextButton::textColourOffId, selected ? juce::Colours::black : text);
+    };
+    style (staticButton, ! dynamic);
+    style (dynamicButton, dynamic);
+    repaint();
+}
+
+void SegmentedModeSelector::resized()
+{
+    auto bounds = getLocalBounds().reduced (1);
+    staticButton.setBounds (bounds.removeFromLeft (bounds.getWidth() / 2));
+    dynamicButton.setBounds (bounds);
+    parameterChoice.setBounds (getLocalBounds());
+}
+
+void SegmentedModeSelector::paint (juce::Graphics& g)
+{
+    g.setColour (border);
+    g.drawRoundedRectangle (getLocalBounds().toFloat(), 4.0f, 1.0f);
+}
+
+void LearnProgressComponent::setModel (const LearnProgressSnapshot& nextProgress,
+                                       const NotePhaseMapSnapshot& map,
+                                       int nextActiveMidi)
+{
+    std::array<int, NotePhaseMapSnapshot::size> nextCounts {};
+    std::array<bool, NotePhaseMapSnapshot::size> nextLearned {};
+    std::array<juce::String, NotePhaseMapSnapshot::size> nextTexts {};
+    for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
+    {
+        const auto& entry = map.notes[(size_t) i];
+        nextCounts[(size_t) i] = juce::jmax (nextProgress.trackedNoteHitCounts[(size_t) i], entry.hitCount);
+        nextLearned[(size_t) i] = NoteMap::isValidNoteEntry (entry)
+                                   || learnNoteHasEnoughMaterial (nextCounts[(size_t) i]);
+        if (nextCounts[(size_t) i] > 0)
+            nextTexts[(size_t) i] = formatLearnNoteChip (NotePhaseMapSnapshot::midiForIndex (i), nextCounts[(size_t) i]);
+    }
+
+    const bool changed = progress.state != nextProgress.state
+                      || progress.capturedHits != nextProgress.capturedHits
+                      || progress.drainedHits != nextProgress.drainedHits
+                      || progress.pendingQueueHits != nextProgress.pendingQueueHits
+                      || progress.droppedQueueHits != nextProgress.droppedQueueHits
+                      || progress.rejectedPitchHits != nextProgress.rejectedPitchHits
+                      || progress.unusableSignalHits != nextProgress.unusableSignalHits
+                      || progress.ignoredOverlappingTriggers != nextProgress.ignoredOverlappingTriggers
+                      || noteCounts != nextCounts || learnedNotes != nextLearned || activeMidi != nextActiveMidi;
+    if (! changed)
+        return;
+
+    progress = nextProgress;
+    noteCounts = std::move (nextCounts);
+    learnedNotes = std::move (nextLearned);
+    noteTexts = std::move (nextTexts);
+    activeMidi = nextActiveMidi;
+    repaint();
+}
+
+void LearnProgressComponent::paint (juce::Graphics& g)
+{
+    auto area = getLocalBounds();
+    g.setColour (background);
+    g.fillRoundedRectangle (area.toFloat(), 6.0f);
+    g.setColour (border);
+    g.drawRoundedRectangle (area.toFloat(), 6.0f, 1.0f);
+
+    auto summary = area.reduced (8, 6).removeFromTop (15);
+    g.setColour (mutedText);
+    g.setFont (juce::Font (juce::FontOptions (10.5f)).boldened());
+    g.drawText ("HITS " + juce::String (progress.capturedHits)
+                    + "  ANALYZED " + juce::String (progress.drainedHits)
+                    + "  QUEUE " + juce::String (progress.pendingQueueHits),
+                summary, juce::Justification::centredLeft);
+
+    auto chips = area.reduced (8, 4);
+    chips.removeFromTop (20);
+    int shown = 0;
+    for (int i = 0; i < NotePhaseMapSnapshot::size && shown < 6; ++i)
+    {
+        if (noteCounts[(size_t) i] == 0)
+            continue;
+        const int midi = NotePhaseMapSnapshot::midiForIndex (i);
+        const int width = juce::jlimit (46, 74, 12 + (int) noteTexts[(size_t) i].length() * 7);
+        if (chips.getWidth() < width)
+            break;
+        auto chip = chips.removeFromLeft (width).reduced (1, 2);
+        const auto colour = midi == activeMidi && learnedNotes[(size_t) i] ? teal
+                           : learnedNotes[(size_t) i] ? green : amber;
+        g.setColour (colour.withAlpha (0.22f));
+        g.fillRoundedRectangle (chip.toFloat(), 4.0f);
+        g.setColour (colour);
+        g.drawRoundedRectangle (chip.toFloat(), 4.0f, 1.0f);
+        g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
+        g.drawText (noteTexts[(size_t) i], chip, juce::Justification::centred);
+        chips.removeFromLeft (3);
+        ++shown;
+    }
+    if (shown == 0)
+    {
+        g.setColour (mutedText.withAlpha (0.8f));
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.drawText ("Waiting for accepted note hits", chips, juce::Justification::centredLeft);
+    }
+}
+
 void TransientPunchComponent::paint (juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat();
@@ -186,7 +333,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureCombo (viewCombo, { "Triggered", "Free-run", "Phase Delta", "Separate", "Spectrum" });
     gridCombo.setTooltip ("Sets the scope time grid.");
     viewCombo.setTooltip ("Scope view: Triggered, Free-run (raw live scope, no offset), "
-                          "Phase Delta, Spectrum (aligned bass/kick comparison), or Separate lanes.");
+                           "Phase Delta, Spectrum (aligned bass/kick comparison), or Separate lanes.");
+    addAndMakeVisible (correctionModeSelector);
 
 
 
@@ -215,15 +363,32 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     analyzeButton.setEnabled (false);
     analyzeButton.onClick = [this]
     {
-        if (! canStartAnalyze)
-            return;
-
-        latestResultAutoApplied = false;
-        if (audioProcessor.beginBackgroundAnalyze())
+        const bool dynamic = audioProcessor.apvts.getRawParameterValue ("correction_mode")->load() > 0.5f;
+        const auto presentation = primaryWorkflowPresentation (dynamic, audioProcessor.getLearnState(),
+                                                                canStartAnalyze,
+                                                                analyzeStateIsBusy (audioProcessor.getAnalyzeState()));
+        switch (presentation.action)
         {
-            haveResult = false;
-            latestResult = {};
-            analyzeButton.setButtonText ("Analyzing...");
+            case PrimaryWorkflowAction::StartAnalyze:
+                if (canStartAnalyze && audioProcessor.beginBackgroundAnalyze())
+                {
+                    latestResultAutoApplied = false;
+                    haveResult = false;
+                    latestResult = {};
+                }
+                break;
+            case PrimaryWorkflowAction::StartLearn:
+                audioProcessor.beginLearn();
+                break;
+            case PrimaryWorkflowAction::StopLearn:
+                audioProcessor.stopLearn();
+                break;
+            case PrimaryWorkflowAction::LearnAgain:
+                if (audioProcessor.discardLatestLearnResult())
+                    audioProcessor.beginLearn();
+                break;
+            case PrimaryWorkflowAction::None:
+                break;
         }
     };
     addAndMakeVisible (analyzeButton);
@@ -232,9 +397,24 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     applyFixButton.setColour (juce::TextButton::buttonColourId, orange);
     applyFixButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
     applyFixButton.setEnabled (false);
-    applyFixButton.onClick = [this] { audioProcessor.applyLatestFix(); };
+    applyFixButton.onClick = [this]
+    {
+        if (audioProcessor.getLearnState() == LearnState::ResultReady && audioProcessor.hasPendingLearnResult())
+            audioProcessor.applyLatestLearnResult();
+        else
+            audioProcessor.applyLatestFix();
+    };
     applyFixButton.setTooltip ("Applies the latest analyzer correction to the bass-path controls.");
     addAndMakeVisible (applyFixButton);
+
+    discardButton.setButtonText ("Discard");
+    discardButton.setColour (juce::TextButton::buttonColourId, panel);
+    discardButton.setColour (juce::TextButton::textColourOffId, text);
+    discardButton.setTooltip ("Discards the pending Learn result without changing the active map or parameters.");
+    discardButton.setName ("Discard Learn result");
+    discardButton.setDescription ("Discards the pending Learn result without applying it.");
+    discardButton.onClick = [this] { audioProcessor.discardLatestLearnResult(); };
+    addAndMakeVisible (discardButton);
 
     revertButton.setButtonText ("Revert");
     revertButton.setColour (juce::TextButton::buttonColourId, panel);
@@ -344,6 +524,16 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     visualOffsetSlider.setTooltip ("Display-only sample shift applied to the bass wave on the scope so you can align phases visually. Does not affect the sound.");
     addAndMakeVisible (visualOffsetSlider);
 
+    dynamicStrengthSlider.setSliderStyle (juce::Slider::LinearBar);
+    dynamicStrengthSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 42, 18);
+    dynamicStrengthSlider.setColour (juce::Slider::trackColourId, teal);
+    dynamicStrengthSlider.setColour (juce::Slider::textBoxTextColourId, text);
+    dynamicStrengthSlider.setColour (juce::Slider::textBoxOutlineColourId, border);
+    dynamicStrengthSlider.setTooltip (dynamicStrengthTooltip());
+    dynamicStrengthSlider.setName ("Dynamic Strength");
+    dynamicStrengthSlider.setDescription (dynamicStrengthTooltip());
+    addAndMakeVisible (dynamicStrengthSlider);
+
     crossoverEnableButton.setButtonText ("Enable");
     crossoverEnableButton.setTooltip ("Toggles the crossover. When disabled, the entire signal passes through the delay and polarity invert.");
     addAndMakeVisible (crossoverEnableButton);
@@ -358,6 +548,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureControlLabel (phaseFreqLabel, "Phase Freq");
     configureControlLabel (phaseQLabel, "Q");
     configureControlLabel (visualOffsetLabel, "Visual Offset");
+    configureControlLabel (dynamicStrengthLabel, "Dynamic Strength");
     configureControlLabel (crossoverLabel, "Crossover Freq");
     configureControlLabel (crossoverEnableLabel, "Crossover");
 
@@ -389,6 +580,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
                           "recommend a bass-path correction.", juce::dontSendNotification);
     addAndMakeVisible (analyzerBody);
     addAndMakeVisible (transientPunch);
+    addAndMakeVisible (learnProgressDisplay);
 
     setRefButton.setButtonText ("Set Ref");
     setRefButton.setColour (juce::TextButton::buttonColourId, panel);
@@ -396,6 +588,11 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     setRefButton.setTooltip ("Stores the current kick-punch reading as a reference, then shows the live delta against it.");
     setRefButton.onClick = [this]
     {
+        if (showingLearnWorkflow)
+        {
+            audioProcessor.clearNoteMap();
+            return;
+        }
         if (audioProcessor.isTransientPunchReferenceSet())
             audioProcessor.clearTransientPunchReference();
         else
@@ -425,6 +622,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     phaseFreqAttachment    = std::make_unique<SliderAttachment> (apvts, "allpass_freq", phaseFreqSlider);
     phaseQAttachment       = std::make_unique<SliderAttachment> (apvts, "rotatorQ", phaseQSlider);
     visualOffsetAttachment = std::make_unique<SliderAttachment> (apvts, "visualOffsetSamples", visualOffsetSlider);
+    dynamicStrengthAttachment = std::make_unique<SliderAttachment> (apvts, "dynamic_strength", dynamicStrengthSlider);
     visualOffsetSlider.onValueChange = [this]
     {
         oscilloscope.setVisualOffsetSamples ((int) std::lround (visualOffsetSlider.getValue()));
@@ -457,6 +655,8 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     };
     delayInterpAttachment  = std::make_unique<ComboAttachment> (apvts, "delayInterp", delayInterpCombo);
     phaseStagesAttachment  = std::make_unique<ComboAttachment> (apvts, "rotatorStages", phaseStagesCombo);
+    correctionModeAttachment = std::make_unique<ComboAttachment> (apvts, "correction_mode",
+                                                                     correctionModeSelector.parameterCombo());
 
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
@@ -539,10 +739,12 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     const bool showScopeToolbar = shouldBeVisible || cleanScopeMode;
     gridCombo.setVisible (shouldBeVisible);
     viewCombo.setVisible (true);
+    correctionModeSelector.setVisible (shouldBeVisible);
     freezeButton.setVisible (showScopeToolbar);
     relockKickButton.setVisible (showScopeToolbar);
     analyzeButton.setVisible (shouldBeVisible);
     applyFixButton.setVisible (shouldBeVisible);
+    discardButton.setVisible (shouldBeVisible && showingLearnWorkflow);
     revertButton.setVisible (shouldBeVisible);
     compareAButton.setVisible (shouldBeVisible);
     compareBButton.setVisible (shouldBeVisible);
@@ -562,6 +764,7 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     phaseFreqSlider.setVisible (shouldBeVisible);
     phaseQSlider.setVisible (shouldBeVisible);
     visualOffsetSlider.setVisible (shouldBeVisible);
+    dynamicStrengthSlider.setVisible (shouldBeVisible);
     crossoverEnableButton.setVisible (shouldBeVisible);
     crossoverSlider.setVisible (shouldBeVisible);
 
@@ -572,6 +775,7 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     phaseFreqLabel.setVisible (shouldBeVisible);
     phaseQLabel.setVisible (shouldBeVisible);
     visualOffsetLabel.setVisible (shouldBeVisible);
+    dynamicStrengthLabel.setVisible (shouldBeVisible);
     crossoverEnableLabel.setVisible (shouldBeVisible);
     crossoverLabel.setVisible (shouldBeVisible);
 
@@ -583,7 +787,8 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 
     analyzerTitle.setVisible (shouldBeVisible);
     analyzerBody.setVisible (shouldBeVisible);
-    transientPunch.setVisible (shouldBeVisible);
+    transientPunch.setVisible (shouldBeVisible && ! showingLearnWorkflow);
+    learnProgressDisplay.setVisible (shouldBeVisible && showingLearnWorkflow);
     setRefButton.setVisible (shouldBeVisible);
 }
 
@@ -793,6 +998,123 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
     revertButton.setEnabled (audioProcessor.hasRevertSnapshot());
 }
 
+void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
+{
+    const bool dynamic = audioProcessor.apvts.getRawParameterValue ("correction_mode")->load() > 0.5f;
+    const auto learnState = audioProcessor.getLearnState();
+    const bool showLearn = dynamic || learnState != LearnState::Idle;
+    const bool wasShowingLearn = showingLearnWorkflow;
+    showingLearnWorkflow = showLearn;
+    dynamicModeSelected = dynamic;
+
+    const bool learnBusy = learnStateIsBusy (learnState);
+    correctionModeSelector.setEnabled (! learnBusy);
+    dynamicStrengthSlider.setEnabled (dynamic);
+    dynamicStrengthSlider.setAlpha (dynamic ? 1.0f : 0.45f);
+    dynamicStrengthLabel.setAlpha (dynamic ? 1.0f : 0.45f);
+    pitchTrackButton.setEnabled (! dynamic);
+    pitchTrackButton.setAlpha (dynamic ? 0.45f : 1.0f);
+    if (dynamic)
+    {
+        pitchTrackLabel.setText ("Pitch (ignored)", juce::dontSendNotification);
+        pitchTrackButton.setTooltip ("Pitch Follow is ignored in Dynamic mode. Its saved value is unchanged.");
+    }
+    else
+    {
+        pitchTrackButton.setTooltip ("Continuously tunes the Phase Filter to the bass's detected "
+                                     "fundamental, so the phase correction stays on the note as the "
+                                     "bassline moves. A static phase filter detunes the moment the "
+                                     "bass changes notes.");
+    }
+
+    if (! showLearn)
+    {
+        transientPunch.setVisible (! cleanScopeMode);
+        learnProgressDisplay.setVisible (false);
+        discardButton.setVisible (false);
+        setRefButton.setButtonText (audioProcessor.isTransientPunchReferenceSet() ? "Clear Ref" : "Set Ref");
+        setRefButton.setEnabled (true);
+        setRefButton.setTooltip ("Stores the current kick-punch reading as a reference, then shows the live delta against it.");
+        if (wasShowingLearn)
+            resized();
+        return;
+    }
+
+    latestLearnProgress = audioProcessor.getLearnProgress();
+    const bool hasPending = audioProcessor.hasPendingLearnResult();
+    const auto pendingResult = hasPending ? audioProcessor.getPendingLearnResult() : LearnFinalizeResult {};
+    latestNoteMap = hasPending ? pendingResult.map : audioProcessor.getNoteMapSnapshot();
+    const int activeMidi = audioProcessor.activeMidiNote.load (std::memory_order_acquire);
+    learnProgressDisplay.setModel (latestLearnProgress, latestNoteMap, activeMidi);
+
+    const auto primary = primaryWorkflowPresentation (dynamic, learnState, canStartAnalyze,
+                                                      analyzeStateIsBusy (audioProcessor.getAnalyzeState()));
+    analyzeButton.setButtonText (primaryWorkflowText (primary, latestLearnProgress.capturedHits));
+    analyzeButton.setEnabled (primary.enabled);
+    analyzeButton.setTooltip (primary.action == PrimaryWorkflowAction::StopLearn
+                                  ? "Stops new Learn captures and finishes the current captured material."
+                                  : "Starts a Dynamic Learn session. Nothing changes until Apply Learn.");
+
+    const bool resultReady = learnState == LearnState::ResultReady && hasPending;
+    const auto blockedReason = resultReady ? audioProcessor.getLearnApplyBlockedReason() : juce::String {};
+    applyFixButton.setVisible (resultReady || ! dynamic);
+    applyFixButton.setButtonText (resultReady ? "Apply Learn" : "Apply Fix");
+    applyFixButton.setEnabled (resultReady && blockedReason.isEmpty());
+    applyFixButton.setTooltip (blockedReason.isNotEmpty() ? blockedReason
+                              : "Applies the pending Learn map and global correction. Nothing has been applied yet.");
+    discardButton.setVisible (learnState == LearnState::ResultReady
+                              || learnState == LearnState::NotEnoughMaterial || learnState == LearnState::Failed);
+    discardButton.setEnabled (discardButton.isVisible());
+    revertButton.setEnabled (audioProcessor.hasRevertSnapshot());
+
+    transientPunch.setVisible (false);
+    learnProgressDisplay.setVisible (! cleanScopeMode);
+    setRefButton.setButtonText ("Clear Map");
+    setRefButton.setEnabled (! learnBusy && audioProcessor.hasValidNoteMap());
+    setRefButton.setTooltip ("Clears the applied note map. Revert restores the previous map when available.");
+
+    juce::String body;
+    if (learnState == LearnState::ResultReady)
+    {
+        int learnedNotes = 0;
+        for (const auto& entry : pendingResult.map.notes)
+            learnedNotes += NoteMap::isValidNoteEntry (entry) ? 1 : 0;
+        body << "Learned " << learnedNotes << " notes from " << pendingResult.diagnostics.analyzedHits
+             << " usable hits.\nGlobal base: " << formatSignedDelayMs (pendingResult.globalFix.bassDelayMs)
+             << ", " << (pendingResult.globalFix.bassPolarityInvert ? "invert" : "normal")
+             << " polarity, " << pendingResult.map.base.allpassStages << " stages.";
+        if (pendingResult.diagnostics.rejectedPitchHits > 0 || pendingResult.diagnostics.unusableSignalHits > 0)
+            body << "\nRejected " << pendingResult.diagnostics.rejectedPitchHits << " pitch / "
+                 << pendingResult.diagnostics.unusableSignalHits << " unusable hits.";
+        if (pendingResult.diagnostics.warning.isNotEmpty())
+            body << "\nWarning: " << pendingResult.diagnostics.warning;
+        else if (pendingResult.diagnostics.multipleTimingFamilies)
+            body << "\nWarning: multiple timing families; using the dominant consensus.";
+        body << "\n\nNothing has been applied yet.";
+    }
+    else if (learnState == LearnState::NotEnoughMaterial || learnState == LearnState::Failed)
+    {
+        body = pendingResult.message.isNotEmpty() ? pendingResult.message
+                                                   : "Learn needs more usable kick and bass hits. Play the loop, then try again.";
+    }
+    else
+    {
+        body << "Captured " << latestLearnProgress.capturedHits << " hits, analyzed "
+             << latestLearnProgress.drainedHits << ".\nQueue " << latestLearnProgress.pendingQueueHits
+             << ", dropped " << latestLearnProgress.droppedQueueHits
+             << ", overlaps " << latestLearnProgress.ignoredOverlappingTriggers << ".";
+    }
+
+    const auto runtime = dynamicRuntimeStatus (dynamic, audioProcessor.dynamicMapStale.load (std::memory_order_acquire),
+                                               NoteMap::isValidNoteMap (latestNoteMap),
+                                               phaseFilterButton.getToggleState(),
+                                               audioProcessor.dynamicFallbackActive.load (std::memory_order_acquire));
+    analyzerTitle.setText (dynamic ? "DYNAMIC - " + dynamicRuntimeStatusText (runtime, activeMidi) : "LEARN", juce::dontSendNotification);
+    analyzerBody.setText (body, juce::dontSendNotification);
+    if (wasShowingLearn != showingLearnWorkflow)
+        resized();
+}
+
 void KickLockAudioProcessorEditor::refreshCompareButtons()
 {
     const int activeSlot = audioProcessor.getActiveCompareSlot();
@@ -854,6 +1176,7 @@ void KickLockAudioProcessorEditor::timerCallback()
 
     refreshStatusStrings();
     refreshAnalyzeWorkflow();
+    refreshDynamicWorkflow();
     refreshCompareButtons();
 
     // Only the top-bar status texts (sidechain state, BPM, PDC) are drawn
@@ -913,6 +1236,7 @@ void KickLockAudioProcessorEditor::paint (juce::Graphics& g)
 
     auto barInner = topBar.reduced (14, 6);
     auto infoRow = barInner.removeFromTop (20);
+    infoRow.removeFromRight (118);
 
     g.setColour (text);
     g.setFont (juce::Font (juce::FontOptions (18.0f)).boldened());
@@ -1058,6 +1382,8 @@ void KickLockAudioProcessorEditor::resized()
 
     // --- Top bar -----------------------------------------------------------
     auto topBar = bounds.removeFromTop (kTopBarHeight).reduced (14, 6);
+    auto infoRow = topBar.removeFromTop (20);
+    correctionModeSelector.setBounds (infoRow.removeFromRight (118).reduced (0, 1));
     auto controls = topBar.removeFromBottom (30);
 
     gridCombo.setBounds (controls.removeFromLeft (68).reduced (0, 3));
@@ -1078,6 +1404,8 @@ void KickLockAudioProcessorEditor::resized()
     analyzeButton.setBounds (controls.removeFromLeft (156).reduced (0, 2));
     controls.removeFromLeft (6);
     applyFixButton.setBounds (controls.removeFromLeft (82).reduced (0, 2));
+    controls.removeFromLeft (6);
+    discardButton.setBounds (controls.removeFromLeft (64).reduced (0, 2));
     controls.removeFromLeft (6);
     revertButton.setBounds (controls.removeFromLeft (64).reduced (0, 2));
     controls.removeFromLeft (6);
@@ -1188,16 +1516,21 @@ void KickLockAudioProcessorEditor::resized()
     advancedHeader.setBounds (manualArea.removeFromTop (16));
     manualArea.removeFromTop (2);
     auto advRow = manualArea.removeFromTop (34);
-    auto interpCell = advRow.removeFromLeft (knobW * 2 + 8);
+    const int advancedCellWidth = juce::jmax (80, (advRow.getWidth() - 16) / 3);
+    auto interpCell = advRow.removeFromLeft (advancedCellWidth);
     delayInterpLabel.setBounds (interpCell.removeFromTop (12));
     delayInterpCombo.setBounds (interpCell.removeFromTop (22).reduced (0, 1));
     advRow.removeFromLeft (8);
-    auto stagesCell = advRow.removeFromLeft (knobW * 2);
+    auto stagesCell = advRow.removeFromLeft (advancedCellWidth);
     phaseStagesLabel.setBounds (stagesCell.removeFromTop (12));
     phaseStagesCombo.setBounds (stagesCell.removeFromTop (22).reduced (0, 1));
+    advRow.removeFromLeft (8);
+    dynamicStrengthLabel.setBounds (advRow.removeFromTop (12));
+    dynamicStrengthSlider.setBounds (advRow.removeFromTop (22).reduced (0, 1));
 
     // Right column: kick-punch meter, its reference button, then analyzer.
     transientPunch.setBounds (right.removeFromTop (84));
+    learnProgressDisplay.setBounds (transientPunch.getBounds());
     right.removeFromTop (4);
     setRefButton.setBounds (right.removeFromTop (22).reduced (0, 1));
     right.removeFromTop (4);
