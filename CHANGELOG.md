@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+- **Static / Dynamic workflow UI.** A host-automatable Static/Dynamic selector,
+  Dynamic Strength control, Learn progress, per-note chips, runtime status, and
+  Apply Learn / Discard / Clear Map actions now use the existing processor
+  state machine and map APIs.
+- **Per-note Learn maps.** Learn captures a pending map, requires explicit
+  Apply, persists the applied map, and supports map-aware Revert and Clear Map.
+- **Release QA matrix.** `docs/QA_MATRIX.md` records automated coverage and
+  manual DAW follow-ups without claiming host checks that were not run.
+
+### Changed
+- **Lifecycle and CI hardening.** Timer callback teardown and blocking worker
+  completion paths are covered by deterministic lifecycle tests; CI continues
+  to run Windows/macOS pluginval strictness 10 and Linux ASan/UBSan tests.
+- **Compatibility.** Sessions without Dynamic parameters or a note map restore
+  as Static with no map.
+
 ### Phase -1 — Static stabilization (pre-feature baseline)
 
 Brings the current Static path to an honest, frozen baseline before the

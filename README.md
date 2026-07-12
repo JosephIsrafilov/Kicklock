@@ -12,6 +12,7 @@ shows a trigger-locked oscilloscope plus a live low-end match score.
 - Measures a multi-band, low-end-weighted phase match from 20 Hz to 500 Hz.
 - Lets you adjust bass delay, polarity, and an allpass phase filter by hand.
 - Can Analyze recent kick hits and recommend delay, polarity, frequency, Q, and stage settings.
+- Supports Static correction and Dynamic learned per-note phase maps.
 - Supports A/B compare slots, Revert after Apply Fix, and four factory presets.
 
 ## Downloads
@@ -45,6 +46,35 @@ DAW notes:
 5. Use the Phase Filter for frequency-local phase conflicts that delay cannot fix cleanly.
 6. Press Analyze after a few hits, review the recommendation, then Apply Fix if it is useful.
 7. Use Revert to restore the settings that were active before Apply Fix.
+
+### Static
+
+Static is the default for new and existing projects. Route the kick to the
+sidechain, play a representative loop, press **Analyze**, review the proposed
+fix, then press **Apply Fix** only if it is useful. Revert restores the state
+from before the first applied fix.
+
+### Dynamic
+
+1. Select **Dynamic** and play a representative bassline with the kick routed
+   to the sidechain.
+2. Press **Learn**, then **Stop Learn** after capturing enough stable hits.
+3. Review the learned note chips and summary. Nothing has changed yet.
+4. Press **Apply Learn** to activate the global correction and per-note map, or
+   **Discard** to leave the current sound unchanged.
+
+Dynamic Strength blends from the learned global correction at 0% to the full
+per-note correction at 100%. Pitch Follow is ignored in Dynamic mode but its
+saved value is not changed.
+
+Dynamic status labels are explicit: **NO MAP** means no applied map exists,
+**FALLBACK** means the current note uses the learned global correction,
+**MAP STALE - RE-LEARN** means the learned base context no longer matches, and
+**PHASE FILTER OFF** means the map is retained but inaudible. **Clear Map**
+removes the applied map without changing manual parameters; **Revert** restores
+the previous map when available.
+
+Older projects load as Static with no map.
 
 ## Controls
 

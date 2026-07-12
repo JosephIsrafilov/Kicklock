@@ -3049,8 +3049,52 @@ bool KickLockAudioProcessor::hasPendingLearnResult() const noexcept
 
 juce::String KickLockAudioProcessor::getLearnApplyBlockedReason() const
 {
+  PendingLearnCandidate candidate;
   const std::lock_guard<std::mutex> lock (learnMutex);
-  return pendingLearnCandidate.applyBlockedReason;
+  candidate = pendingLearnCandidate;
+  if (! candidate.present)
+    return candidate.applyBlockedReason;
+  return getLearnApplyBlockedReason (candidate);
+}
+
+bool KickLockAudioProcessor::canApplyLatestLearnResult() const
+{
+  PendingLearnCandidate candidate;
+  {
+    const std::lock_guard<std::mutex> lock (learnMutex);
+    candidate = pendingLearnCandidate;
+  }
+  return candidate.present && getLearnApplyBlockedReason (candidate).isEmpty();
+}
+
+juce::String KickLockAudioProcessor::getLearnApplyBlockedReason (const PendingLearnCandidate& candidate) const
+{
+  if (learnState.load (std::memory_order_acquire) != LearnState::ResultReady)
+    return "Learn has no ready result.";
+  if (! candidate.present || ! candidate.result.valid
+      || ! NoteMap::isValidNoteMap (candidate.result.map))
+    return "The pending Learn result is invalid.";
+  if (candidate.sessionId != activeLearnSessionId.load (std::memory_order_acquire))
+    return "The pending Learn result is stale.";
+  if (analyzeStateIsBusy (analyzeState.load (std::memory_order_acquire)))
+    return "Analyze is still running.";
+
+  const double currentRate = getSampleRate();
+  const bool currentCrossover = crossoverEnableParamRaw == nullptr
+      || crossoverEnableParamRaw->load() > 0.5f;
+  const float currentCrossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+  const auto currentInterpolation = interpolationFromChoice (
+      delayInterpParam != nullptr ? delayInterpParam->load() : 0.0f);
+  if (std::abs (currentRate - candidate.context.sampleRate) > 0.01)
+    return "Sample rate changed; start Learn again.";
+  if (currentCrossover != candidate.context.crossoverEnabled)
+    return "Crossover enable changed; start Learn again.";
+  if (std::abs (currentCrossoverHz - candidate.context.crossoverHz) > 1.0001f)
+    return "Crossover frequency changed beyond the 1 Hz tolerance.";
+  if (currentInterpolation != candidate.context.delayInterpolation)
+    return "Delay interpolation changed; start Learn again.";
+
+  return {};
 }
 
 void KickLockAudioProcessor::setPendingLearnResultForTesting (const LearnFinalizeResult& result,
@@ -3106,30 +3150,8 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
     return false;
   };
 
-  if (learnState.load (std::memory_order_acquire) != LearnState::ResultReady)
-    return reject ("Learn has no ready result.");
-  if (! candidate.present || ! candidate.result.valid
-      || ! NoteMap::isValidNoteMap (candidate.result.map))
-    return reject ("The pending Learn result is invalid.");
-  if (candidate.sessionId != activeLearnSessionId.load (std::memory_order_acquire))
-    return reject ("The pending Learn result is stale.");
-  if (analyzeStateIsBusy (analyzeState.load (std::memory_order_acquire)))
-    return reject ("Analyze is still running.");
-
-  const double currentRate = getSampleRate();
-  const bool currentCrossover = crossoverEnableParamRaw == nullptr
-      || crossoverEnableParamRaw->load() > 0.5f;
-  const float currentCrossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
-  const auto currentInterpolation = interpolationFromChoice (
-      delayInterpParam != nullptr ? delayInterpParam->load() : 0.0f);
-  if (std::abs (currentRate - candidate.context.sampleRate) > 0.01)
-    return reject ("Sample rate changed; start Learn again.");
-  if (currentCrossover != candidate.context.crossoverEnabled)
-    return reject ("Crossover enable changed; start Learn again.");
-  if (std::abs (currentCrossoverHz - candidate.context.crossoverHz) > 1.0001f)
-    return reject ("Crossover frequency changed beyond the 1 Hz tolerance.");
-  if (currentInterpolation != candidate.context.delayInterpolation)
-    return reject ("Delay interpolation changed; start Learn again.");
+  if (const auto blockedReason = getLearnApplyBlockedReason (candidate); blockedReason.isNotEmpty())
+    return reject (blockedReason);
 
   const auto globalFix = candidate.result.globalFix;
   const float delay = juce::jlimit (-20.0f, 20.0f, globalFix.bassDelayMs);
@@ -3230,6 +3252,12 @@ bool KickLockAudioProcessor::hasValidNoteMap() const noexcept
 {
   const std::lock_guard<std::mutex> lock (mapMutex);
   return NoteMap::isValidNoteMap (messageOwnedNoteMap);
+}
+
+NotePhaseMapSnapshot KickLockAudioProcessor::getNoteMapSnapshot() const
+{
+  const std::lock_guard<std::mutex> lock (mapMutex);
+  return messageOwnedNoteMap;
 }
 
 NotePhaseMapSnapshot KickLockAudioProcessor::getMessageOwnedNoteMapForTesting() const

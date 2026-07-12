@@ -187,11 +187,13 @@ public:
     LearnProgressSnapshot getLearnProgress() const;
     LearnFinalizeResult getPendingLearnResult() const;
     bool hasPendingLearnResult() const noexcept;
+    bool canApplyLatestLearnResult() const;
     juce::String getLearnApplyBlockedReason() const;
     bool applyLatestLearnResult();
     bool discardLatestLearnResult();
     bool clearNoteMap();
     bool hasValidNoteMap() const noexcept;
+    NotePhaseMapSnapshot getNoteMapSnapshot() const;
     bool hasRevertSnapshot() const noexcept { return revertSnapshotValid.load (std::memory_order_acquire); }
     void selectCompareSlot (int slotIndex);
     void copyActiveCompareSlotToOther();
@@ -544,6 +546,7 @@ private:
     void signalLearnWorkerFinished();
     bool pauseLearnWorkerForTesting (LearnState state, uint64_t sessionId);
     void clearPendingLearnCandidate();
+    juce::String getLearnApplyBlockedReason (const PendingLearnCandidate&) const;
     void invalidateLearnSession();
     void resetResolvedLearnStateToIdle();
     bool learnStateIsActivelyMutating() const noexcept;

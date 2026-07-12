@@ -220,6 +220,37 @@ public:
             expect (p.hasValidNoteMap());
         }
 
+        beginTest ("Editor close and reopen leaves processor-owned Learn state intact");
+        {
+            KickLockAudioProcessor p;
+            p.enableAllBuses();
+            p.setRateAndBufferSizeDetails (kSampleRate, 128);
+            p.prepareToPlay (kSampleRate, 128);
+            expect (p.beginLearn());
+            expectEquals ((int) p.getLearnState(), (int) LearnState::Preparing);
+            {
+                std::unique_ptr<juce::AudioProcessorEditor> editor (p.createEditor());
+                expect (editor != nullptr);
+            }
+            expectEquals ((int) p.getLearnState(), (int) LearnState::Preparing);
+            processEmptyBlock (p);
+            expectEquals ((int) p.getLearnState(), (int) LearnState::Capturing);
+            {
+                std::unique_ptr<juce::AudioProcessorEditor> editor (p.createEditor());
+                expect (editor != nullptr);
+            }
+            expectEquals ((int) p.getLearnState(), (int) LearnState::Capturing);
+            p.cancelLearn();
+
+            p.setPendingLearnResultForTesting (makeResult(), matchingContext (p));
+            {
+                std::unique_ptr<juce::AudioProcessorEditor> editor (p.createEditor());
+                expect (editor != nullptr);
+            }
+            expectEquals ((int) p.getLearnState(), (int) LearnState::ResultReady);
+            expect (p.hasPendingLearnResult());
+        }
+
         beginTest ("Pending Learn result changes no parameters, maps, rendered output, or serialized state");
         {
             KickLockAudioProcessor baseline;
@@ -283,6 +314,8 @@ public:
             auto context = matchingContext (p);
             p.setPendingLearnResultForTesting (makeResult(), context);
             setValue (p, "crossover_freq", 180.0f);
+            expect (! p.canApplyLatestLearnResult());
+            expect (p.getLearnApplyBlockedReason().isNotEmpty());
             expect (! p.applyLatestLearnResult());
             expect (p.hasPendingLearnResult());
             expect (p.getLearnApplyBlockedReason().isNotEmpty());
