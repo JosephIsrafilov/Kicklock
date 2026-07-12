@@ -8,6 +8,7 @@ add_executable(KickLockDspTests
     ProcessorTests.cpp
     RuntimeTrustTests.cpp
     SyntheticMaterialValidationTests.cpp
+    TransportQueueTests.cpp
     UiHelperTests.cpp
 )
 
@@ -43,5 +44,6 @@ add_test(NAME KickLockDspTests.Processor COMMAND KickLockDspTests Processor)
 add_test(NAME KickLockDspTests.P10 COMMAND KickLockDspTests P10)
 add_test(NAME KickLockDspTests.Stabilization COMMAND KickLockDspTests Stabilization)
 add_test(NAME KickLockDspTests.Phase1 COMMAND KickLockDspTests Phase1)
+add_test(NAME KickLockDspTests.Phase2 COMMAND KickLockDspTests Phase2)
 add_test(NAME KickLockDspTests.SyntheticMaterialValidation COMMAND KickLockDspTests SyntheticMaterialValidation)
 add_test(NAME KickLockDspTests.UIHelpers COMMAND KickLockDspTests "UI Helpers")
