@@ -2,6 +2,12 @@
 
 namespace
 {
+    struct StateCodec : juce::AudioProcessor
+    {
+        using juce::AudioProcessor::copyXmlToBinary;
+        using juce::AudioProcessor::getXmlFromBinary;
+    };
+
     void setValue (KickLockAudioProcessor& p, const char* id, float value)
     {
         if (auto* parameter = p.apvts.getParameter (id))
@@ -49,9 +55,9 @@ namespace
         return context;
     }
 
-    bool waitForState (KickLockAudioProcessor& p, LearnState expected)
+    bool waitForState (KickLockAudioProcessor& p, LearnState expected, int attempts = 200)
     {
-        for (int i = 0; i < 200; ++i)
+        for (int i = 0; i < attempts; ++i)
         {
             if (p.getLearnState() == expected)
                 return true;
@@ -67,6 +73,47 @@ namespace
         buffer.clear();
         juce::MidiBuffer midi;
         p.processBlock (buffer, midi);
+    }
+
+    void feedLearnHits (KickLockAudioProcessor& p, bool bypassed)
+    {
+        constexpr int block = 128;
+        const int total = (int) kSampleRate;
+        const int spacing = (int) (kSampleRate * 0.25);
+        for (int offset = 0; offset < total; offset += block)
+        {
+            const int n = std::min (block, total - offset);
+            juce::AudioBuffer<float> buffer (juce::jmax (p.getTotalNumInputChannels(),
+                                                         p.getTotalNumOutputChannels()), n);
+            buffer.clear();
+            for (int i = 0; i < n; ++i)
+            {
+                const int sample = offset + i;
+                const int inHit = sample % spacing;
+                const double t = (double) inHit / kSampleRate;
+                const float env = (float) std::exp (-t * 25.0);
+                const float tone = env * (float) std::sin (kTwoPi * 60.0 * t);
+                buffer.setSample (0, i, tone * 0.8f);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, tone * 0.8f);
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, tone);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, tone);
+            }
+            juce::MidiBuffer midi;
+            if (bypassed) p.processBlockBypassed (buffer, midi);
+            else p.processBlock (buffer, midi);
+        }
+    }
+
+    NotePhaseMapSnapshot mapFromState (const juce::MemoryBlock& state)
+    {
+        auto xml = StateCodec::getXmlFromBinary (state.getData(), (int) state.getSize());
+        if (xml == nullptr)
+            return NoteMap::makeEmptyNoteMap();
+        const auto tree = juce::ValueTree::fromXml (*xml);
+        for (const auto& child : tree)
+            if (child.hasType (NoteMapKeys::tree))
+                return noteMapFromValueTree (child);
+        return NoteMap::makeEmptyNoteMap();
     }
 }
 
@@ -121,6 +168,37 @@ public:
             expect (p.hasValidNoteMap());
         }
 
+        beginTest ("Production worker drains real windows and invokes the real finalizer");
+        {
+            KickLockAudioProcessor p;
+            p.enableAllBuses();
+            p.setRateAndBufferSizeDetails (kSampleRate, 128);
+            p.prepareToPlay (kSampleRate, 128);
+            expect (p.beginLearn());
+            feedLearnHits (p, false);
+            expectGreaterOrEqual (p.getLearnAcceptedHits(), 3);
+            expect (p.stopLearn());
+            for (int i = 0; i < 2500 && learnStateIsBusy (p.getLearnState()); ++i)
+                juce::Thread::sleep (2);
+            expect (! learnStateIsBusy (p.getLearnState()));
+            expectGreaterOrEqual (p.getLearnProgress().drainedHits, 3);
+            expect (! p.getMessageOwnedNoteMapForTesting().valid,
+                    "real finalization must remain pending-only even when valid");
+        }
+
+        beginTest ("Host bypass continues Learn observation");
+        {
+            KickLockAudioProcessor p;
+            p.enableAllBuses();
+            p.setRateAndBufferSizeDetails (kSampleRate, 128);
+            p.prepareToPlay (kSampleRate, 128);
+            expect (p.beginLearn());
+            feedLearnHits (p, true);
+            expectGreaterOrEqual (p.getLearnAcceptedHits(), 3);
+            p.cancelLearn();
+            expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
+        }
+
         beginTest ("Apply rejects changed context and preserves the candidate");
         {
             KickLockAudioProcessor p;
@@ -134,6 +212,51 @@ public:
             expect (p.getLearnApplyBlockedReason().isNotEmpty());
         }
 
+        beginTest ("Apply crossover tolerance is inclusive and interpolation is exact");
+        {
+            KickLockAudioProcessor accepted;
+            accepted.setRateAndBufferSizeDetails (kSampleRate, 128);
+            accepted.prepareToPlay (kSampleRate, 128);
+            accepted.setPendingLearnResultForTesting (makeResult(), matchingContext (accepted));
+            setValue (accepted, "crossover_freq", 151.0f);
+            expect (accepted.applyLatestLearnResult(), accepted.getLearnApplyBlockedReason());
+
+            KickLockAudioProcessor rejected;
+            rejected.setRateAndBufferSizeDetails (kSampleRate, 128);
+            rejected.prepareToPlay (kSampleRate, 128);
+            rejected.setPendingLearnResultForTesting (makeResult(), matchingContext (rejected));
+            setValue (rejected, "delayInterp", 1.0f);
+            expect (! rejected.applyLatestLearnResult());
+            expect (rejected.hasPendingLearnResult());
+        }
+
+        beginTest ("Apply allpass policy preserves no-help state and enables a helping note");
+        {
+            KickLockAudioProcessor noHelp;
+            noHelp.setRateAndBufferSizeDetails (kSampleRate, 128);
+            noHelp.prepareToPlay (kSampleRate, 128);
+            noHelp.setPendingLearnResultForTesting (makeResult(), matchingContext (noHelp));
+            expect (noHelp.applyLatestLearnResult());
+            expectWithinAbsoluteError (noHelp.apvts.getRawParameterValue ("allpass_enable")->load(), 0.0f, 1.0e-6f);
+
+            KickLockAudioProcessor helping;
+            helping.setRateAndBufferSizeDetails (kSampleRate, 128);
+            helping.prepareToPlay (kSampleRate, 128);
+            auto result = makeResult();
+            auto& note = result.map.notes[(size_t) NotePhaseMapSnapshot::indexForMidi (33)];
+            note.learned = true;
+            note.fundamentalHz = 55.0f;
+            note.allpassFreqHz = 110.0f;
+            note.allpassQ = 1.0f;
+            note.confidence = 0.8f;
+            note.fundamentalSpreadRatio = 0.03f;
+            note.hitCount = NoteMap::kMinHitsPerNote;
+            note.rotatorHelps = true;
+            helping.setPendingLearnResultForTesting (result, matchingContext (helping));
+            expect (helping.applyLatestLearnResult());
+            expectWithinAbsoluteError (helping.apvts.getRawParameterValue ("allpass_enable")->load(), 1.0f, 1.0e-6f);
+        }
+
         beginTest ("Cancel invalidates the session and does not publish a result");
         {
             KickLockAudioProcessor p;
@@ -145,6 +268,64 @@ public:
             expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
             expect (! p.hasPendingLearnResult());
             expect (p.getLearnSessionIdForTesting() != session);
+        }
+
+        beginTest ("Re-prepare cancels active Learn and destruction is bounded");
+        {
+            KickLockAudioProcessor p;
+            p.setRateAndBufferSizeDetails (kSampleRate, 128);
+            p.prepareToPlay (kSampleRate, 128);
+            expect (p.beginLearn());
+            processEmptyBlock (p);
+            p.setRateAndBufferSizeDetails (96000.0, 128);
+            p.prepareToPlay (96000.0, 128);
+            expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
+
+            for (int i = 0; i < 20; ++i)
+            {
+                auto instance = std::make_unique<KickLockAudioProcessor>();
+                instance->setRateAndBufferSizeDetails (kSampleRate, 128);
+                instance->prepareToPlay (kSampleRate, 128);
+                expect (instance->beginLearn());
+                processEmptyBlock (*instance);
+                if ((i % 2) == 0) instance->stopLearn();
+            }
+        }
+
+        beginTest ("Pending candidates are not serialized and old state clears an applied map");
+        {
+            KickLockAudioProcessor pending;
+            pending.setRateAndBufferSizeDetails (kSampleRate, 128);
+            pending.prepareToPlay (kSampleRate, 128);
+            pending.setPendingLearnResultForTesting (makeResult(), matchingContext (pending));
+            juce::MemoryBlock pendingState;
+            pending.getStateInformation (pendingState);
+            expect (! mapFromState (pendingState).valid);
+
+            KickLockAudioProcessor oldSource;
+            juce::MemoryBlock oldState;
+            oldSource.getStateInformation (oldState);
+            auto oldXml = StateCodec::getXmlFromBinary (oldState.getData(), (int) oldState.getSize());
+            expect (oldXml != nullptr);
+            if (oldXml != nullptr)
+            {
+                auto oldTree = juce::ValueTree::fromXml (*oldXml);
+                for (int i = oldTree.getNumChildren() - 1; i >= 0; --i)
+                    if (oldTree.getChild(i).hasType (NoteMapKeys::tree))
+                        oldTree.removeChild (i, nullptr);
+                StateCodec::copyXmlToBinary (*oldTree.createXml(), oldState);
+            }
+
+            KickLockAudioProcessor target;
+            target.setRateAndBufferSizeDetails (kSampleRate, 128);
+            target.prepareToPlay (kSampleRate, 128);
+            expect (target.publishNoteMapForTesting (makeValidMap()));
+            processEmptyBlock (target);
+            expect (target.getActiveNoteMapForTesting().valid);
+            target.setStateInformation (oldState.getData(), (int) oldState.getSize());
+            processEmptyBlock (target);
+            expect (! target.hasValidNoteMap());
+            expect (! target.getActiveNoteMapForTesting().valid);
         }
 
         beginTest ("Serialization, Clear Map, and map-aware Revert round-trip");
