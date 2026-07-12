@@ -1,4 +1,5 @@
 #include "TestCommon.h"
+#include "PluginEditor.h"
 
 class ScopeVisualTests : public juce::UnitTest
 {
@@ -867,6 +868,37 @@ public:
             expectEquals (formatLearnNoteChip (28, 6), juce::String ("E1 x6"));
             expect (! learnNoteHasEnoughMaterial (NoteMap::kMinHitsPerNote - 1));
             expect (learnNoteHasEnoughMaterial (NoteMap::kMinHitsPerNote));
+        }
+
+        beginTest ("Mode and Strength attachments follow host restore without changing Pitch Follow");
+        {
+            KickLockAudioProcessor processor;
+            SegmentedModeSelector modeSelector;
+            juce::Slider strengthSlider;
+            juce::AudioProcessorValueTreeState::ComboBoxAttachment modeAttachment (
+                processor.apvts, "correction_mode", modeSelector.parameterCombo());
+            juce::AudioProcessorValueTreeState::SliderAttachment strengthAttachment (
+                processor.apvts, "dynamic_strength", strengthSlider);
+
+            auto set = [&processor] (const char* id, float value)
+            {
+                if (auto* parameter = processor.apvts.getParameter (id))
+                    parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+            };
+            set ("pitch_track", 1.0f);
+            set ("correction_mode", 1.0f);
+            set ("dynamic_strength", 0.35f);
+            expectEquals (modeSelector.parameterCombo().getSelectedItemIndex(), 1);
+            expectWithinAbsoluteError ((float) strengthSlider.getValue(), 0.35f, 1.0e-6f);
+            expectWithinAbsoluteError (processor.apvts.getRawParameterValue ("pitch_track")->load(), 1.0f, 1.0e-6f);
+
+            juce::MemoryBlock state;
+            processor.getStateInformation (state);
+            set ("correction_mode", 0.0f);
+            set ("dynamic_strength", 1.0f);
+            processor.setStateInformation (state.getData(), (int) state.getSize());
+            expectEquals (modeSelector.parameterCombo().getSelectedItemIndex(), 1);
+            expectWithinAbsoluteError ((float) strengthSlider.getValue(), 0.35f, 1.0e-6f);
         }
     }
 };

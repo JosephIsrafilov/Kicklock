@@ -314,6 +314,8 @@ public:
             auto context = matchingContext (p);
             p.setPendingLearnResultForTesting (makeResult(), context);
             setValue (p, "crossover_freq", 180.0f);
+            expect (! p.canApplyLatestLearnResult());
+            expect (p.getLearnApplyBlockedReason().isNotEmpty());
             expect (! p.applyLatestLearnResult());
             expect (p.hasPendingLearnResult());
             expect (p.getLearnApplyBlockedReason().isNotEmpty());
