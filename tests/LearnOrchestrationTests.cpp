@@ -156,6 +156,17 @@ namespace
         for (int i = 0; i < samples; ++i) output[(size_t) i] = buffer.getSample (0, i);
         return output;
     }
+
+    bool waitForFlag (const std::atomic<bool>& flag, int timeoutMs)
+    {
+        for (int elapsed = 0; elapsed < timeoutMs; elapsed += 5)
+        {
+            if (flag.load (std::memory_order_acquire))
+                return true;
+            juce::Thread::sleep (5);
+        }
+        return flag.load (std::memory_order_acquire);
+    }
 }
 
 class LearnOrchestrationTests : public juce::UnitTest
@@ -517,6 +528,43 @@ public:
             }
         }
 
+        beginTest ("In-flight map timer callback fences destruction");
+        {
+            auto callbacks = std::make_shared<std::atomic<int>> (0);
+            auto p = std::make_unique<KickLockAudioProcessor>();
+            p->setRateAndBufferSizeDetails (kSampleRate, 128);
+            p->prepareToPlay (kSampleRate, 128);
+            p->setMapPublicationRetryObserverForTesting (callbacks);
+            const auto pause = p->getMapTimerCallbackPauseControlForTesting();
+            pause->pause();
+            for (int i = 0; i < 5; ++i)
+                p->requestMapPublicationForTesting (makeValidMap ((float) i));
+            expect (p->isMapPublicationRetryScheduledForTesting());
+
+            juce::Thread::sleep (30);
+            std::thread timerThread ([] { juce::Timer::callPendingTimersSynchronously(); });
+            expect (pause->waitUntilEntered (500));
+
+            std::atomic<bool> destroyed { false };
+            std::thread destroyThread ([owned = std::move (p), &destroyed] () mutable
+            {
+                owned.reset();
+                destroyed.store (true, std::memory_order_release);
+            });
+            juce::Thread::sleep (50);
+            expect (! destroyed.load (std::memory_order_acquire),
+                    "destruction must wait for the in-flight timer callback");
+
+            pause->release();
+            timerThread.join();
+            destroyThread.join();
+            expect (destroyed.load (std::memory_order_acquire));
+            expectEquals (callbacks->load(), 1);
+            pumpMessages (30);
+            expectEquals (callbacks->load(), 1,
+                          "no map timer callback may run after destruction");
+        }
+
         beginTest ("Lifecycle cancellation is measured and bounded in every worker stage");
         {
             auto elapsedMs = [] (auto&& action)
@@ -589,6 +637,98 @@ public:
                         + " capturing=" + juce::String ((int) captureCancel)
                         + " stopping=" + juce::String ((int) stoppingCancel)
                         + " reprepare=" + juce::String ((int) prepareDuration));
+        }
+
+        beginTest ("Timed Learn-worker waits fall back safely on non-audio lifecycle paths");
+        {
+            auto startPausedFinalization = [this] (KickLockAudioProcessor& p)
+            {
+                p.setRateAndBufferSizeDetails (kSampleRate, 128);
+                p.prepareToPlay (kSampleRate, 128);
+                const auto pause = p.getLearnWorkerPauseControlForTesting();
+                p.setLearnWorkerPauseStateForTesting (LearnState::Finalizing, true);
+                expect (p.beginLearn());
+                processEmptyBlock (p);
+                expect (p.stopLearn());
+                expect (pause->waitUntilEntered (500));
+                return pause;
+            };
+
+            {
+                auto p = std::make_unique<KickLockAudioProcessor>();
+                const auto pause = startPausedFinalization (*p);
+                std::atomic<bool> destroyed { false };
+                std::thread destroyThread ([owned = std::move (p), &destroyed] () mutable
+                {
+                    owned.reset();
+                    destroyed.store (true, std::memory_order_release);
+                });
+                juce::Thread::sleep (1600);
+                expect (! destroyed.load (std::memory_order_acquire));
+                pause->release();
+                destroyThread.join();
+                expect (destroyed.load (std::memory_order_acquire));
+            }
+
+            {
+                KickLockAudioProcessor p;
+                const auto pause = startPausedFinalization (p);
+                std::atomic<bool> prepared { false };
+                std::thread prepareThread ([&]
+                {
+                    p.setRateAndBufferSizeDetails (96000.0, 128);
+                    p.prepareToPlay (96000.0, 128);
+                    prepared.store (true, std::memory_order_release);
+                });
+                juce::Thread::sleep (1600);
+                expect (! prepared.load (std::memory_order_acquire));
+                pause->release();
+                prepareThread.join();
+                expect (prepared.load (std::memory_order_acquire));
+                expectEquals (p.getLatencySamples(), (int) std::ceil (96000.0 * 0.020));
+                processEmptyBlock (p);
+            }
+
+            {
+                KickLockAudioProcessor p;
+                const auto pause = startPausedFinalization (p);
+                std::atomic<bool> cancelled { false };
+                std::thread cancelThread ([&]
+                {
+                    p.cancelLearn();
+                    cancelled.store (true, std::memory_order_release);
+                });
+                juce::Thread::sleep (1600);
+                expect (! cancelled.load (std::memory_order_acquire));
+                pause->release();
+                cancelThread.join();
+                expect (cancelled.load (std::memory_order_acquire));
+                expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
+                expect (! p.hasPendingLearnResult());
+                expect (! p.hasValidNoteMap());
+            }
+
+            {
+                KickLockAudioProcessor stateSource;
+                juce::MemoryBlock state;
+                stateSource.getStateInformation (state);
+
+                KickLockAudioProcessor p;
+                const auto pause = startPausedFinalization (p);
+                std::atomic<bool> restored { false };
+                std::thread restoreThread ([&]
+                {
+                    p.setStateInformation (state.getData(), (int) state.getSize());
+                    restored.store (true, std::memory_order_release);
+                });
+                juce::Thread::sleep (1600);
+                expect (! restored.load (std::memory_order_acquire));
+                pause->release();
+                restoreThread.join();
+                expect (restored.load (std::memory_order_acquire));
+                expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
+                expect (! p.hasPendingLearnResult());
+            }
         }
 
         beginTest ("Stop during a hit finishes that window, blocks new triggers, and preserves sequence order");

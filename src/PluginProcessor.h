@@ -39,6 +39,37 @@ class KickLockAudioProcessor : public juce::AudioProcessor,
                                private juce::Timer
 {
 public:
+    struct CallbackPauseControlForTesting
+    {
+        void pause();
+        void release();
+        bool waitUntilEntered (int timeoutMs);
+
+    private:
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool paused = false;
+        bool entered = false;
+
+        friend class KickLockAudioProcessor;
+    };
+
+    struct LearnWorkerPauseControlForTesting
+    {
+        void pause (LearnState state, bool ignoreCancellation);
+        void release();
+        bool waitUntilEntered (int timeoutMs);
+
+    private:
+        std::mutex mutex;
+        std::condition_variable condition;
+        LearnState pausedState = LearnState::Idle;
+        bool ignoreCancellation = false;
+        bool entered = false;
+
+        friend class KickLockAudioProcessor;
+    };
+
     KickLockAudioProcessor();
     ~KickLockAudioProcessor() override;
 
@@ -255,9 +286,17 @@ public:
         mapPublicationRetryObserver = std::move (observer);
     }
     void setResolvedLearnStateForTesting (LearnState state);
-    void setLearnWorkerPauseStateForTesting (LearnState state) noexcept
+    std::shared_ptr<CallbackPauseControlForTesting> getMapTimerCallbackPauseControlForTesting() const noexcept
     {
-        learnWorkerPauseStateForTesting.store (state, std::memory_order_release);
+        return mapTimerCallbackPauseControlForTesting;
+    }
+    std::shared_ptr<LearnWorkerPauseControlForTesting> getLearnWorkerPauseControlForTesting() const noexcept
+    {
+        return learnWorkerPauseControlForTesting;
+    }
+    void setLearnWorkerPauseStateForTesting (LearnState state, bool ignoreCancellation = false)
+    {
+        learnWorkerPauseControlForTesting->pause (state, ignoreCancellation);
     }
 
 private:
@@ -411,17 +450,21 @@ private:
     std::mutex learnWorkerCompletionMutex;
     std::condition_variable learnWorkerCompletionCondition;
     bool learnWorkerFinished = true;
-    std::atomic<LearnState> learnWorkerPauseStateForTesting { LearnState::Idle };
+    std::shared_ptr<LearnWorkerPauseControlForTesting> learnWorkerPauseControlForTesting =
+        std::make_shared<LearnWorkerPauseControlForTesting>();
     mutable std::mutex learnMutex;
     mutable std::mutex learnProgressMutex;
     PendingLearnCandidate pendingLearnCandidate;
     LearnProgressSnapshot learnProgress;
     mutable std::mutex mapMutex;
     NotePhaseMapSnapshot messageOwnedNoteMap = NoteMap::makeEmptyNoteMap();
+    std::mutex mapTimerCallbackMutex;
     std::mutex mapPublicationMutex;
     NotePhaseMapSnapshot pendingMapPublication = NoteMap::makeEmptyNoteMap();
     bool hasPendingMapPublication = false;
     std::shared_ptr<std::atomic<int>> mapPublicationRetryObserver;
+    std::shared_ptr<CallbackPauseControlForTesting> mapTimerCallbackPauseControlForTesting =
+        std::make_shared<CallbackPauseControlForTesting>();
     DynamicNoteState dynamicNoteState;
     int dynamicSilenceResetSamples = 12000;
 
@@ -497,6 +540,7 @@ private:
     void requestMapPublication (const NotePhaseMapSnapshot& map);
     bool retryMapPublication();
     bool waitForLearnWorker (int timeoutMs);
+    void waitForLearnWorkerUntilFinished();
     void signalLearnWorkerFinished();
     bool pauseLearnWorkerForTesting (LearnState state, uint64_t sessionId);
     void clearPendingLearnCandidate();
