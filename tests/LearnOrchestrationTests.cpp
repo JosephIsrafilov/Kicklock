@@ -574,26 +574,60 @@ public:
                 p->requestMapPublicationForTesting (makeValidMap ((float) i));
             expect (p->isMapPublicationRetryScheduledForTesting());
 
-            juce::Thread::sleep (30);
-            std::thread timerThread ([] { juce::Timer::callPendingTimersSynchronously(); });
-            expect (pause->waitUntilEntered (500));
-
             std::atomic<bool> destroyed { false };
-            std::thread destroyThread ([owned = std::move (p), &destroyed] () mutable
+            std::mutex destructionMutex;
+            std::condition_variable destructionCondition;
+            bool startDestruction = false;
+            bool destructionStarted = false;
+            std::atomic<bool> callbackEntered { false };
+            std::atomic<bool> callbackFencedDestruction { false };
+            std::atomic<bool> keepPumpingTimers { true };
+            std::thread destroyThread ([owned = std::move (p), &destroyed,
+                                        &destructionMutex, &destructionCondition,
+                                        &startDestruction, &destructionStarted] () mutable
             {
+                std::unique_lock<std::mutex> lock (destructionMutex);
+                destructionCondition.wait (lock, [&] { return startDestruction; });
+                destructionStarted = true;
+                lock.unlock();
+                destructionCondition.notify_all();
                 owned.reset();
                 destroyed.store (true, std::memory_order_release);
             });
-            juce::Thread::sleep (50);
-            expect (! destroyed.load (std::memory_order_acquire),
-                    "destruction must wait for the in-flight timer callback");
 
-            pause->release();
+            std::thread releaseThread ([&]
+            {
+                callbackEntered.store (pause->waitUntilEntered (500), std::memory_order_release);
+                {
+                    const std::lock_guard<std::mutex> lock (destructionMutex);
+                    startDestruction = true;
+                }
+                destructionCondition.notify_all();
+                std::unique_lock<std::mutex> lock (destructionMutex);
+                destructionCondition.wait (lock, [&] { return destructionStarted; });
+                callbackFencedDestruction.store (! destroyed.load (std::memory_order_acquire),
+                                                 std::memory_order_release);
+                pause->release();
+            });
+
+            std::thread timerThread ([&]
+            {
+                while (keepPumpingTimers.load (std::memory_order_acquire))
+                {
+                    juce::Timer::callPendingTimersSynchronously();
+                    std::this_thread::yield();
+                }
+            });
+            releaseThread.join();
+            keepPumpingTimers.store (false, std::memory_order_release);
             timerThread.join();
             destroyThread.join();
+            expect (callbackEntered.load (std::memory_order_acquire));
+            expect (callbackFencedDestruction.load (std::memory_order_acquire),
+                    "destruction must wait for the in-flight timer callback");
             expect (destroyed.load (std::memory_order_acquire));
             expectEquals (callbacks->load(), 1);
-            pumpMessages (30);
+            juce::Timer::callPendingTimersSynchronously();
             expectEquals (callbacks->load(), 1,
                           "no map timer callback may run after destruction");
         }
