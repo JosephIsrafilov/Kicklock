@@ -998,9 +998,10 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   // transient detector is dedicated to Learn (its own state, separate from the
   // scope/punch detector) so scope triggers and Learn triggers never interfere.
   // learnActive stays false in this phase, so the capture path below is inert
-  // and audio output is unchanged; the queues and audio-owned activeNoteMap are
-  // established here for later phases (no map is active and no Dynamic
-  // correction is enabled).
+  // and audio output is unchanged. Re-preparing resets queue storage and DSP
+  // state, but deliberately retains the audio-owned active map: F/Q are Hz/Q
+  // values and learnedSampleRate is metadata, so a host sample-rate or block
+  // size change must not silently discard an applied map.
   learnTransientDetector.prepare(sampleRate);
   learnTransientDetector.setThreshold(1.0e-7f);
   learnTransientDetector.setMinimumEnergyGate(1.0e-8f);
@@ -1009,7 +1010,6 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   learnTransientDetector.setHoldoffMs(90.0f);
   learnHitQueue.prepare(sampleRate);
   noteMapUpdateQueue.prepare();
-  activeNoteMap = NoteMap::makeEmptyNoteMap();
   dynamicNoteState.reset();
   dynamicSilenceResetSamples = juce::jmax (1, (int) std::round (sampleRate * 0.25));
   dynamicFallbackActive.store (false, std::memory_order_release);

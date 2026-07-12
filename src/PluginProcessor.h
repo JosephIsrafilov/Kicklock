@@ -220,6 +220,7 @@ public:
     {
         return activeNoteMap;
     }
+    int getDynamicLastMidiForTesting() const noexcept { return dynamicNoteState.lastMidi; }
 
 private:
     class AutoAlignEngine;

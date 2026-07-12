@@ -84,6 +84,10 @@ public:
 
     int reportLatencySamples() const noexcept { return reportedLatency; }
     float getAllpassSmoothingSecondsForTesting() const noexcept { return allpassSmoothingSeconds; }
+    float getSmoothedAllpassFreqForTesting() const noexcept { return smoothedAllpassFreq.getCurrentValue(); }
+    float getAllpassFreqTargetForTesting() const noexcept { return smoothedAllpassFreq.getTargetValue(); }
+    float getSmoothedAllpassQForTesting() const noexcept { return smoothedAllpassQ.getCurrentValue(); }
+    float getAllpassQTargetForTesting() const noexcept { return smoothedAllpassQ.getTargetValue(); }
 
     void process (juce::AudioBuffer<float>& main,
                   const juce::AudioBuffer<float>& sidechain,
