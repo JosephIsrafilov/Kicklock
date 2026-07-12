@@ -665,6 +665,8 @@ KickLockAudioProcessor::KickLockAudioProcessor()
   crossoverFreqParam = apvts.getRawParameterValue("crossover_freq");
   crossoverEnableParamRaw = apvts.getRawParameterValue("crossover_enable");
   pitchTrackParam = apvts.getRawParameterValue("pitch_track");
+  correctionModeParam = apvts.getRawParameterValue("correction_mode");
+  dynamicStrengthParam = apvts.getRawParameterValue("dynamic_strength");
 
   for (const auto *id :
        {"delay_ms", "delayMs", "polarity_invert", "polarityInvert",
@@ -858,6 +860,16 @@ KickLockAudioProcessor::createParameterLayout() {
   layout.add(std::make_unique<juce::AudioParameterBool>(
       juce::ParameterID{"pitch_track", 1}, "Pitch Follow", false));
 
+  layout.add(std::make_unique<juce::AudioParameterChoice>(
+      juce::ParameterID{"correction_mode", 1}, "Correction Mode",
+      juce::StringArray{"Static", "Dynamic"}, 0));
+
+  layout.add(std::make_unique<juce::AudioParameterFloat>(
+      juce::ParameterID{"dynamic_strength", 1}, "Dynamic Strength",
+      juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 1.0f,
+      juce::AudioParameterFloatAttributes().withStringFromValueFunction(
+          [] (float value, int) { return juce::String (std::round (value * 100.0f)) + "%"; })));
+
   layout.add(std::make_unique<juce::AudioParameterFloat>(
       juce::ParameterID{"delayMs", 1}, "Legacy Audio Bass Delay",
       juce::NormalisableRange<float>(-20.0f, 20.0f, 0.01f), 0.0f,
@@ -998,6 +1010,11 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   learnHitQueue.prepare(sampleRate);
   noteMapUpdateQueue.prepare();
   activeNoteMap = NoteMap::makeEmptyNoteMap();
+  dynamicNoteState.reset();
+  dynamicSilenceResetSamples = juce::jmax (1, (int) std::round (sampleRate * 0.25));
+  dynamicFallbackActive.store (false, std::memory_order_release);
+  dynamicMapStale.store (false, std::memory_order_release);
+  activeMidiNote.store (-1, std::memory_order_release);
 
   // Triggered oscilloscope capture: keep 20 ms pre-roll internally for a
   // stable trigger, but display the post-trigger window from 0..500 ms so
@@ -1286,6 +1303,10 @@ void KickLockAudioProcessor::pushMetersScopeAndTransientState(
 void KickLockAudioProcessor::processBlockBypassed(
     juce::AudioBuffer<float> &buffer, juce::MidiBuffer &) {
   juce::ScopedNoDenormals noDenormals;
+  dynamicNoteState.reset();
+  dynamicFallbackActive.store(false, std::memory_order_release);
+  dynamicMapStale.store(false, std::memory_order_release);
+  activeMidiNote.store(-1, std::memory_order_release);
 
   auto mainBuffer = getBusBuffer(buffer, true, 0);
   auto sidechainBuffer = getBusBuffer(buffer, true, 1);
@@ -1430,14 +1451,18 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
 
   // Audio thread owns activeNoteMap. Drain any published map snapshots so it
   // always holds the latest complete one. This is RT-safe (fixed-size POD copy,
-  // no allocation). No Dynamic correction reads activeNoteMap in this phase, so
-  // draining only maintains ownership for later phases; it never changes the
-  // audio output.
+  // no allocation). A replacement resets only the Dynamic note hysteresis;
+  // the DSP smoothers retain their state and move toward the new target.
+  bool mapReplaced = false;
   {
     NotePhaseMapSnapshot pendingMap;
-    while (noteMapUpdateQueue.pop(pendingMap))
+    while (noteMapUpdateQueue.pop(pendingMap)) {
       activeNoteMap = pendingMap;
+      mapReplaced = true;
+    }
   }
+  if (mapReplaced)
+    dynamicNoteState.reset();
 
   bool bpmDetected = false;
   float bpmValue = 0.0f;
@@ -1534,48 +1559,75 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   const float delayMs = getEffectiveDelayMs();
   const bool polarityInvert = getEffectivePolarityInvert();
   const bool phaseFilterEnabled = getEffectivePhaseFilterEnabled();
-  float allpassFreq = getEffectiveAllpassFreqHz();
-  const float allpassQ =
+  const float manualAllpassFreq = getEffectiveAllpassFreqHz();
+  float allpassFreq = manualAllpassFreq;
+  float allpassQ =
       rotatorQParam != nullptr ? rotatorQParam->load() : 0.70710678f;
   const int allpassStages =
       2 +
       (rotatorStagesParam != nullptr
            ? juce::jlimit(0, 2, (int)std::lround(rotatorStagesParam->load()))
            : 0);
+  const bool crossoverEnable = crossoverEnableParamRaw == nullptr ||
+                               crossoverEnableParamRaw->load() > 0.5f;
+  const float crossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+  const int delayInterpolationIndex = delayInterpParam != nullptr
+                                        ? juce::jlimit(0, 1, (int) std::lround(delayInterpParam->load()))
+                                        : 0;
+  const auto correctionMode = correctionModeParam != nullptr && correctionModeParam->load() > 0.5f
+                                ? CorrectionMode::Dynamic : CorrectionMode::Static;
 
-  // Dynamic pitch follow: retarget the allpass centre to the tracked bass
-  // fundamental so the phase rotation stays on the note as the bassline
-  // moves. The DSP's own 30 ms frequency smoothing + throttled coefficient
-  // updates make the retune click-free. The Phase Freq PARAMETER is never
-  // written from here (audio thread must not push parameter changes); it
-  // simply stops being the source while follow is active, and the UI shows
-  // the live tracked value instead.
+  // Dynamic mode uses the tracker only for note selection. Static mode keeps
+  // the established Pitch Follow frequency override. Neither path writes an
+  // APVTS parameter from the audio thread.
   const float trackedHz = pitchTracker.getFrequencyHz();
   trackedBassHz.store(trackedHz);
 
-  const bool pitchFollowActive = pitchTrackParam != nullptr &&
-                                 pitchTrackParam->load() > 0.5f &&
-                                 phaseFilterEnabled && trackedHz > 0.0f;
-  if (pitchFollowActive)
-    allpassFreq = juce::jlimit(20.0f, 500.0f, trackedHz);
+  float allpassSmoothingSeconds = 0.030f;
+  if (correctionMode == CorrectionMode::Static) {
+    const bool pitchFollowActive = pitchTrackParam != nullptr &&
+                                   pitchTrackParam->load() > 0.5f &&
+                                   phaseFilterEnabled && trackedHz > 0.0f;
+    if (pitchFollowActive)
+      allpassFreq = juce::jlimit(20.0f, 500.0f, trackedHz);
+    dynamicNoteState.reset();
+    dynamicFallbackActive.store(false, std::memory_order_release);
+    dynamicMapStale.store(false, std::memory_order_release);
+    activeMidiNote.store(-1, std::memory_order_release);
+  } else if (!phaseFilterEnabled) {
+    dynamicNoteState.reset();
+    dynamicFallbackActive.store(false, std::memory_order_release);
+    dynamicMapStale.store(false, std::memory_order_release);
+    activeMidiNote.store(-1, std::memory_order_release);
+  } else {
+    const auto base = readCurrentRuntimeBaseSettings(delayMs, polarityInvert, crossoverEnable,
+                                                      crossoverHz, allpassStages, delayInterpolationIndex);
+    const auto selected = selectDynamicRuntime(
+        activeNoteMap, base, manualAllpassFreq, allpassQ, trackedHz,
+        dynamicStrengthParam != nullptr ? dynamicStrengthParam->load() : 1.0f,
+        numSamples, dynamicSilenceResetSamples, dynamicNoteState);
+    allpassFreq = selected.targetFreqHz;
+    allpassQ = selected.targetQ;
+    allpassSmoothingSeconds = 0.070f;
+    dynamicFallbackActive.store(selected.fallbackActive, std::memory_order_release);
+    dynamicMapStale.store(selected.mapStale, std::memory_order_release);
+    activeMidiNote.store(selected.selectedMidi, std::memory_order_release);
+  }
 
   MultibandPhaseCore::Params coreParams;
 
   // Raw parameter pointer cached in the constructor — the previous
   // apvts.getParameter() call here was a per-block string-keyed lookup on
   // the audio thread.
-  const bool crossoverEnable = crossoverEnableParamRaw == nullptr ||
-                               crossoverEnableParamRaw->load() > 0.5f;
-
   coreParams.crossoverEnabled = crossoverEnable;
-  coreParams.crossoverHz =
-      crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
+  coreParams.crossoverHz = crossoverHz;
   coreParams.userDelayMs = delayMs;
   coreParams.polarityInvert = polarityInvert;
   coreParams.allpassEnabled = phaseFilterEnabled;
   coreParams.allpassFreqHz = allpassFreq;
   coreParams.allpassQ = allpassQ;
   coreParams.allpassStages = allpassStages;
+  coreParams.allpassSmoothingSeconds = allpassSmoothingSeconds;
 
   if (std::abs(coreParams.crossoverHz - lastPublishedCrossoverHz) > 0.01f) {
     rawBassLowpass.setCutoffFrequency(coreParams.crossoverHz);
@@ -1830,6 +1882,10 @@ KickLockAudioProcessor::captureCurrentParameterSnapshot() const {
       0, 1, (int)std::lround(readParameterValue("delayInterp", 0.0f)));
   snapshot.pitchTrack = pitchTrackParam ? (pitchTrackParam->load() > 0.5f)
                                       : false;
+  snapshot.correctionModeIndex = correctionModeParam
+                                     ? juce::jlimit (0, 1, (int) std::lround (correctionModeParam->load()))
+                                     : 0;
+  snapshot.dynamicStrength = dynamicStrengthParam ? dynamicStrengthParam->load() : 1.0f;
   return snapshot;
 }
 
@@ -1856,6 +1912,21 @@ void KickLockAudioProcessor::restoreParameterSnapshot(
   setParameterValueWithGesture("delayInterp",
                                (float)snapshot.delayInterpolationIndex);
   setParameterValueWithGesture("pitch_track", snapshot.pitchTrack ? 1.0f : 0.0f);
+  setParameterValueWithGesture("correction_mode", (float) snapshot.correctionModeIndex);
+  setParameterValueWithGesture("dynamic_strength", snapshot.dynamicStrength);
+}
+
+RuntimeBaseSettings KickLockAudioProcessor::readCurrentRuntimeBaseSettings(
+    float delayMs, bool polarityInvert, bool crossoverEnabled, float crossoverHz,
+    int allpassStages, int delayInterpolationIndex) const noexcept {
+  RuntimeBaseSettings settings;
+  settings.delayMs = delayMs;
+  settings.polarityInvert = polarityInvert;
+  settings.crossoverEnabled = crossoverEnabled;
+  settings.crossoverHz = crossoverHz;
+  settings.allpassStages = allpassStages;
+  settings.delayInterpolationIndex = delayInterpolationIndex;
+  return settings;
 }
 
 KickLockAudioProcessor::ParameterSnapshot
@@ -1935,6 +2006,11 @@ void KickLockAudioProcessor::loadCompareSlotsFromState() {
                                      snapshot.delayInterpolationIndex));
     snapshot.pitchTrack = (bool)apvts.state.getProperty(
         juce::Identifier(prefix + "PitchTrack"), snapshot.pitchTrack);
+    snapshot.correctionModeIndex = juce::jlimit(
+        0, 1, (int) apvts.state.getProperty(juce::Identifier(prefix + "CorrectionMode"),
+                                             snapshot.correctionModeIndex));
+    snapshot.dynamicStrength = (float) apvts.state.getProperty(
+        juce::Identifier(prefix + "DynamicStrength"), snapshot.dynamicStrength);
     return snapshot;
   };
 
@@ -1979,6 +2055,10 @@ void KickLockAudioProcessor::writeCompareSlotsToState() {
                             snapshot.delayInterpolationIndex, nullptr);
     apvts.state.setProperty(juce::Identifier(prefix + "PitchTrack"),
                             snapshot.pitchTrack, nullptr);
+    apvts.state.setProperty(juce::Identifier(prefix + "CorrectionMode"),
+                            snapshot.correctionModeIndex, nullptr);
+    apvts.state.setProperty(juce::Identifier(prefix + "DynamicStrength"),
+                            snapshot.dynamicStrength, nullptr);
   }
 }
 
@@ -2067,6 +2147,8 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
     const bool hasLegacyPhaseFilterEnabled = hasParameterState("phaseFilterEnabled");
     const bool hasAllpassFreq = hasParameterState("allpass_freq");
     const bool hasLegacyRotatorFreq = hasParameterState("rotatorFreq");
+    const bool hasCorrectionMode = hasParameterState("correction_mode");
+    const bool hasDynamicStrength = hasParameterState("dynamic_strength");
 
     auto migrateLegacyToCanonical = [&getParameterStateValue, &setParameterStateValue](
                                         bool hasCanonical, bool hasLegacy,
@@ -2087,13 +2169,21 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
     migrateLegacyToCanonical(hasAllpassFreq, hasLegacyRotatorFreq,
                              "allpass_freq", "rotatorFreq");
 
+    // Phase 4 compatibility: old state payloads predate these parameters.
+    // Explicitly add their factory values before replaceState(), rather than
+    // retaining values from whatever project was loaded previously.
+    if (!hasCorrectionMode)
+      setParameterStateValue("correction_mode", 0.0f);
+    if (!hasDynamicStrength)
+      setParameterStateValue("dynamic_strength", 1.0f);
+
     apvts.replaceState(restoredState);
 
     // APVTS can skip a discrete parameter setter when its denormalised value
     // is unchanged. Toggle it once so state restoration is still broadcast to
     // the VST3 parameter cache before applying the stored value.
     for (const auto* id : { "crossover_enable", "polarity_invert",
-                            "allpass_enable", "pitch_track", "polarityInvert",
+                            "allpass_enable", "pitch_track", "correction_mode", "polarityInvert",
                             "phaseFilterEnabled" }) {
       if (hasParameterState(id)) {
         if (auto* parameter = apvts.getParameter(id)) {

@@ -15,6 +15,12 @@
 
 namespace
 {
+    struct AudioProcessorStateCodec : juce::AudioProcessor
+    {
+        using juce::AudioProcessor::copyXmlToBinary;
+        using juce::AudioProcessor::getXmlFromBinary;
+    };
+
     // Deterministic Static material. The same bass is used for every fixture so
     // golden RMS differences reflect the processing alone. It deliberately
     // carries strong high-band content (a 3 kHz tone plus a periodic transient)
@@ -133,6 +139,8 @@ namespace
         float crossoverHz;
         float delayInterp;  // 0 or 1
         bool  pitchTrack;
+        float correctionMode;
+        float dynamicStrength;
     };
 
     void applyFullState (KickLockAudioProcessor& processor, const FullState& s)
@@ -151,6 +159,8 @@ namespace
         setFloatParam (processor, "crossover_freq", s.crossoverHz);
         setFloatParam (processor, "delayInterp", s.delayInterp);
         setBoolParam  (processor, "pitch_track", s.pitchTrack);
+        setFloatParam (processor, "correction_mode", s.correctionMode);
+        setFloatParam (processor, "dynamic_strength", s.dynamicStrength);
     }
 }
 
@@ -389,15 +399,17 @@ public:
         expectWithinAbsoluteError (rawParam (p, "crossover_freq"), s.crossoverHz, 0.05f, "crossover_freq");
         expectWithinAbsoluteError (rawParam (p, "delayInterp"), s.delayInterp, 1.0e-6f, "delayInterp");
         expectWithinAbsoluteError (rawParam (p, "pitch_track"), s.pitchTrack ? 1.0f : 0.0f, 1.0e-6f, "pitch_track");
+        expectWithinAbsoluteError (rawParam (p, "correction_mode"), s.correctionMode, 1.0e-6f, "correction_mode");
+        expectWithinAbsoluteError (rawParam (p, "dynamic_strength"), s.dynamicStrength, 1.0e-6f, "dynamic_strength");
     }
 
     void runTest() override
     {
         const FullState slotA {
-            -3.25f, true,  true,  180.0f, 2.5f, 1.0f, true,  90.0f,  1.0f, true
+            -3.25f, true,  true,  180.0f, 2.5f, 1.0f, true,  90.0f,  1.0f, true, 1.0f, 0.35f
         };
         const FullState slotB {
-            5.00f,  false, false, 60.0f,  0.9f, 2.0f, false, 200.0f, 0.0f, false
+            5.00f,  false, false, 60.0f,  0.9f, 2.0f, false, 200.0f, 0.0f, false, 0.0f, 1.0f
         };
 
         beginTest ("T2: every ParameterSnapshot field round-trips through save/reload");
@@ -461,6 +473,34 @@ public:
 
             // A second revert with no captured bundle is a no-op.
             expect (! processor.revertLatestFix());
+        }
+
+        beginTest ("T2: old state missing Dynamic parameters restores deterministic Static defaults");
+        {
+            KickLockAudioProcessor source;
+            juce::MemoryBlock oldState;
+            source.getStateInformation (oldState);
+            auto xml = AudioProcessorStateCodec::getXmlFromBinary (oldState.getData(), (int) oldState.getSize());
+            expect (xml != nullptr);
+            if (xml != nullptr)
+            {
+                for (int i = xml->getNumChildElements() - 1; i >= 0; --i)
+                {
+                    juce::XmlElement* child = xml->getChildElement (i);
+                    if (child != nullptr && (child->getStringAttribute ("id") == "correction_mode"
+                                             || child->getStringAttribute ("id") == "dynamic_strength"))
+                        xml->removeChildElement (child, true);
+                }
+
+                juce::MemoryBlock stripped;
+                AudioProcessorStateCodec::copyXmlToBinary (*xml, stripped);
+                KickLockAudioProcessor restored;
+                setFloatParam (restored, "correction_mode", 1.0f);
+                setFloatParam (restored, "dynamic_strength", 0.0f);
+                restored.setStateInformation (stripped.getData(), (int) stripped.getSize());
+                expectWithinAbsoluteError (rawParam (restored, "correction_mode"), 0.0f, 1.0e-6f);
+                expectWithinAbsoluteError (rawParam (restored, "dynamic_strength"), 1.0f, 1.0e-6f);
+            }
         }
     }
 };

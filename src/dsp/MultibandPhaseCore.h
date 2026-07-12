@@ -19,6 +19,7 @@ public:
         float allpassFreqHz = 50.0f;
         float allpassQ = 0.7f;
         int allpassStages = 2;
+        float allpassSmoothingSeconds = 0.030f;
     };
 
     void prepare (double sr, int maxBlock, int channels, float latencyBudgetMs = 20.0f)
@@ -48,6 +49,7 @@ public:
         smoothedAllpassFreq.reset (sampleRate, 0.030);
         smoothedAllpassQ.reset (sampleRate, 0.030);
         smoothedAllpassWet.reset (sampleRate, 0.010);
+        allpassSmoothingSeconds = 0.030f;
         reset();
     }
 
@@ -81,6 +83,7 @@ public:
     }
 
     int reportLatencySamples() const noexcept { return reportedLatency; }
+    float getAllpassSmoothingSecondsForTesting() const noexcept { return allpassSmoothingSeconds; }
 
     void process (juce::AudioBuffer<float>& main,
                   const juce::AudioBuffer<float>& sidechain,
@@ -118,6 +121,7 @@ public:
         }
 
         smoothedPolarity.setTargetValue (params.polarityInvert ? -1.0f : 1.0f);
+        setAllpassSmoothingSeconds (params.allpassSmoothingSeconds);
         smoothedAllpassFreq.setTargetValue (juce::jlimit (20.0f, 500.0f, params.allpassFreqHz));
         smoothedAllpassQ.setTargetValue (juce::jlimit (0.1f, 10.0f, params.allpassQ));
         desiredAllpassWet = params.allpassEnabled ? 1.0f : 0.0f;
@@ -159,6 +163,27 @@ public:
     }
 
 private:
+    void setAllpassSmoothingSeconds (float requestedSeconds)
+    {
+        const float seconds = std::isfinite (requestedSeconds)
+                                ? juce::jlimit (0.001f, 1.0f, requestedSeconds)
+                                : 0.030f;
+        if (std::abs (seconds - allpassSmoothingSeconds) <= 1.0e-6f)
+            return;
+
+        const float currentFreq = smoothedAllpassFreq.getCurrentValue();
+        const float targetFreq = smoothedAllpassFreq.getTargetValue();
+        const float currentQ = smoothedAllpassQ.getCurrentValue();
+        const float targetQ = smoothedAllpassQ.getTargetValue();
+        smoothedAllpassFreq.reset (sampleRate, seconds);
+        smoothedAllpassQ.reset (sampleRate, seconds);
+        smoothedAllpassFreq.setCurrentAndTargetValue (currentFreq);
+        smoothedAllpassQ.setCurrentAndTargetValue (currentQ);
+        smoothedAllpassFreq.setTargetValue (targetFreq);
+        smoothedAllpassQ.setTargetValue (targetQ);
+        allpassSmoothingSeconds = seconds;
+    }
+
     bool currentCrossoverEnabled = true;
 
     void initialiseAllpassFilters()
@@ -380,6 +405,7 @@ private:
     bool stageSwitchPending = false;
     float desiredAllpassWet = 0.0f;
     int allpassCoeffUpdateCountdown = 0;
+    float allpassSmoothingSeconds = 0.030f;
 
     juce::AudioBuffer<float> inputBuffer;
     juce::AudioBuffer<float> lowBuffer;
