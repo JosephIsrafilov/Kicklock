@@ -26,6 +26,27 @@ struct AlignmentResult
 class AlignmentAnalyzer
 {
 public:
+    // Shared production rotator policy.  Static Analyze and offline Learn must
+    // score exactly this grid with exactly this safety policy.
+    static const std::vector<float>& rotatorFrequencies()
+    {
+        static const std::vector<float> values { 40.0f, 60.0f, 80.0f, 100.0f,
+                                                  140.0f, 200.0f, 250.0f,
+                                                  350.0f, 500.0f };
+        return values;
+    }
+
+    static const std::vector<float>& rotatorQs()
+    {
+        static const std::vector<float> values { 0.5f, 0.7f, 1.0f, 2.0f };
+        return values;
+    }
+
+    static const std::vector<int>& rotatorStages()
+    {
+        static const std::vector<int> values { 2, 3 };
+        return values;
+    }
     // Fast lag-0 match on a single low band: band-pass both signals, then one
     // normalized dot product (no FFT, no lag search, no rotator grid). This is
     // the cheap read the callers that only need "how aligned is it right now"
@@ -249,20 +270,16 @@ public:
             constexpr double rotatorEnableGain = 0.03;
             constexpr double rotatorTieEpsilon = 1.0e-4;
 
-            const float freqCandidates[]  = { 40.0f, 60.0f, 80.0f, 100.0f, 140.0f,
-                                               200.0f, 250.0f, 350.0f, 500.0f };
-            const float qCandidates[]     = { 0.5f, 0.7f, 1.0f, 2.0f };
-            const int   stageCandidates[] = { 2, 3 };
             double bestRotScore = baseAbs;
 
-            for (int stages : stageCandidates)
+            for (int stages : rotatorStages())
             {
-                for (float freq : freqCandidates)
+                for (float freq : rotatorFrequencies())
                 {
                     if ((double) freq >= sampleRate * 0.5)
                         continue;
 
-                    for (float qv : qCandidates)
+                    for (float qv : rotatorQs())
                     {
                         std::vector<float> trial = bassBase;
                         applyAllpassCascade (trial, sampleRate, freq, qv, stages);
@@ -402,6 +419,7 @@ private:
         return peak;
     }
 
+public:
     static double rotatorSafetyPenalty (const std::vector<float>& dry,
                                         const std::vector<float>& wet,
                                         double sampleRate,
@@ -440,6 +458,8 @@ private:
         return 0.003 * (double) std::max (0, stages - 2)
              + 0.004 * std::max (0.0, (double) q - 1.0);
     }
+
+private:
 
     static float peakAbs (const float* x, int start, int end) noexcept
     {

@@ -4,83 +4,50 @@
 #include <cmath>
 #include <vector>
 
+#include "NotePhaseMap.h"
 #include "PhaseFixEngine.h"
-
-// =============================================================================
-// FixedTimingRotatorSearch (plan v1.2, Phase 3 Pass B helper).
-//
-// Given a single completed hit window and a FIXED global Delay + Polarity (the
-// result of Pass A), search only the allpass rotator's frequency / Q / stage
-// count for the best low-end match. The global timing is never re-searched: the
-// bass delay and polarity fed to the scorer stay exactly what Pass A chose, so
-// this pass can only ever move the rotator, not the alignment.
-//
-// The search sweeps every allowed stage count once and reports the best
-// candidate per stage AND the overall best. The caller (LearnPipelineCore) uses
-// the per-stage bests to pick ONE global stage count across all hits, then reads
-// each hit's candidate at that stage so per-note entries vary only in
-// allpassFreqHz / allpassQ / rotatorHelps.
-//
-// "rotatorHelps" is true only when the best rotator beats the rotator-off
-// baseline by at least kMinGainPoints match points, so a rotator is only ever
-// recorded as helping when it measurably improves the alignment.
-//
-// Pure, worker-thread-only, deterministic: no RNG, no globals, and ties are
-// broken by grid order (lowest frequency then lowest Q), so identical input
-// always yields the identical result.
-// =============================================================================
 
 struct RotatorCandidate
 {
-    bool  valid = false;          // beat the rotator-off baseline
-    bool  helps = false;          // beat the baseline by >= kMinGainPoints
-    int   stages = 2;
+    // valid means an actual, safe rotator candidate was found.  A valid search
+    // can still have a baseline-only (valid == false, helps == false) result.
+    bool valid = false;
+    bool helps = false;
+    int stages = 2;
     float allpassFreqHz = 0.0f;
-    float allpassQ = 0.7f;
-    float matchPercent = 0.0f;    // absolute match of this candidate
-    float gainPoints = 0.0f;      // matchPercent - baseline
+    float allpassQ = 0.0f;
+    float matchPercent = 0.0f;
+    float gainPoints = 0.0f; // safety-adjusted gain over fixed baseline
     float confidence = 0.0f;
 };
 
 struct FixedTimingRotatorResult
 {
-    bool  valid = false;
-    float baselineMatchPercent = 0.0f;   // fixed delay/polarity, rotator OFF
+    bool valid = false; // valid fixed delay/polarity baseline
+    float baselineMatchPercent = 0.0f;
     float baselineConfidence = 0.0f;
-
-    RotatorCandidate best;                // best across every searched stage
-    std::vector<RotatorCandidate> perStage; // best per stage, in `stages` order
+    RotatorCandidate best;
+    std::vector<RotatorCandidate> perStage;
 };
 
+struct FixedTimingRotatorInput
+{
+    const float* bass = nullptr;
+    const float* kick = nullptr;
+    int numSamples = 0;
+    float energy = 1.0f;
+};
+
+// Worker-only F/Q search. Timing is an input, never an output.  Its defaults,
+// candidate validity rules, and safety penalty are shared with Static Analyze.
 class FixedTimingRotatorSearch
 {
 public:
-    // Minimum match-point gain over the rotator-off baseline for a rotator to be
-    // recorded as helping (mirrors PhaseFixEngine's own +3 pt rotator gate).
     static constexpr float kMinGainPoints = 3.0f;
 
-    static const std::vector<float>& defaultFrequencies()
-    {
-        // Low-end correction centres inside the valid allpass range [20, 500] Hz.
-        static const std::vector<float> f {
-            40.0f, 50.0f, 60.0f, 70.0f, 80.0f, 90.0f, 100.0f,
-            120.0f, 140.0f, 160.0f, 180.0f, 200.0f, 240.0f };
-        return f;
-    }
-
-    static const std::vector<float>& defaultQs()
-    {
-        // Sane Q spread; capped at 2.0 so the search cannot pick a pathological
-        // high-Q resonance (matches the Static analyzer's own preference).
-        static const std::vector<float> q { 0.5f, 0.7f, 1.0f, 1.5f, 2.0f };
-        return q;
-    }
-
-    static const std::vector<int>& defaultStages()
-    {
-        static const std::vector<int> s { 2, 3, 4 };
-        return s;
-    }
+    static const std::vector<float>& defaultFrequencies() { return AlignmentAnalyzer::rotatorFrequencies(); }
+    static const std::vector<float>& defaultQs() { return AlignmentAnalyzer::rotatorQs(); }
+    static const std::vector<int>& defaultStages() { return AlignmentAnalyzer::rotatorStages(); }
 
     static FixedTimingRotatorResult search (const float* bass,
                                             const float* kick,
@@ -91,100 +58,171 @@ public:
                                             InterpolationType interpolation,
                                             const std::vector<int>& stages = defaultStages(),
                                             const std::vector<float>& freqs = defaultFrequencies(),
-                                            const std::vector<float>& qs = defaultQs())
+                                            const std::vector<float>& qs = defaultQs(),
+                                            int forcedStages = 0)
     {
-        FixedTimingRotatorResult result;
-
-        if (bass == nullptr || kick == nullptr || numSamples <= 32
-            || ! (sampleRate > 0.0) || stages.empty() || freqs.empty() || qs.empty())
-            return result;
-
-        std::vector<float> bassScratch, kickScratch;
-
-        // Baseline: the FIXED Pass-A delay/polarity with the rotator OFF.
-        PhaseFixRenderSettings baseSettings;
-        baseSettings.bassPolarityInvert = fixedPolarityInvert;
-        baseSettings.bassDelayMs = fixedDelayMs;
-        baseSettings.phaseFilterEnabled = false;
-        baseSettings.delayInterpolation = interpolation;
-
-        const auto baseScore = PhaseFixEngine::scoreSettings (
-            bass, kick, numSamples, sampleRate, baseSettings,
-            PhaseFixEngine::absoluteManualMaxDelayMs, bassScratch, kickScratch);
-
-        if (! std::isfinite (baseScore.matchPercent))
-            return result;
-
-        result.valid = true;
-        result.baselineMatchPercent = baseScore.matchPercent;
-        result.baselineConfidence = baseScore.confidence;
-        result.perStage.reserve (stages.size());
-
-        for (int stageCount : stages)
-        {
-            RotatorCandidate bestForStage;
-            bestForStage.stages = stageCount;
-            bestForStage.matchPercent = baseScore.matchPercent;   // start at baseline
-            bestForStage.confidence = baseScore.confidence;
-            bestForStage.allpassFreqHz = freqs.front();           // safe in-range default
-            bestForStage.allpassQ = qs.front();
-
-            for (float freq : freqs)
-            {
-                for (float q : qs)
-                {
-                    PhaseFixRenderSettings settings;
-                    settings.bassPolarityInvert = fixedPolarityInvert; // FIXED
-                    settings.bassDelayMs = fixedDelayMs;               // FIXED
-                    settings.phaseFilterEnabled = true;
-                    settings.phaseFilterFreqHz = freq;
-                    settings.phaseFilterQ = q;
-                    settings.phaseFilterStages = stageCount;
-                    settings.delayInterpolation = interpolation;
-
-                    const auto candidate = PhaseFixEngine::scoreSettings (
-                        bass, kick, numSamples, sampleRate, settings,
-                        PhaseFixEngine::absoluteManualMaxDelayMs, bassScratch, kickScratch);
-
-                    if (! std::isfinite (candidate.matchPercent))
-                        continue;
-
-                    // Strictly-greater with a tie epsilon: grid order (lowest
-                    // freq, then lowest Q) wins ties -> deterministic.
-                    if (candidate.matchPercent > bestForStage.matchPercent + 1.0e-4f)
-                    {
-                        bestForStage.valid = true;
-                        bestForStage.allpassFreqHz = freq;
-                        bestForStage.allpassQ = q;
-                        bestForStage.matchPercent = candidate.matchPercent;
-                        bestForStage.confidence = candidate.confidence;
-                    }
-                }
-            }
-
-            bestForStage.gainPoints = bestForStage.matchPercent - baseScore.matchPercent;
-            bestForStage.helps = bestForStage.valid && bestForStage.gainPoints >= kMinGainPoints;
-            result.perStage.push_back (bestForStage);
-        }
-
-        // Overall best across stages: higher match wins, ties prefer the earlier
-        // (fewer-stage) entry so the choice stays deterministic and minimal.
-        result.best = result.perStage.front();
-        for (const auto& candidate : result.perStage)
-            if (candidate.matchPercent > result.best.matchPercent + 1.0e-4f)
-                result.best = candidate;
-
-        return result;
+        const FixedTimingRotatorInput input { bass, kick, numSamples, 1.0f };
+        return searchImpl ({ input }, sampleRate, fixedDelayMs, fixedPolarityInvert,
+                           interpolation, stages, freqs, qs, forcedStages, false);
     }
 
-    // Reads the best candidate for a specific stage count out of a completed
-    // search result. Falls back to the overall best if the stage was not searched
-    // (never happens with matching stage lists, but keeps the caller safe).
+    // One candidate is evaluated across every independent hit.  Filters are
+    // reset per hit, avoiding concatenation boundary artefacts. Scores are an
+    // energy-weighted mean and ties retain production grid order.
+    static FixedTimingRotatorResult searchCombined (const std::vector<FixedTimingRotatorInput>& inputs,
+                                                    double sampleRate,
+                                                    float fixedDelayMs,
+                                                    bool fixedPolarityInvert,
+                                                    InterpolationType interpolation,
+                                                    const std::vector<int>& stages = defaultStages(),
+                                                    const std::vector<float>& freqs = defaultFrequencies(),
+                                                    const std::vector<float>& qs = defaultQs(),
+                                                    int forcedStages = 0)
+    {
+        return searchImpl (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
+                           interpolation, stages, freqs, qs, forcedStages, true);
+    }
+
     static RotatorCandidate candidateForStage (const FixedTimingRotatorResult& result, int stageCount)
     {
         for (const auto& candidate : result.perStage)
             if (candidate.stages == stageCount)
                 return candidate;
-        return result.best;
+        return {};
+    }
+
+private:
+    struct Evaluated
+    {
+        bool valid = false;
+        float rawMatch = 0.0f;
+        float effectiveMatch = 0.0f;
+        float confidence = 0.0f;
+    };
+
+    static bool validStage (int stage) noexcept { return stage == 2 || stage == 3; }
+
+    static FixedTimingRotatorResult searchImpl (const std::vector<FixedTimingRotatorInput>& inputs,
+                                                double sampleRate,
+                                                float fixedDelayMs,
+                                                bool fixedPolarityInvert,
+                                                InterpolationType interpolation,
+                                                const std::vector<int>& requestedStages,
+                                                const std::vector<float>& freqs,
+                                                const std::vector<float>& qs,
+                                                int forcedStages,
+                                                bool combined)
+    {
+        FixedTimingRotatorResult result;
+        if (! (sampleRate > 0.0) || ! std::isfinite (sampleRate) || inputs.empty()
+            || freqs.empty() || qs.empty() || (forcedStages != 0 && ! validStage (forcedStages)))
+            return result;
+
+        std::vector<int> stages;
+        for (int stage : requestedStages)
+            if (validStage (stage) && (forcedStages == 0 || stage == forcedStages)
+                && std::find (stages.begin(), stages.end(), stage) == stages.end())
+                stages.push_back (stage);
+        if (stages.empty())
+            return result;
+
+        const auto baseline = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
+                                        interpolation, false, 0.0f, 0.0f, 2, combined);
+        if (! baseline.valid)
+            return result;
+
+        result.valid = true;
+        result.baselineMatchPercent = baseline.rawMatch;
+        result.baselineConfidence = baseline.confidence;
+        result.perStage.reserve (stages.size());
+
+        for (const int stage : stages)
+        {
+            RotatorCandidate best;
+            best.stages = stage;
+            for (const float freq : freqs)
+            {
+                if (! std::isfinite (freq) || freq < NoteMap::kAllpassFreqMinHz
+                    || freq > NoteMap::kAllpassFreqMaxHz || freq >= sampleRate * 0.5)
+                    continue;
+                for (const float q : qs)
+                {
+                    if (! std::isfinite (q) || q < NoteMap::kAllpassQMin || q > NoteMap::kAllpassQMax)
+                        continue;
+                    const auto candidate = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
+                                                     interpolation, true, freq, q, stage, combined);
+                    if (! candidate.valid)
+                        continue;
+                    const float gain = candidate.effectiveMatch - baseline.effectiveMatch;
+                    if (! best.valid || gain > best.gainPoints + 1.0e-4f)
+                    {
+                        best.valid = true;
+                        best.allpassFreqHz = freq;
+                        best.allpassQ = q;
+                        best.matchPercent = candidate.rawMatch;
+                        best.gainPoints = gain;
+                        best.confidence = candidate.confidence;
+                    }
+                }
+            }
+            best.helps = best.valid && best.gainPoints >= kMinGainPoints;
+            result.perStage.push_back (best);
+        }
+
+        result.best.stages = stages.front();
+        for (const auto& candidate : result.perStage)
+            if (candidate.valid && (! result.best.valid
+                || candidate.gainPoints > result.best.gainPoints + 1.0e-4f))
+                result.best = candidate;
+        result.best.helps = result.best.valid && result.best.gainPoints >= kMinGainPoints;
+        return result;
+    }
+
+    static Evaluated evaluate (const std::vector<FixedTimingRotatorInput>& inputs,
+                               double sampleRate, float delayMs, bool polarity,
+                               InterpolationType interpolation, bool useRotator,
+                               float freq, float q, int stages, bool)
+    {
+        double weights = 0.0, raw = 0.0, effective = 0.0, confidence = 0.0;
+        for (const auto& input : inputs)
+        {
+            if (input.bass == nullptr || input.kick == nullptr || input.numSamples <= 32)
+                return {};
+            PhaseFixRenderSettings settings;
+            settings.bassPolarityInvert = polarity;
+            settings.bassDelayMs = delayMs;
+            settings.phaseFilterEnabled = useRotator;
+            settings.phaseFilterFreqHz = freq;
+            settings.phaseFilterQ = q;
+            settings.phaseFilterStages = stages;
+            settings.delayInterpolation = interpolation;
+
+            std::vector<float> dry, wet, scratchBass, scratchKick;
+            PhaseFixRenderSettings base = settings;
+            base.phaseFilterEnabled = false;
+            PhaseFixEngine::renderCandidate (input.bass, input.numSamples, sampleRate, base, dry);
+            PhaseFixEngine::renderCandidate (input.bass, input.numSamples, sampleRate, settings, wet);
+            const auto score = PhaseFixEngine::scoreSettings (input.bass, input.kick, input.numSamples,
+                                                               sampleRate, settings,
+                                                               PhaseFixEngine::absoluteManualMaxDelayMs,
+                                                               scratchBass, scratchKick);
+            if (! std::isfinite (score.matchPercent) || ! std::isfinite (score.confidence)
+                || score.confidence <= 0.0f)
+                return {};
+            double penalty = 0.0;
+            if (useRotator)
+                penalty = AlignmentAnalyzer::rotatorSafetyPenalty (dry, wet, sampleRate, q, stages);
+            if (! std::isfinite (penalty))
+                return {};
+            const double weight = std::max (1.0e-6, (double) input.energy);
+            weights += weight;
+            raw += weight * score.matchPercent;
+            effective += weight * ((double) score.matchPercent - penalty * 100.0);
+            confidence += weight * score.confidence;
+        }
+        if (weights <= 0.0)
+            return {};
+        return { true, (float) (raw / weights), (float) (effective / weights),
+                 (float) (confidence / weights) };
     }
 };

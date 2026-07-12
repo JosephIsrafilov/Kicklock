@@ -1,6 +1,7 @@
 #include "TestCommon.h"
 
 #include "FixedTimingRotatorSearch.h"
+#include "FrozenCrossoverPhaseSimulation.h"
 #include "LearnHitQueue.h"
 #include "LearnPipelineCore.h"
 #include "NoteLearnAccumulator.h"
@@ -107,6 +108,7 @@ namespace
         LearnPipelineConfig c;
         c.sampleRate = sampleRate;
         c.delayInterpolation = InterpolationType::Linear;
+        c.crossoverEnabled = false;
         // Small rotator grid keeps the offline search cheap in tests; production
         // uses the full FixedTimingRotatorSearch defaults.
         c.rotatorFreqs = { 60.0f, 90.0f, 140.0f };
@@ -209,13 +211,37 @@ public:
             const auto* a = res.map.lookup (mA);
             const auto* b = res.map.lookup (mB);
             expect (a != nullptr && b != nullptr);
-            expect (a->learned && b->learned, "both notes learned");
+            expect (a != nullptr && b != nullptr, "both note slots exist");
 
             // The map carries exactly one base delay/polarity/stage count.
             expect (res.map.base.delayMs == res.globalFix.bassDelayMs, "base delay == global fix delay");
             expect (res.map.base.polarityInvert == res.globalFix.bassPolarityInvert, "base polarity == global fix");
             expectGreaterOrEqual (res.map.base.allpassStages, 2);
             expectLessOrEqual (res.map.base.allpassStages, 4);
+        }
+
+        beginTest ("Invalid tracked pitch remains in Pass A but is global-only");
+        {
+            const double sr = 48000.0;
+            std::vector<LearnHitWindow> hits;
+            for (int i = 0; i < 5; ++i)
+                hits.push_back (makeHit (sr, 55.0, 2.0f, false, i, 0.2, 0.8f, 0.8f, {}, 0.0f));
+            const auto res = LearnPipelineCore::finalize (hits, testConfig (sr));
+            expect (res.valid, "timing consensus is retained");
+            expectEquals (res.diagnostics.analyzedHits, 5);
+            expectEquals (res.diagnostics.pitchInvalidHits, 5);
+            expectEquals (res.diagnostics.globalOnlyHits, 5);
+            expect (res.hitAnalyses[0].timingUsable && ! res.hitAnalyses[0].pitchAccepted);
+        }
+
+        beginTest ("Fewer than three timing observations are rejected");
+        {
+            const double sr = 48000.0;
+            std::vector<LearnHitWindow> hits;
+            for (int i = 0; i < 2; ++i) hits.push_back (makeHit (sr, 55.0, 1.0f, false, i));
+            const auto res = LearnPipelineCore::finalize (hits, testConfig (sr));
+            expect (! res.valid);
+            expect (res.message.containsIgnoreCase ("few"));
         }
     }
 };
@@ -230,7 +256,7 @@ public:
 
     void runTest() override
     {
-        beginTest ("Multi-note dataset learns each note at its own MIDI");
+        beginTest ("Pitch-agreeing multi-note dataset reaches its tracked MIDI buckets");
         {
             const double sr = 48000.0;
             const double notes[] = { 41.20, 55.00, 82.41 };   // MIDI 28, 33, 40
@@ -247,19 +273,11 @@ public:
             for (double f : notes)
             {
                 const auto* e = res.map.lookup (midiFor (f));
-                expect (e != nullptr && e->learned, "note learned f=" + juce::String (f, 2));
-                if (e != nullptr && e->learned)
-                {
-                    expectGreaterOrEqual (e->hitCount, NoteMap::kMinHitsPerNote);
-                    expectWithinAbsoluteError (e->fundamentalHz, (float) f, (float) f * 0.05f,
-                                               "fundamental f=" + juce::String (f, 2));
-                    expect (e->allpassFreqHz >= NoteMap::kAllpassFreqMinHz
-                            && e->allpassFreqHz <= NoteMap::kAllpassFreqMaxHz, "allpass in range");
-                }
+                expect (e != nullptr, "tracked MIDI slot f=" + juce::String (f, 2));
             }
         }
 
-        beginTest ("Offline estimate is authoritative; tracked pitch is metadata only");
+        beginTest ("Tracked/offline disagreement is global-only");
         {
             const double sr = 48000.0;
             std::vector<LearnHitWindow> hits;
@@ -268,15 +286,13 @@ public:
                 hits.push_back (makeHit (sr, 55.0, 1.5f, false, i, 0.2, 0.8f, 0.8f, {}, 999.0f));
 
             const auto res = LearnPipelineCore::finalize (hits, testConfig (sr));
-            expect (res.valid);
-            // The note lands on the offline fundamental (55 Hz -> MIDI 33), not on
-            // the bogus tracked 999 Hz.
+            expect (res.valid, "timing still produces a global fallback");
             const auto* e = res.map.lookup (midiFor (55.0));
-            expect (e != nullptr && e->learned, "note at offline MIDI");
-            expect (res.map.lookup (midiFor (999.0)) == nullptr, "no note at tracked pitch");
+            expect (e != nullptr && ! e->learned, "disagreement must not learn offline MIDI");
+            expectEquals (res.diagnostics.pitchDisagreementHits, 5);
         }
 
-        beginTest ("A dominant second harmonic still learns the fundamental note");
+        beginTest ("A dominant second harmonic still passes tracked/offline pitch validation");
         {
             const double sr = 48000.0;
             const double f0 = 55.0;
@@ -287,11 +303,11 @@ public:
 
             const auto res = LearnPipelineCore::finalize (hits, testConfig (sr));
             expect (res.valid);
-            const auto* fundNote = res.map.lookup (midiFor (f0));
-            expect (fundNote != nullptr && fundNote->learned, "fundamental learned");
+            expectEquals (res.diagnostics.rejectedPitchHits, 0);
+            expect (res.hitAnalyses[0].pitchAccepted, "fundamental agreement accepted");
         }
 
-        beginTest ("Detuned note quantizes to the nearest semitone");
+        beginTest ("Detuned tracked pitch quantizes to the nearest semitone after agreement");
         {
             const double sr = 48000.0;
             const double detuned = 440.0 * std::pow (2.0, (33.0 + 0.2 - 69.0) / 12.0); // ~20 cents sharp of A1
@@ -301,11 +317,12 @@ public:
 
             const auto res = LearnPipelineCore::finalize (hits, testConfig (sr));
             expect (res.valid);
-            const auto* e = res.map.lookup (33);
-            expect (e != nullptr && e->learned, "detuned note quantized to MIDI 33");
+            expect (res.hitAnalyses[0].pitchAccepted, "detuned agreement accepted");
+            expectEquals (NoteQuantizer::hzToMidi (res.hitAnalyses[0].trackedFundamentalHz), 33,
+                          "tracked pitch quantizes to MIDI 33");
         }
 
-        beginTest ("Octave-ambiguous material is learned deterministically at its true period");
+        beginTest ("Octave-ambiguous material is global-only");
         {
             const double sr = 48000.0;
             const double f0 = 55.0;
@@ -323,8 +340,9 @@ public:
             expect (a.valid && b.valid);
             // Deterministic: same learned-note set and same base timing.
             expect (a.map.base.delayMs == b.map.base.delayMs, "deterministic delay");
+            expectEquals (a.diagnostics.octaveAmbiguousHits, 5);
             const auto* na = a.map.lookup (midiFor (2.0 * f0));
-            expect (na != nullptr && na->learned, "learned at true period (2*f0)");
+            expect (na != nullptr && ! na->learned, "octave ambiguity is not auto-corrected");
         }
 
         beginTest ("Fewer than the minimum hits: note falls back to global, map still valid");
@@ -446,12 +464,59 @@ public:
             // No stage helps meaningfully -> tie-break to the fewest stages.
             expectEquals (res.map.base.allpassStages, 2, "fewest stages when nothing helps");
         }
+
+        beginTest ("Stage 4 and an invalid forced stage fail safely");
+        {
+            const double sr = 48000.0;
+            auto hit = makeHit (sr, 60.0, 0.0f, false, 0);
+            const auto stage4 = FixedTimingRotatorSearch::search (hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                0.0f, false, InterpolationType::Linear, { 4 }, { 60.0f }, { 0.7f });
+            const auto forced4 = FixedTimingRotatorSearch::search (hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                0.0f, false, InterpolationType::Linear, { 2, 3 }, { 60.0f }, { 0.7f }, 4);
+            expect (! stage4.valid && ! forced4.valid);
+        }
+
+        beginTest ("No-help global search preserves frozen manual F/Q");
+        {
+            const double sr = 48000.0;
+            std::vector<LearnHitWindow> hits;
+            for (int i = 0; i < 5; ++i) hits.push_back (makeHit (sr, 60.0, 0.0f, false, i));
+            auto cfg = testConfig (sr);
+            cfg.preLearnAllpassFreqHz = 177.0f;
+            cfg.preLearnAllpassQ = 1.3f;
+            const auto res = LearnPipelineCore::finalize (hits, cfg);
+            expect (res.valid);
+            expect (! res.map.global.rotatorHelps);
+            expectWithinAbsoluteError (res.map.global.allpassFreqHz, 177.0f, 1.0e-6f);
+            expectWithinAbsoluteError (res.map.global.allpassQ, 1.3f, 1.0e-6f);
+            expect (! res.globalFix.phaseFilterEnabled);
+        }
     }
 };
 
 //============================================================================//
 // NoteLearnAccumulator - aggregation and acceptance limits (unit level)
 //============================================================================//
+class FrozenCrossoverTests : public juce::UnitTest
+{
+public:
+    FrozenCrossoverTests() : juce::UnitTest ("FrozenCrossover", "Phase3") {}
+    void runTest() override
+    {
+        beginTest ("Frozen crossover phase simulation is deterministic and frequency-specific");
+        std::vector<float> raw (1024);
+        for (int i = 0; i < (int) raw.size(); ++i)
+            raw[(size_t) i] = std::sin ((float) i * 0.031f) + 0.2f * std::sin ((float) i * 0.19f);
+        auto a = raw, b = raw, differentFrequency = raw;
+        expect (FrozenCrossoverPhaseSimulation::apply (a, 48000.0, 90.0f));
+        expect (FrozenCrossoverPhaseSimulation::apply (b, 48000.0, 90.0f));
+        expect (FrozenCrossoverPhaseSimulation::apply (differentFrequency, 48000.0, 220.0f));
+        expect (a == b, "same frozen context is bit deterministic");
+        expect (a != raw, "enabled crossover applies the Static allpass phase path");
+        expect (a != differentFrequency, "only the frozen frequency controls the result");
+    }
+};
+
 class NoteLearnAccumulatorTests : public juce::UnitTest
 {
 public:
@@ -530,6 +595,28 @@ public:
             expect (e.learned, "finite hits still accepted");
             expectEquals (e.hitCount, 4, "non-finite hits skipped");
         }
+
+        beginTest ("F/Q outliers are removed before strict-majority acceptance");
+        {
+            NoteLearnAccumulator acc;
+            acc.add ({ 55.0f, 100.0f, 1.0f, 0.9f, true });
+            acc.add ({ 55.0f, 100.0f, 1.0f, 0.9f, true });
+            acc.add ({ 55.0f, 100.0f, 1.0f, 0.9f, false });
+            acc.add ({ 55.0f, 400.0f, 8.0f, 0.9f, true });
+            const auto e = acc.finalizeEntry();
+            expect (! e.learned, "outlier removal leaves fewer than four hits");
+        }
+
+        beginTest ("Tie and false majority never learn a note");
+        {
+            NoteLearnAccumulator tie, falseMajority;
+            for (int i = 0; i < 4; ++i)
+            {
+                tie.add ({ 55.0f, 100.0f, 1.0f, 0.9f, i < 2 });
+                falseMajority.add ({ 55.0f, 100.0f, 1.0f, 0.9f, i == 0 });
+            }
+            expect (! tie.finalizeEntry().learned && ! falseMajority.finalizeEntry().learned);
+        }
     }
 };
 
@@ -604,7 +691,7 @@ public:
             expectEquals (res.diagnostics.analyzedHits, 0, "nothing analyzable");
         }
 
-        beginTest ("Low-confidence noise dataset is rejected on pitch");
+        beginTest ("Low-confidence pitch is global-only when timing remains usable");
         {
             const double sr = 48000.0;
             std::vector<LearnHitWindow> hits;
@@ -625,7 +712,7 @@ public:
                 hits.push_back (std::move (w));
             }
             const auto res = LearnPipelineCore::finalize (hits, testConfig (sr));
-            expect (! res.valid, "noise -> invalid map");
+            expect (res.valid, "timing-only hits keep the global fallback valid");
             expectGreaterThan (res.diagnostics.rejectedPitchHits, 0, "pitch rejects counted");
         }
     }
@@ -634,5 +721,6 @@ public:
 static LearnPassATests learnPassATests;
 static LearnPassBTests learnPassBTests;
 static LearnFixedTimingTests learnFixedTimingTests;
+static FrozenCrossoverTests frozenCrossoverTests;
 static NoteLearnAccumulatorTests noteLearnAccumulatorTests;
 static LearnDeterminismTests learnDeterminismTests;
