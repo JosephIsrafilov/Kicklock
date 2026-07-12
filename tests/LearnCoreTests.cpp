@@ -117,6 +117,26 @@ namespace
         return c;
     }
 
+    // The kick is an exact production allpass rendering of the bass.  This
+    // gives the fixed-timing search a known positive target instead of relying
+    // on an accidental phase relationship in the generic hit fixture.
+    LearnHitWindow makeKnownRotatorHit (double sampleRate, double bassHz,
+                                        float allpassHz, float q, int stages,
+                                        int sequence)
+    {
+        auto hit = makeHit (sampleRate, bassHz, 0.0f, false, sequence);
+        hit.kick = hit.bass;
+        PhaseFixRenderSettings settings;
+        settings.phaseFilterEnabled = true;
+        settings.phaseFilterFreqHz = allpassHz;
+        settings.phaseFilterQ = q;
+        settings.phaseFilterStages = stages;
+        settings.delayInterpolation = InterpolationType::Linear;
+        PhaseFixEngine::renderCandidate (hit.bass.data(), (int) hit.bass.size(),
+                                         sampleRate, settings, hit.kick);
+        return hit;
+    }
+
     int midiFor (double hz) { return NoteQuantizer::hzToMidi ((float) hz); }
 }
 
@@ -375,6 +395,7 @@ public:
             const auto* unlearned = res.map.lookup (20);
             expect (unlearned != nullptr && ! unlearned->learned, "unlearned note present, uses global at runtime");
         }
+
     }
 };
 
@@ -490,6 +511,33 @@ public:
             expectWithinAbsoluteError (res.map.global.allpassFreqHz, 177.0f, 1.0e-6f);
             expectWithinAbsoluteError (res.map.global.allpassQ, 1.3f, 1.0e-6f);
             expect (! res.globalFix.phaseFilterEnabled);
+        }
+
+        beginTest ("Known production-grid allpass produces a helping fixed-timing candidate");
+        {
+            const double sr = 48000.0;
+            const auto hit = makeKnownRotatorHit (sr, 55.0, 90.0f, 0.7f, 2, 0);
+            const auto result = FixedTimingRotatorSearch::search (
+                hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                0.0f, false, InterpolationType::Linear, { 2, 3 },
+                { 60.0f, 90.0f, 140.0f }, { 0.7f, 1.5f });
+            const auto candidate = FixedTimingRotatorSearch::candidateForStage (result, 2);
+            expect (result.valid && candidate.valid && candidate.helps);
+            expectGreaterOrEqual (candidate.gainPoints, FixedTimingRotatorSearch::kMinGainPoints);
+            expectWithinAbsoluteError (candidate.allpassFreqHz, 90.0f, 0.1f);
+            expectWithinAbsoluteError (candidate.allpassQ, 0.7f, 0.01f);
+        }
+
+        beginTest ("Forced stages constrain the positive search to stage 2 or 3");
+        {
+            const double sr = 48000.0;
+            const auto hit = makeKnownRotatorHit (sr, 55.0, 90.0f, 0.7f, 2, 0);
+            const auto two = FixedTimingRotatorSearch::search (hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                0.0f, false, InterpolationType::Linear, { 2, 3 }, { 90.0f }, { 0.7f }, 2);
+            const auto three = FixedTimingRotatorSearch::search (hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                0.0f, false, InterpolationType::Linear, { 2, 3 }, { 90.0f }, { 0.7f }, 3);
+            expect (two.valid && two.perStage.size() == 1 && two.perStage[0].stages == 2);
+            expect (three.valid && three.perStage.size() == 1 && three.perStage[0].stages == 3);
         }
     }
 };

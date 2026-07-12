@@ -32,8 +32,6 @@ struct LearnPipelineConfig
     // are never read from a live processor parameter.
     float preLearnAllpassFreqHz = 200.0f;
     float preLearnAllpassQ = 0.7f;
-    int preLearnStages = 2;
-
     std::vector<float> rotatorFreqs;
     std::vector<float> rotatorQs;
     std::vector<int> rotatorStages;
@@ -193,7 +191,6 @@ public:
                                       consensus.consensusConfidence);
 
         std::array<NoteLearnAccumulator, (size_t) NotePhaseMapSnapshot::size> buckets;
-        std::vector<bool> retainedByNote (hits.size(), false);
         for (const int index : dominantHits)
         {
             auto& hit = hits[(size_t) index];
@@ -213,7 +210,6 @@ public:
             {
                 buckets[(size_t) note].add ({ hit.analysis.trackedFundamentalHz, candidate.allpassFreqHz,
                     candidate.allpassQ, std::min (hit.analysis.offlinePitchConfidence, candidate.confidence), candidate.helps });
-                retainedByNote[(size_t) index] = true;
             }
         }
 
