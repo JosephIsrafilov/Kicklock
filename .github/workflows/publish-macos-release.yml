@@ -1,0 +1,66 @@
+name: Publish macOS Release Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Git tag to build and publish
+        required: true
+        default: v0.2.0
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Configure universal Release build
+        run: >
+          cmake -B build-release -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DKICKLOCK_ENABLE_PLUGINVAL=ON
+
+      - name: Build VST3 and AU
+        run: cmake --build build-release --config Release --parallel 4
+
+      - name: Validate Release build
+        run: ctest --test-dir build-release -C Release --output-on-failure
+
+      - name: Package macOS plugins
+        run: |
+          vst3="build-release/KickLock_artefacts/Release/VST3/KickLock.vst3"
+          au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
+          test -d "$vst3"
+          test -d "$au"
+          ditto -c -k --sequesterRsrc --keepParent "$vst3" "KickLock-${TAG}-macos-universal-vst3.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$au" "KickLock-${TAG}-macos-universal-au.zip"
+
+      - name: Upload release assets
+        run: |
+          gh release upload "$TAG" \
+            "KickLock-${TAG}-macos-universal-vst3.zip" \
+            "KickLock-${TAG}-macos-universal-au.zip" \
+            --clobber
+
+      - name: Update release notes
+        run: |
+          gh release edit "$TAG" --notes "## Highlights
+          - Static and Dynamic correction workflows, including per-note trusted Freq/Q learning with global Delay and Polarity.
+          - Persistent Dynamic note maps, explicit Apply Learn flow, and project-state compatibility.
+          - Runtime, worker lifecycle, spectrum, and release-validation hardening.
+
+          ## Assets
+          - Windows x64 VST3.
+          - macOS universal VST3 and AU. These macOS binaries are unsigned and not notarized.
+
+          ## Validation
+          - Release test suite and pluginval strictness 10 passed."
