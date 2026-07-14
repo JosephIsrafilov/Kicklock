@@ -3,6 +3,18 @@
 #include "../util/SpectrumAnalysis.h"
 #include "ScopeVisuals.h"
 
+class SpectrumAnalyzer::SpectrumWorker final : public juce::Thread
+{
+public:
+    explicit SpectrumWorker (SpectrumAnalyzer& analyzer)
+        : juce::Thread ("KickLock Spectrum"), owner (analyzer) {}
+
+    void run() override { owner.runSpectrumWorker(); }
+
+private:
+    SpectrumAnalyzer& owner;
+};
+
 SpectrumAnalyzer::SpectrumAnalyzer(SpectrumFifo& fifoToUse)
     : spectrumFifo (fifoToUse)
 {
@@ -18,9 +30,9 @@ SpectrumAnalyzer::SpectrumAnalyzer(SpectrumFifo& fifoToUse)
     
     speedComboBox.onChange = [this] {
         switch (speedComboBox.getSelectedId()) {
-            case 1: smoothingFactor = 0.15f; break; // Slow
-            case 2: smoothingFactor = 0.4f;  break; // Medium
-            case 3: smoothingFactor = 0.8f;  break; // Fast
+            case 1: smoothingFactor.store (0.15f, std::memory_order_release); break; // Slow
+            case 2: smoothingFactor.store (0.4f, std::memory_order_release);  break; // Medium
+            case 3: smoothingFactor.store (0.8f, std::memory_order_release);  break; // Fast
         }
     };
     
@@ -31,17 +43,30 @@ SpectrumAnalyzer::SpectrumAnalyzer(SpectrumFifo& fifoToUse)
     speedComboBox.setJustificationType(juce::Justification::centred);
     
     addAndMakeVisible(speedComboBox);
+    spectrumWorker = std::make_unique<SpectrumWorker> (*this);
+    spectrumWorker->startThread();
 }
 
 SpectrumAnalyzer::~SpectrumAnalyzer()
 {
     stopTimer();
+    if (spectrumWorker != nullptr)
+    {
+        spectrumWorkerStopping.store (true, std::memory_order_release);
+        spectrumWorker->signalThreadShouldExit();
+        spectrumWorker->notify();
+        const bool stopped = spectrumWorker->waitForThreadToExit (cooperativeTeardownBoundMs);
+        if (! stopped)
+            spectrumWorker->waitForThreadToExit (-1);
+        spectrumWorker.reset();
+    }
 }
 
 void SpectrumAnalyzer::setSampleRate (double newSampleRate)
 {
     sampleRate = newSampleRate;
     rebuildBinCache();
+    rebuildSpectrumPaths();
 }
 
 void SpectrumAnalyzer::setColours (juce::Colour mainCol, juce::Colour sideCol)
@@ -53,34 +78,76 @@ void SpectrumAnalyzer::setColours (juce::Colour mainCol, juce::Colour sideCol)
 
 void SpectrumAnalyzer::timerCallback()
 {
+    const auto published = publishedSpectrumSequence.load (std::memory_order_acquire);
+    if (published == consumedSpectrumSequence)
+        return;
+
+    {
+        const std::lock_guard<std::mutex> lock (spectrumSnapshotMutex);
+        const auto latest = publishedSpectrumSequence.load (std::memory_order_relaxed);
+        if (latest == consumedSpectrumSequence)
+            return;
+        spectrumMain = publishedSpectrumMain;
+        spectrumSide = publishedSpectrumSide;
+        consumedSpectrumSequence = latest;
+    }
+    rebuildSpectrumPaths();
+    repaint();
+}
+
+void SpectrumAnalyzer::runSpectrumWorker()
+{
     std::array<float, 8192> mainLBuf {};
     std::array<float, 8192> mainRBuf {};
     std::array<float, 8192> sideLBuf {};
     std::array<float, 8192> sideRBuf {};
     
-    const int mainChannels = juce::jlimit (0, 2, spectrumFifo.getMainChannels());
-    const int sideChannels = juce::jlimit (0, 2, spectrumFifo.getSideChannels());
-    const int numRead = spectrumFifo.readAvailable (mainLBuf.data(), mainRBuf.data(),
-                                                    sideLBuf.data(), sideRBuf.data(), 8192);
-    if (numRead > 0)
+    uint64_t observedGeneration = spectrumFifo.getGeneration();
+    while (! spectrumWorkerStopping.load (std::memory_order_acquire))
     {
+        const auto generation = spectrumFifo.getGeneration();
+        if (generation != observedGeneration)
+        {
+            observedGeneration = generation;
+            mainLHistory.fill (0.0f);
+            mainRHistory.fill (0.0f);
+            sideLHistory.fill (0.0f);
+            sideRHistory.fill (0.0f);
+            writeIndex = 0;
+        }
+
+        const int mainChannels = juce::jlimit (0, 2, spectrumFifo.getMainChannels());
+        const int sideChannels = juce::jlimit (0, 2, spectrumFifo.getSideChannels());
+        const int numRead = spectrumFifo.readLatest (mainLBuf.data(), mainRBuf.data(),
+                                                      sideLBuf.data(), sideRBuf.data(), 8192);
+        if (numRead <= 0)
+        {
+            juce::Thread::sleep (5);
+            continue;
+        }
+
         for (int i = 0; i < numRead; ++i)
         {
+            if ((i & 255) == 0 && spectrumWorkerStopping.load (std::memory_order_acquire))
+                return;
             mainLHistory[(size_t) writeIndex] = mainLBuf[(size_t) i];
             mainRHistory[(size_t) writeIndex] = mainChannels > 1 ? mainRBuf[(size_t) i] : mainLBuf[(size_t) i];
             sideLHistory[(size_t) writeIndex] = sideLBuf[(size_t) i];
             sideRHistory[(size_t) writeIndex] = sideChannels > 1 ? sideRBuf[(size_t) i] : sideLBuf[(size_t) i];
             writeIndex = (writeIndex + 1) % historyLength;
         }
-        calculateSpectrum();
-        repaint();
+        if (! calculateSpectrum())
+            return;
+        publishSpectrumSnapshot();
     }
 }
 
-void SpectrumAnalyzer::calculateSpectrum()
+bool SpectrumAnalyzer::calculateSpectrum()
 {
     for (int i = 0; i < historyLength; ++i)
     {
+        if ((i & 255) == 0 && spectrumWorkerStopping.load (std::memory_order_acquire))
+            return false;
         int readIdx = (writeIndex + i) % historyLength;
         fftScratchMainL[(size_t) i] = mainLHistory[(size_t) readIdx];
         fftScratchMainR[(size_t) i] = mainRHistory[(size_t) readIdx];
@@ -89,9 +156,20 @@ void SpectrumAnalyzer::calculateSpectrum()
     }
 
     SpectrumAnalysis::calculatePowerSpectrumDb (fftScratchMainL.data(), fftScratchMainR.data(),
-                                                fftWindow, spectrumMain.data(), smoothingFactor);
+                                                fftWindow, workerSpectrumMain.data(), smoothingFactor.load (std::memory_order_acquire));
+    if (spectrumWorkerStopping.load (std::memory_order_acquire))
+        return false;
     SpectrumAnalysis::calculatePowerSpectrumDb (fftScratchSideL.data(), fftScratchSideR.data(),
-                                                fftWindow, spectrumSide.data(), smoothingFactor);
+                                                fftWindow, workerSpectrumSide.data(), smoothingFactor.load (std::memory_order_acquire));
+    return ! spectrumWorkerStopping.load (std::memory_order_acquire);
+}
+
+void SpectrumAnalyzer::publishSpectrumSnapshot()
+{
+    const std::lock_guard<std::mutex> lock (spectrumSnapshotMutex);
+    publishedSpectrumMain = workerSpectrumMain;
+    publishedSpectrumSide = workerSpectrumSide;
+    publishedSpectrumSequence.fetch_add (1, std::memory_order_release);
 }
 
 void SpectrumAnalyzer::paint (juce::Graphics& g)
@@ -152,77 +230,18 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
         g.drawHorizontalLine ((int) std::round (y), plotBounds.getX(), plotBounds.getRight());
     }
 
-    // Draw the spectrum curves
+    // Draw paths prepared when the latest worker snapshot arrived.
     {
         juce::Graphics::ScopedSaveState state (g);
         g.reduceClipRegion (plotBounds.toNearestInt());
-        
-        auto drawSpectrumCurve = [&](const std::array<float, historyLength>& spectrumData, juce::Colour colour) {
-            juce::Path path;
-            bool first = true;
-            
-            const int maxBin = historyLength / 2;
-
-            for (const auto& cacheItem : binCache)
-            {
-                float x = cacheItem.x;
-                float binStart = cacheItem.binStart;
-                float binEnd = cacheItem.binEnd;
-                
-                float db = minDb;
-                
-                if (binEnd - binStart < 1.0f)
-                {
-                    float binCenter = (binStart + binEnd) * 0.5f;
-                    int idx1 = juce::jlimit (0, maxBin, (int) std::floor (binCenter));
-                    int idx2 = juce::jlimit (0, maxBin, idx1 + 1);
-                    float frac = binCenter - (float)idx1;
-                    
-                    float db1 = spectrumData[(size_t)idx1];
-                    float db2 = spectrumData[(size_t)idx2];
-                    
-                    // Cosine interpolation for smoother rounded peaks in the low-end
-                    float mu2 = (1.0f - std::cos (frac * juce::MathConstants<float>::pi)) / 2.0f;
-                    db = db1 * (1.0f - mu2) + db2 * mu2;
-                }
-                else
-                {
-                    int startIdx = juce::jlimit (0, maxBin, (int) std::floor (binStart));
-                    int endIdx   = juce::jlimit (0, maxBin, (int) std::ceil (binEnd));
-                    for (int i = startIdx; i <= endIdx; ++i)
-                    {
-                        if (spectrumData[(size_t)i] > db)
-                            db = spectrumData[(size_t)i];
-                    }
-                }
-                
-                float y = plotBounds.getBottom() - (juce::jlimit (minDb, maxDb, db) - minDb) / (maxDb - minDb) * plotBounds.getHeight();
-                
-                if (first)
-                {
-                    path.startNewSubPath (x, y);
-                    first = false;
-                }
-                else
-                {
-                    path.lineTo (x, y);
-                }
-            }
-            
-            juce::Path filledPath = path;
-            filledPath.lineTo (plotBounds.getRight(), plotBounds.getBottom());
-            filledPath.lineTo (plotBounds.getX(), plotBounds.getBottom());
-            filledPath.closeSubPath();
-            
-            g.setColour (colour.withAlpha (0.15f)); // Soft translucency
-            g.fillPath (filledPath);
-            
-            g.setColour (colour.withAlpha (0.85f));
-            g.strokePath (path, juce::PathStrokeType (1.5f, juce::PathStrokeType::mitered));
-        };
-
-        drawSpectrumCurve (spectrumSide, kickColour);
-        drawSpectrumCurve (spectrumMain, bassColour);
+        g.setColour (kickColour.withAlpha (0.15f));
+        g.fillPath (spectrumSideFillPath);
+        g.setColour (kickColour.withAlpha (0.85f));
+        g.strokePath (spectrumSidePath, juce::PathStrokeType (1.5f, juce::PathStrokeType::mitered));
+        g.setColour (bassColour.withAlpha (0.15f));
+        g.fillPath (spectrumMainFillPath);
+        g.setColour (bassColour.withAlpha (0.85f));
+        g.strokePath (spectrumMainPath, juce::PathStrokeType (1.5f, juce::PathStrokeType::mitered));
     }
     
     // Draw Grid text labels (OVER the curves so they are readable)
@@ -293,6 +312,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
 void SpectrumAnalyzer::resized()
 {
     rebuildBinCache();
+    rebuildSpectrumPaths();
     
     auto panelBounds = getLocalBounds().reduced (8, 8);
     auto plotBounds = panelBounds.reduced (12, 10);
@@ -336,6 +356,66 @@ void SpectrumAnalyzer::rebuildBinCache()
     lastCacheSampleRate = sampleRate;
     lastCacheWidth = plotBounds.getWidth();
     lastCacheX = plotBounds.getX();
+}
+
+void SpectrumAnalyzer::rebuildSpectrumPaths()
+{
+    spectrumMainPath.clear();
+    spectrumSidePath.clear();
+    spectrumMainFillPath.clear();
+    spectrumSideFillPath.clear();
+    if (binCache.empty())
+        return;
+
+    auto panelBounds = getLocalBounds().toFloat().reduced (8.0f, 8.0f);
+    auto plotBounds = panelBounds.reduced (12.0f, 10.0f);
+    plotBounds.removeFromTop (12.0f);
+    plotBounds.removeFromBottom (20.0f);
+    plotBounds.removeFromTop (16.0f);
+    if (plotBounds.getWidth() <= 0.0f || plotBounds.getHeight() <= 0.0f)
+        return;
+
+    auto build = [&] (const std::array<float, historyLength>& spectrumData,
+                      juce::Path& line, juce::Path& fill)
+    {
+        line.preallocateSpace ((int) binCache.size() * 3);
+        bool first = true;
+        const int maxBin = historyLength / 2;
+        for (const auto& cacheItem : binCache)
+        {
+            float db = SpectrumAnalysis::minimumDb;
+            if (cacheItem.binEnd - cacheItem.binStart < 1.0f)
+            {
+                const float centre = (cacheItem.binStart + cacheItem.binEnd) * 0.5f;
+                const int firstBin = juce::jlimit (0, maxBin, (int) std::floor (centre));
+                const int secondBin = juce::jlimit (0, maxBin, firstBin + 1);
+                const float mu = (1.0f - std::cos ((centre - (float) firstBin) * juce::MathConstants<float>::pi)) * 0.5f;
+                db = spectrumData[(size_t) firstBin] * (1.0f - mu) + spectrumData[(size_t) secondBin] * mu;
+            }
+            else
+            {
+                const int firstBin = juce::jlimit (0, maxBin, (int) std::floor (cacheItem.binStart));
+                const int lastBin = juce::jlimit (0, maxBin, (int) std::ceil (cacheItem.binEnd));
+                for (int bin = firstBin; bin <= lastBin; ++bin)
+                    db = std::max (db, spectrumData[(size_t) bin]);
+            }
+
+            const float y = plotBounds.getBottom()
+                - (juce::jlimit (-108.0f, 0.0f, db) + 108.0f) / 108.0f * plotBounds.getHeight();
+            if (first) { line.startNewSubPath (cacheItem.x, y); first = false; }
+            else line.lineTo (cacheItem.x, y);
+        }
+        if (! first)
+        {
+            fill = line;
+            fill.lineTo (plotBounds.getRight(), plotBounds.getBottom());
+            fill.lineTo (plotBounds.getX(), plotBounds.getBottom());
+            fill.closeSubPath();
+        }
+    };
+
+    build (spectrumSide, spectrumSidePath, spectrumSideFillPath);
+    build (spectrumMain, spectrumMainPath, spectrumMainFillPath);
 }
 
 void SpectrumAnalyzer::mouseMove (const juce::MouseEvent& e)

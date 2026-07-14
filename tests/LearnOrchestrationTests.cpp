@@ -1,4 +1,5 @@
 #include "TestCommon.h"
+#include "ui/SpectrumAnalyzer.h"
 
 namespace
 {
@@ -68,11 +69,17 @@ namespace
 
     void processEmptyBlock (KickLockAudioProcessor& p)
     {
-        juce::AudioBuffer<float> buffer (juce::jmax (p.getTotalNumInputChannels(),
-                                                     p.getTotalNumOutputChannels()), 128);
-        buffer.clear();
-        juce::MidiBuffer midi;
-        p.processBlock (buffer, midi);
+        for (int attempt = 0; attempt < 20; ++attempt)
+        {
+            juce::AudioBuffer<float> buffer (juce::jmax (p.getTotalNumInputChannels(),
+                                                         p.getTotalNumOutputChannels()), 128);
+            buffer.clear();
+            juce::MidiBuffer midi;
+            p.processBlock (buffer, midi);
+            if (p.getLearnState() != LearnState::Preparing)
+                return;
+            juce::Thread::sleep (1);
+        }
     }
 
     void feedLearnHits (KickLockAudioProcessor& p, bool bypassed)
@@ -166,6 +173,46 @@ namespace
             juce::Thread::sleep (5);
         }
         return flag.load (std::memory_order_acquire);
+    }
+
+    void feedProcessorMaterial (KickLockAudioProcessor& p,
+                                double sampleRate,
+                                int totalSamples,
+                                int hitSpacing,
+                                bool bypassed = false)
+    {
+        constexpr int block = 512;
+        for (int offset = 0; offset < totalSamples; offset += block)
+        {
+            const int n = std::min (block, totalSamples - offset);
+            juce::AudioBuffer<float> buffer (juce::jmax (p.getTotalNumInputChannels(),
+                                                         p.getTotalNumOutputChannels()), n);
+            buffer.clear();
+            for (int i = 0; i < n; ++i)
+            {
+                const int local = (offset + i) % hitSpacing;
+                const double t = (double) local / sampleRate;
+                const float envelope = (float) std::exp (-t * 24.0);
+                const float tone = envelope * (float) (0.82 * std::sin (kTwoPi * 60.0 * t)
+                                                        + 0.18 * std::sin (kTwoPi * 120.0 * t));
+                buffer.setSample (0, i, tone);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, tone);
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, tone);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, tone);
+            }
+            juce::MidiBuffer midi;
+            if (bypassed) p.processBlockBypassed (buffer, midi);
+            else p.processBlock (buffer, midi);
+        }
+    }
+
+    template <typename Action>
+    int elapsedMilliseconds (Action&& action)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        action();
+        return (int) std::chrono::duration_cast<std::chrono::milliseconds> (
+            std::chrono::steady_clock::now() - start).count();
     }
 }
 
@@ -282,6 +329,8 @@ public:
             p.setRateAndBufferSizeDetails (kSampleRate, 128);
             p.prepareToPlay (kSampleRate, 128);
             expect (p.beginLearn());
+            processEmptyBlock (p);
+            expect (waitForState (p, LearnState::Capturing));
             feedLearnHits (p, false);
             expectGreaterOrEqual (p.getLearnAcceptedHits(), 3);
             expect (p.stopLearn());
@@ -300,6 +349,8 @@ public:
             p.setRateAndBufferSizeDetails (kSampleRate, 128);
             p.prepareToPlay (kSampleRate, 128);
             expect (p.beginLearn());
+            processEmptyBlock (p);
+            expect (waitForState (p, LearnState::Capturing));
             feedLearnHits (p, true);
             expectGreaterOrEqual (p.getLearnAcceptedHits(), 3);
             p.cancelLearn();
@@ -384,6 +435,10 @@ public:
             note.fundamentalHz = 55.0f;
             note.allpassFreqHz = 110.0f;
             note.allpassQ = 1.0f;
+            note.delayMs = result.map.base.delayMs;
+            note.polarityInvert = result.map.base.polarityInvert;
+            note.timingConfidence = 0.8f;
+            note.timingSpreadMs = 0.03f;
             note.confidence = 0.8f;
             note.fundamentalSpreadRatio = 0.03f;
             note.hitCount = NoteMap::kMinHitsPerNote;
@@ -408,6 +463,10 @@ public:
                 note.fundamentalHz = 55.0f;
                 note.allpassFreqHz = 110.0f;
                 note.allpassQ = 1.0f;
+                note.delayMs = result.map.base.delayMs;
+                note.polarityInvert = result.map.base.polarityInvert;
+                note.timingConfidence = 0.8f;
+                note.timingSpreadMs = 0.03f;
                 note.confidence = 0.8f;
                 note.fundamentalSpreadRatio = 0.03f;
                 note.hitCount = NoteMap::kMinHitsPerNote;
@@ -461,9 +520,9 @@ public:
 
         beginTest ("Resolved Learn states reset completely after restore, Clear, Revert, and Discard");
         {
-            KickLockAudioProcessor validSource;
+            auto validSource = std::make_unique<KickLockAudioProcessor>();
             juce::MemoryBlock validState;
-            validSource.getStateInformation (validState);
+            validSource->getStateInformation (validState);
             const auto oldState = makeOldStateWithoutMap();
             const std::array<unsigned char, 4> corruptBytes { 0xde, 0xad, 0xbe, 0xef };
 
@@ -666,7 +725,8 @@ public:
             expect (stopping.beginLearn());
             processEmptyBlock (stopping);
             expect (stopping.stopLearn());
-            expectEquals ((int) stopping.getLearnState(), (int) LearnState::Stopping);
+            expect (stopping.getLearnState() == LearnState::Stopping
+                    || stopping.getLearnState() == LearnState::Draining);
             const auto stoppingCancel = elapsedMs ([&] { stopping.cancelLearn(); });
             stopping.setLearnWorkerPauseStateForTesting (LearnState::Idle);
             expectLessThan ((int) stoppingCancel, 500);
@@ -706,8 +766,15 @@ public:
                         + " reprepare=" + juce::String ((int) prepareDuration));
         }
 
-        beginTest ("Timed Learn-worker waits fall back safely on non-audio lifecycle paths");
+        beginTest ("Lifecycle commands return without waiting for a paused worker");
         {
+            auto elapsedMs = [] (auto&& action)
+            {
+                const auto start = std::chrono::steady_clock::now();
+                action();
+                return std::chrono::duration_cast<std::chrono::milliseconds> (
+                    std::chrono::steady_clock::now() - start).count();
+            };
             auto startPausedFinalization = [this] (KickLockAudioProcessor& p)
             {
                 p.setRateAndBufferSizeDetails (kSampleRate, 128);
@@ -716,86 +783,151 @@ public:
                 p.setLearnWorkerPauseStateForTesting (LearnState::Finalizing, true);
                 expect (p.beginLearn());
                 processEmptyBlock (p);
+                const auto start = std::chrono::steady_clock::now();
                 expect (p.stopLearn());
+                expectLessThan ((int) std::chrono::duration_cast<std::chrono::milliseconds> (
+                                    std::chrono::steady_clock::now() - start).count(), 100);
                 expect (pause->waitUntilEntered (500));
                 return pause;
             };
 
             {
-                auto p = std::make_unique<KickLockAudioProcessor>();
-                const auto pause = startPausedFinalization (*p);
-                std::atomic<bool> destroyed { false };
-                std::thread destroyThread ([owned = std::move (p), &destroyed] () mutable
-                {
-                    owned.reset();
-                    destroyed.store (true, std::memory_order_release);
-                });
-                juce::Thread::sleep (1600);
-                expect (! destroyed.load (std::memory_order_acquire));
+                KickLockAudioProcessor p;
+                const auto pause = startPausedFinalization (p);
+                expectLessThan ((int) elapsedMs ([&] { p.cancelLearn(); }), 100);
+                expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
+                expect (! p.hasPendingLearnResult());
                 pause->release();
-                destroyThread.join();
-                expect (destroyed.load (std::memory_order_acquire));
             }
 
             {
                 KickLockAudioProcessor p;
                 const auto pause = startPausedFinalization (p);
-                std::atomic<bool> prepared { false };
-                std::thread prepareThread ([&]
+                expectLessThan ((int) elapsedMs ([&]
                 {
                     p.setRateAndBufferSizeDetails (96000.0, 128);
                     p.prepareToPlay (96000.0, 128);
-                    prepared.store (true, std::memory_order_release);
-                });
-                juce::Thread::sleep (1600);
-                expect (! prepared.load (std::memory_order_acquire));
+                }), 100);
                 pause->release();
-                prepareThread.join();
-                expect (prepared.load (std::memory_order_acquire));
                 expectEquals (p.getLatencySamples(), (int) std::ceil (96000.0 * 0.020));
-                processEmptyBlock (p);
-            }
-
-            {
-                KickLockAudioProcessor p;
-                const auto pause = startPausedFinalization (p);
-                std::atomic<bool> cancelled { false };
-                std::thread cancelThread ([&]
-                {
-                    p.cancelLearn();
-                    cancelled.store (true, std::memory_order_release);
-                });
-                juce::Thread::sleep (1600);
-                expect (! cancelled.load (std::memory_order_acquire));
-                pause->release();
-                cancelThread.join();
-                expect (cancelled.load (std::memory_order_acquire));
                 expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
-                expect (! p.hasPendingLearnResult());
-                expect (! p.hasValidNoteMap());
             }
 
             {
                 KickLockAudioProcessor stateSource;
                 juce::MemoryBlock state;
                 stateSource.getStateInformation (state);
-
                 KickLockAudioProcessor p;
                 const auto pause = startPausedFinalization (p);
-                std::atomic<bool> restored { false };
-                std::thread restoreThread ([&]
+                expectLessThan ((int) elapsedMs ([&]
                 {
                     p.setStateInformation (state.getData(), (int) state.getSize());
-                    restored.store (true, std::memory_order_release);
-                });
-                juce::Thread::sleep (1600);
-                expect (! restored.load (std::memory_order_acquire));
+                }), 100);
                 pause->release();
-                restoreThread.join();
-                expect (restored.load (std::memory_order_acquire));
                 expectEquals ((int) p.getLearnState(), (int) LearnState::Idle);
-                expect (! p.hasPendingLearnResult());
             }
+
+            {
+                auto p = std::make_unique<KickLockAudioProcessor>();
+                const auto pause = startPausedFinalization (*p);
+                std::mutex mutex;
+                std::condition_variable condition;
+                bool destroyed = false;
+                std::thread destroyThread ([owned = std::move (p), &mutex, &condition, &destroyed] () mutable
+                {
+                    owned.reset();
+                    const std::lock_guard<std::mutex> lock (mutex);
+                    destroyed = true;
+                    condition.notify_all();
+                });
+                std::unique_lock<std::mutex> lock (mutex);
+                expect (condition.wait_for (lock, std::chrono::milliseconds (500), [&] { return destroyed; }),
+                        "processor destruction must stop the persistent worker");
+                lock.unlock();
+                destroyThread.join();
+                pause->release();
+            }
+        }
+
+        beginTest ("Stop before audio acknowledgement and Learn Again both complete");
+        {
+            KickLockAudioProcessor p;
+            p.setRateAndBufferSizeDetails (kSampleRate, 128);
+            p.prepareToPlay (kSampleRate, 128);
+            expect (p.beginLearn());
+            expect (p.stopLearn());
+            expect (waitForState (p, LearnState::NotEnoughMaterial));
+            expect (p.discardLatestLearnResult());
+            expect (p.beginLearn());
+            processEmptyBlock (p);
+            expectEquals ((int) p.getLearnState(), (int) LearnState::Capturing);
+            p.cancelLearn();
+        }
+
+        beginTest ("Repeated Start Stop and Cancel cycles reuse the persistent worker");
+        {
+            auto p = std::make_unique<KickLockAudioProcessor>();
+            p->setRateAndBufferSizeDetails (kSampleRate, 128);
+            p->prepareToPlay (kSampleRate, 128);
+            for (int i = 0; i < 8; ++i)
+            {
+                expect (p->beginLearn());
+                if ((i % 2) == 0)
+                {
+                    expect (p->stopLearn());
+                    expect (waitForState (*p, LearnState::NotEnoughMaterial));
+                    expect (p->discardLatestLearnResult());
+                }
+                else
+                {
+                    p->cancelLearn();
+                    expectEquals ((int) p->getLearnState(), (int) LearnState::Idle);
+                }
+            }
+        }
+
+        beginTest ("Cancel before audio acknowledgement leaves no stale start command");
+        {
+            auto p = std::make_unique<KickLockAudioProcessor>();
+            p->setRateAndBufferSizeDetails (kSampleRate, 128);
+            p->prepareToPlay (kSampleRate, 128);
+            expect (p->beginLearn());
+            const auto cancelledSession = p->getLearnSessionIdForTesting();
+            p->cancelLearn();
+            processEmptyBlock (*p);
+            expectEquals ((int) p->getLearnState(), (int) LearnState::Idle);
+            expect (! p->hasPendingLearnResult());
+
+            expect (p->beginLearn());
+            expect (p->getLearnSessionIdForTesting() != cancelledSession);
+            processEmptyBlock (*p);
+            expectEquals ((int) p->getLearnState(), (int) LearnState::Capturing);
+            p->cancelLearn();
+        }
+
+        beginTest ("A paused stale session cannot publish over Learn Again");
+        {
+            KickLockAudioProcessor p;
+            p.setRateAndBufferSizeDetails (kSampleRate, 128);
+            p.prepareToPlay (kSampleRate, 128);
+            const auto pause = p.getLearnWorkerPauseControlForTesting();
+            p.setLearnWorkerPauseStateForTesting (LearnState::Finalizing, true);
+            expect (p.beginLearn());
+            processEmptyBlock (p);
+            expect (p.stopLearn());
+            expect (pause->waitUntilEntered (500));
+            const auto staleSession = p.getLearnSessionIdForTesting();
+            p.cancelLearn();
+            expect (p.beginLearn());
+            processEmptyBlock (p);
+            expect (p.getLearnSessionIdForTesting() != staleSession);
+            pause->release();
+            processEmptyBlock (p);
+            expect (waitForState (p, LearnState::Capturing));
+            expect (! p.hasPendingLearnResult());
+            expectEquals (p.getLearnProgress().sessionId, p.getLearnSessionIdForTesting());
+            expectEquals ((int) p.getLearnProgress().state, (int) LearnState::Capturing);
+            p.cancelLearn();
         }
 
         beginTest ("Stop during a hit finishes that window, blocks new triggers, and preserves sequence order");
@@ -894,6 +1026,65 @@ public:
                 expect (instance->beginLearn());
                 processEmptyBlock (*instance);
                 if ((i % 2) == 0) instance->stopLearn();
+            }
+        }
+
+        beginTest ("Worst-case Learn, Static, and Spectrum teardown meet the cooperative bound");
+        {
+            constexpr double maximumRate = 96000.0;
+            constexpr int block = 512;
+            constexpr int maximumLearnHits = 24;
+            constexpr int learnSpacing = (int) (maximumRate * 0.21);
+
+            {
+                auto p = std::make_unique<KickLockAudioProcessor>();
+                p->enableAllBuses();
+                p->setRateAndBufferSizeDetails (maximumRate, block);
+                p->prepareToPlay (maximumRate, block);
+                expect (p->beginLearn());
+                processEmptyBlock (*p);
+                expect (waitForState (*p, LearnState::Capturing));
+                feedProcessorMaterial (*p, maximumRate,
+                                       learnSpacing * maximumLearnHits + (int) (maximumRate * 0.18),
+                                       learnSpacing);
+                expectGreaterOrEqual (p->getLearnAcceptedHits(), maximumLearnHits - 1);
+                expect (p->stopLearn());
+                expect (waitForState (*p, LearnState::Finalizing, 750),
+                        "maximum Learn material reaches cooperative finalization");
+                const int elapsed = elapsedMilliseconds ([&] { p.reset(); });
+                expectLessThan (elapsed, KickLockAudioProcessor::cooperativeTeardownBoundMs);
+            }
+
+            {
+                auto p = std::make_unique<KickLockAudioProcessor>();
+                p->enableAllBuses();
+                p->setRateAndBufferSizeDetails (maximumRate, block);
+                p->prepareToPlay (maximumRate, block);
+                feedProcessorMaterial (*p, maximumRate, (int) (maximumRate * 2.0),
+                                       (int) (maximumRate * 0.25));
+                expect (p->beginBackgroundAnalyze());
+                for (int attempt = 0; attempt < 750
+                     && p->getAnalyzeState() == AnalyzeState::Preparing; ++attempt)
+                    juce::Thread::sleep (1);
+                expectEquals ((int) p->getAnalyzeState(), (int) AnalyzeState::Analyzing);
+                const int elapsed = elapsedMilliseconds ([&] { p.reset(); });
+                expectLessThan (elapsed, KickLockAudioProcessor::cooperativeTeardownBoundMs);
+            }
+
+            {
+                KickLockAudioProcessor p;
+                p.enableAllBuses();
+                p.setRateAndBufferSizeDetails (maximumRate, block);
+                p.prepareToPlay (maximumRate, block);
+                p.setSpectrumCaptureEnabled (true);
+                auto spectrum = std::make_unique<SpectrumAnalyzer> (p.spectrumFifo);
+                spectrum->setSampleRate (maximumRate);
+                feedProcessorMaterial (p, maximumRate, 16384, (int) (maximumRate * 0.25));
+                for (int attempt = 0; attempt < 750 && ! spectrum->hasPublishedSpectrumForTesting(); ++attempt)
+                    juce::Thread::sleep (1);
+                expect (spectrum->hasPublishedSpectrumForTesting(), "spectrum worker processed an active FFT frame");
+                const int elapsed = elapsedMilliseconds ([&] { spectrum.reset(); });
+                expectLessThan (elapsed, KickLockAudioProcessor::cooperativeTeardownBoundMs);
             }
         }
 

@@ -36,6 +36,14 @@ struct NoteEntry
     float allpassFreqHz = 0.0f;
     float allpassQ = 0.7f;
 
+    // Per-note timing is learned and stored to assess timing quality before
+    // trusting this note's Freq/Q. Dynamic Delay/Polarity always use the
+    // current global runtime settings.
+    float delayMs = 0.0f;
+    bool  polarityInvert = false;
+    float timingConfidence = 0.0f;
+    float timingSpreadMs = 0.0f;
+
     float confidence = 0.0f;
     float fundamentalSpreadRatio = 0.0f;
     int   hitCount = 0;
@@ -66,7 +74,7 @@ struct NotePhaseMapSnapshot
     static constexpr int size = maxMidi - minMidi + 1;
 
     bool valid = false;
-    uint32_t schemaVersion = 2;
+    uint32_t schemaVersion = 3;
 
     NoteMapBaseContext base;
     NoteEntry global;
@@ -114,13 +122,16 @@ namespace NoteMap
     inline constexpr float kAllpassQMin = 0.1f;
     inline constexpr float kAllpassQMax = 10.0f;
 
-    inline constexpr uint32_t kSchemaVersion = 2;
+    inline constexpr uint32_t kSchemaVersion = 3;
+    inline constexpr uint32_t kPreviousSchemaVersion = 2;
+    inline constexpr float kMaxSupportedDelayMs = 20.0f;
 
     inline bool allFieldsFinite (const NoteEntry& e) noexcept
     {
         return std::isfinite (e.fundamentalHz) && std::isfinite (e.allpassFreqHz)
             && std::isfinite (e.allpassQ) && std::isfinite (e.confidence)
-            && std::isfinite (e.fundamentalSpreadRatio);
+            && std::isfinite (e.fundamentalSpreadRatio) && std::isfinite (e.delayMs)
+            && std::isfinite (e.timingConfidence) && std::isfinite (e.timingSpreadMs);
     }
 
     // Strict validity for a learned per-note entry (section 4.1 invariants).
@@ -133,7 +144,10 @@ namespace NoteMap
             && e.allpassQ >= kAllpassQMin && e.allpassQ <= kAllpassQMax
             && e.hitCount >= kMinHitsPerNote
             && e.fundamentalSpreadRatio >= 0.0f
-            && e.fundamentalSpreadRatio <= kNoteSpreadMaxRatio;
+            && e.fundamentalSpreadRatio <= kNoteSpreadMaxRatio
+            && std::abs (e.delayMs) <= kMaxSupportedDelayMs
+            && e.timingConfidence >= 0.0f && e.timingConfidence <= 1.0f
+            && e.timingSpreadMs >= 0.0f;
     }
 
     // Global fallback validity (section 4.3): finite, positive F/Q. learned and
@@ -177,6 +191,9 @@ namespace NoteMap
         e.fundamentalHz = finite (e.fundamentalHz, 0.0f);
         e.allpassFreqHz = finite (e.allpassFreqHz, 0.0f);
         e.allpassQ = std::clamp (finite (e.allpassQ, 0.7f), kAllpassQMin, kAllpassQMax);
+        e.delayMs = std::clamp (finite (e.delayMs, 0.0f), -kMaxSupportedDelayMs, kMaxSupportedDelayMs);
+        e.timingConfidence = std::clamp (finite (e.timingConfidence, 0.0f), 0.0f, 1.0f);
+        e.timingSpreadMs = std::max (0.0f, finite (e.timingSpreadMs, 0.0f));
         e.confidence = std::clamp (finite (e.confidence, 0.0f), 0.0f, 1.0f);
         e.fundamentalSpreadRatio = std::max (0.0f, finite (e.fundamentalSpreadRatio, 1.0f));
         e.hitCount = std::max (0, e.hitCount);
@@ -223,6 +240,10 @@ namespace NoteMapKeys
     inline constexpr const char* noteFundamentalHz = "fundamentalHz";
     inline constexpr const char* noteAllpassFreqHz = "allpassFreqHz";
     inline constexpr const char* noteQ = "q";
+    inline constexpr const char* noteDelayMs = "delayMs";
+    inline constexpr const char* notePolarity = "polarity";
+    inline constexpr const char* noteTimingConfidence = "timingConfidence";
+    inline constexpr const char* noteTimingSpreadMs = "timingSpreadMs";
     inline constexpr const char* noteConfidence = "confidence";
     inline constexpr const char* noteSpread = "spread";
     inline constexpr const char* noteHits = "hits";
@@ -268,6 +289,10 @@ inline juce::ValueTree noteMapToValueTree (const NotePhaseMapSnapshot& map)
         n.setProperty (NoteMapKeys::noteFundamentalHz, e.fundamentalHz, nullptr);
         n.setProperty (NoteMapKeys::noteAllpassFreqHz, e.allpassFreqHz, nullptr);
         n.setProperty (NoteMapKeys::noteQ, e.allpassQ, nullptr);
+        n.setProperty (NoteMapKeys::noteDelayMs, e.delayMs, nullptr);
+        n.setProperty (NoteMapKeys::notePolarity, e.polarityInvert, nullptr);
+        n.setProperty (NoteMapKeys::noteTimingConfidence, e.timingConfidence, nullptr);
+        n.setProperty (NoteMapKeys::noteTimingSpreadMs, e.timingSpreadMs, nullptr);
         n.setProperty (NoteMapKeys::noteConfidence, e.confidence, nullptr);
         n.setProperty (NoteMapKeys::noteSpread, e.fundamentalSpreadRatio, nullptr);
         n.setProperty (NoteMapKeys::noteHits, e.hitCount, nullptr);
@@ -295,10 +320,12 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
         return map;
 
     const int schema = (int) tree.getProperty (juce::Identifier (NoteMapKeys::schemaVersion), -1);
-    if (schema != (int) NoteMap::kSchemaVersion)
+    if (schema != (int) NoteMap::kSchemaVersion
+        && schema != (int) NoteMap::kPreviousSchemaVersion)
         return map;
 
     map.schemaVersion = NoteMap::kSchemaVersion;
+    const bool legacySchema = schema == (int) NoteMap::kPreviousSchemaVersion;
 
     auto readFinite = [] (const juce::ValueTree& t, const char* key, float fallback) noexcept
     {
@@ -324,6 +351,9 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
     g.fundamentalSpreadRatio = readFinite (tree, NoteMapKeys::globalSpread, 0.0f);
     g.hitCount = std::max (0, (int) tree.getProperty (juce::Identifier (NoteMapKeys::globalHits), 0));
     g.rotatorHelps = (bool) tree.getProperty (juce::Identifier (NoteMapKeys::globalRotatorHelps), false);
+    g.delayMs = map.base.delayMs;
+    g.polarityInvert = map.base.polarityInvert;
+    g.timingConfidence = g.confidence;
     map.global = NoteMap::sanitizeNoteEntry (g);
 
     for (int c = 0; c < tree.getNumChildren(); ++c)
@@ -342,6 +372,11 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
         e.fundamentalHz = readFinite (child, NoteMapKeys::noteFundamentalHz, 0.0f);
         e.allpassFreqHz = readFinite (child, NoteMapKeys::noteAllpassFreqHz, 0.0f);
         e.allpassQ = readFinite (child, NoteMapKeys::noteQ, 0.7f);
+        e.delayMs = readFinite (child, NoteMapKeys::noteDelayMs, map.base.delayMs);
+        e.polarityInvert = (bool) child.getProperty (juce::Identifier (NoteMapKeys::notePolarity), map.base.polarityInvert);
+        e.timingConfidence = readFinite (child, NoteMapKeys::noteTimingConfidence,
+                                         legacySchema ? 1.0f : 0.0f);
+        e.timingSpreadMs = readFinite (child, NoteMapKeys::noteTimingSpreadMs, 0.0f);
         e.confidence = readFinite (child, NoteMapKeys::noteConfidence, 0.0f);
         // Optional field: a note missing only spread still loads (spread 0 is in
         // range); the serializer always writes it, so round-trips stay exact.
@@ -381,9 +416,13 @@ struct LearnHitAnalysis
     float offlinePitchConfidence = 0.0f;
 
     float lowBandEnergy = 0.0f;
+    float coarseLagMs = 0.0f;
+    float fractionalLagMs = 0.0f;
+    float timingConfidence = 0.0f;
 
     bool signalUsable = false;
     bool timingUsable = false;
+    bool timingAmbiguous = false;
     bool dominantTimingClusterMember = false;
     bool pitchAccepted = false;
     bool pitchInvalid = false;

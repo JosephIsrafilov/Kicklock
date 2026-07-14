@@ -103,6 +103,16 @@ private:
         float confidence = 0.0f;
     };
 
+    // One worker-owned scratch set is reused for every candidate. Candidate
+    // search is deliberately allocation-free after its first input size.
+    struct Scratch
+    {
+        std::vector<float> dry;
+        std::vector<float> wet;
+        std::vector<float> scoreBass;
+        std::vector<float> scoreKick;
+    };
+
     static bool validStage (int stage) noexcept { return stage == 2 || stage == 3; }
 
     static FixedTimingRotatorResult searchImpl (const std::vector<FixedTimingRotatorInput>& inputs,
@@ -132,8 +142,20 @@ private:
         if (stages.empty())
             return result;
 
+        Scratch scratch;
+        int maxSamples = 0;
+        for (const auto& input : inputs)
+            maxSamples = std::max (maxSamples, input.numSamples);
+        if (maxSamples > 0)
+        {
+            scratch.dry.reserve ((size_t) maxSamples);
+            scratch.wet.reserve ((size_t) maxSamples);
+            scratch.scoreBass.reserve ((size_t) maxSamples);
+            scratch.scoreKick.reserve ((size_t) maxSamples);
+        }
+
         const auto baseline = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                                        interpolation, false, 0.0f, 0.0f, 2, combined, shouldCancel);
+                                        interpolation, false, 0.0f, 0.0f, 2, combined, scratch, shouldCancel);
         if (! baseline.valid)
             return result;
 
@@ -157,10 +179,14 @@ private:
                     continue;
                 for (const float q : qs)
                 {
+                    if (shouldCancel && shouldCancel())
+                        return {};
                     if (! std::isfinite (q) || q < NoteMap::kAllpassQMin || q > NoteMap::kAllpassQMax)
                         continue;
                     const auto candidate = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                                                     interpolation, true, freq, q, stage, combined, shouldCancel);
+                                                     interpolation, true, freq, q, stage, combined, scratch, shouldCancel);
+                    if (shouldCancel && shouldCancel())
+                        return {};
                     if (! candidate.valid)
                         continue;
                     const float gain = candidate.effectiveMatch - baseline.effectiveMatch;
@@ -189,10 +215,11 @@ private:
     }
 
     static Evaluated evaluate (const std::vector<FixedTimingRotatorInput>& inputs,
-                               double sampleRate, float delayMs, bool polarity,
-                               InterpolationType interpolation, bool useRotator,
-                               float freq, float q, int stages, bool,
-                               const std::function<bool()>& shouldCancel)
+                                double sampleRate, float delayMs, bool polarity,
+                                InterpolationType interpolation, bool useRotator,
+                                float freq, float q, int stages, bool,
+                                Scratch& scratch,
+                                const std::function<bool()>& shouldCancel)
     {
         double weights = 0.0, raw = 0.0, effective = 0.0, confidence = 0.0;
         for (const auto& input : inputs)
@@ -210,21 +237,28 @@ private:
             settings.phaseFilterStages = stages;
             settings.delayInterpolation = interpolation;
 
-            std::vector<float> dry, wet, scratchBass, scratchKick;
             PhaseFixRenderSettings base = settings;
             base.phaseFilterEnabled = false;
-            PhaseFixEngine::renderCandidate (input.bass, input.numSamples, sampleRate, base, dry);
-            PhaseFixEngine::renderCandidate (input.bass, input.numSamples, sampleRate, settings, wet);
+            PhaseFixEngine::renderCandidate (input.bass, input.numSamples, sampleRate, base, scratch.dry);
+            if (shouldCancel && shouldCancel())
+                return {};
+            PhaseFixEngine::renderCandidate (input.bass, input.numSamples, sampleRate, settings, scratch.wet);
+            if (shouldCancel && shouldCancel())
+                return {};
             const auto score = PhaseFixEngine::scoreSettings (input.bass, input.kick, input.numSamples,
                                                                sampleRate, settings,
                                                                PhaseFixEngine::absoluteManualMaxDelayMs,
-                                                               scratchBass, scratchKick);
+                                                               scratch.scoreBass, scratch.scoreKick);
+            if (shouldCancel && shouldCancel())
+                return {};
             if (! std::isfinite (score.matchPercent) || ! std::isfinite (score.confidence)
                 || score.confidence <= 0.0f)
                 return {};
             double penalty = 0.0;
             if (useRotator)
-                penalty = AlignmentAnalyzer::rotatorSafetyPenalty (dry, wet, sampleRate, q, stages);
+                penalty = AlignmentAnalyzer::rotatorSafetyPenalty (scratch.dry, scratch.wet, sampleRate, q, stages);
+            if (shouldCancel && shouldCancel())
+                return {};
             if (! std::isfinite (penalty))
                 return {};
             const double weight = std::max (1.0e-6, (double) input.energy);

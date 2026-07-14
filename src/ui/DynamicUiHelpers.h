@@ -108,7 +108,7 @@ inline juce::String formatDynamicStrength (float value)
 
 inline const char* dynamicStrengthTooltip() noexcept
 {
-    return "0% uses the learned global correction. 100% uses the full per-note correction.";
+    return "0% uses the global phase filter setting for every note. 100% uses each note's learned Freq/Q; Delay and Polarity stay global.";
 }
 
 inline juce::String formatLearnNoteChip (int midi, int acceptedHits)

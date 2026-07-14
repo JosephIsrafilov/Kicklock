@@ -26,14 +26,26 @@ struct DynamicNoteState
 {
     int lastMidi = -1;
     int silentSamples = 0;
+    int fallbackSamples = 0;
+    bool hasStableEntry = false;
+    float stableFreqHz = 50.0f;
+    float stableQ = 0.7f;
 
-    void reset() noexcept { lastMidi = -1; silentSamples = 0; }
+    void reset() noexcept
+    {
+        lastMidi = -1;
+        silentSamples = 0;
+        fallbackSamples = 0;
+        hasStableEntry = false;
+    }
 };
 
 struct DynamicRuntimeSelection
 {
     float targetFreqHz = 50.0f;
     float targetQ = 0.7f;
+    float targetDelayMs = 0.0f;
+    bool targetPolarityInvert = false;
     int selectedMidi = -1;
     bool mapUsable = false;
     bool usingLearnedNote = false;
@@ -80,6 +92,8 @@ inline DynamicRuntimeSelection selectDynamicRuntime (
                                          NoteMap::kAllpassFreqMinHz, NoteMap::kAllpassFreqMaxHz);
     selection.targetQ = std::clamp (std::isfinite (manualQ) ? manualQ : 0.7f,
                                     NoteMap::kAllpassQMin, NoteMap::kAllpassQMax);
+    selection.targetDelayMs = current.delayMs;
+    selection.targetPolarityInvert = current.polarityInvert;
 
     if (! isStructurallyValidRuntimeMap (map))
     {
@@ -119,9 +133,19 @@ inline DynamicRuntimeSelection selectDynamicRuntime (
     const NoteEntry* note = map.lookup (midi);
     if (note == nullptr || ! note->rotatorHelps
         || note->confidence < NoteMap::kMinRuntimeConfidence
+        || note->timingConfidence < NoteMap::kMinRuntimeConfidence
         || ! NoteMap::isValidNoteEntry (*note) || ! NoteMap::allFieldsFinite (*note))
     {
         selection.fallbackActive = true;
+        // Keep one known-good note briefly while tracker confidence flickers;
+        // this avoids hopping between notes during a weak transient.
+        const int fallbackHoldSamples = std::max (1, silenceResetSamples / 3);
+        if (noteState.hasStableEntry && noteState.fallbackSamples < fallbackHoldSamples)
+        {
+            selection.targetFreqHz = noteState.stableFreqHz;
+            selection.targetQ = noteState.stableQ;
+            noteState.fallbackSamples += std::max (0, blockSamples);
+        }
         return selection;
     }
 
@@ -131,5 +155,9 @@ inline DynamicRuntimeSelection selectDynamicRuntime (
                                      + (std::log (note->allpassFreqHz) - std::log (globalF)) * strength);
     selection.targetQ = globalQ + (note->allpassQ - globalQ) * strength;
     selection.usingLearnedNote = true;
+    noteState.hasStableEntry = true;
+    noteState.fallbackSamples = 0;
+    noteState.stableFreqHz = selection.targetFreqHz;
+    noteState.stableQ = selection.targetQ;
     return selection;
 }

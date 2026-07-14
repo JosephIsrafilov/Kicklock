@@ -40,9 +40,10 @@ SegmentedModeSelector::SegmentedModeSelector()
     for (auto* button : { &staticButton, &dynamicButton })
     {
         button->setWantsKeyboardFocus (true);
-        button->setTooltip ("Selects the " + button->getButtonText() + " correction mode.");
         addAndMakeVisible (*button);
     }
+    staticButton.setTooltip ("Static: uses one fixed correction for the whole bass part. Best for basslines that stay mostly on one pitch.");
+    dynamicButton.setTooltip ("Dynamic: learns a separate Freq/Q correction for each trusted bass note. Delay and Polarity always remain global.");
     staticButton.setName ("Static correction mode");
     staticButton.setDescription ("Uses the manual and Analyze correction workflow.");
     dynamicButton.setName ("Dynamic correction mode");
@@ -1043,7 +1044,9 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     latestLearnProgress = audioProcessor.getLearnProgress();
     const bool hasPending = audioProcessor.hasPendingLearnResult();
     const auto pendingResult = hasPending ? audioProcessor.getPendingLearnResult() : LearnFinalizeResult {};
-    latestNoteMap = hasPending ? pendingResult.map : audioProcessor.getNoteMapSnapshot();
+    // Runtime status must describe the applied processor-owned map. A pending
+    // Learn result is intentionally inert until Apply Learn succeeds.
+    latestNoteMap = audioProcessor.getNoteMapSnapshot();
     const int activeMidi = audioProcessor.activeMidiNote.load (std::memory_order_acquire);
     learnProgressDisplay.setModel (latestLearnProgress, latestNoteMap, activeMidi);
 
@@ -1317,17 +1320,19 @@ void KickLockAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
               38);
 
     drawBlock("How it works",
-              "1. Route your Kick drum to KickLock's Sidechain input (KickLock should be placed on your Bass track).\n"
-              "2. Play your track and click 'Analyze'.\n"
-              "3. KickLock analyzes the transients and automatically calculates the optimal Delay, Polarity, and Phase Filter settings.\n"
-              "4. Click 'Apply Fix' to lock the low end in perfect phase.",
+              "1. Place KickLock on Bass; route the Kick to its Sidechain input.\n"
+              "2. Choose Static or Dynamic mode.\n"
+              "3. Static: play and click Analyze for one fixed Delay, Polarity, Freq, and Q correction.\n"
+              "4. Dynamic: click Learn and play the full bass part. Captured-note hit chips show counts; trusted notes get separate Freq/Q. Delay and Polarity stay global.\n"
+              "5. Apply Fix (Static) or Apply Learn (Dynamic). Dynamic maps are saved with the project.",
               72);
-              
+
     drawBlock("Key Features",
               "- Phase Filter (Allpass): Rotates phase smoothly without shifting the audio in time.\n"
               "- Delay & Polarity: Aligns transients perfectly with sub-millisecond precision.\n"
               "- Crossover: Ensures only the low frequencies (e.g., < 150 Hz) are affected, leaving mids/highs untouched.\n"
-              "- A/B Compare: Easily switch between two configurations to verify improvements.",
+              "- A/B Compare: Easily switch between two configurations to verify improvements.\n"
+              "- Dynamic Mode: learns a separate Freq/Q phase correction for each trusted bass note. Delay and Polarity remain global, while unknown or low-confidence notes fall back to the global correction.",
               72);
 
     drawBlock("Meters & Displays",

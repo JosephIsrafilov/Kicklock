@@ -95,7 +95,8 @@ public:
     void pushSample (float rawBassLow,
                      float rawKickLow,
                      bool transientDetected,
-                     float trackedHz) noexcept
+                     float trackedHz,
+                     bool allowNewTrigger = true) noexcept
     {
         if (transientDetected)
         {
@@ -103,7 +104,7 @@ public:
             {
                 ignoredOverlaps.fetch_add (1, std::memory_order_relaxed);
             }
-            else if (accepting.load (std::memory_order_acquire))
+            else if (allowNewTrigger && accepting.load (std::memory_order_acquire))
             {
                 int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
                 fifo.prepareToWrite (1, start1, size1, start2, size2);

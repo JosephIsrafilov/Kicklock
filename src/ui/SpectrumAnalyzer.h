@@ -3,7 +3,10 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include <array>
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <mutex>
 
 #include "../util/SpectrumFifo.h"
 
@@ -20,6 +23,10 @@ public:
 
     void setSampleRate (double newSampleRate);
     void setColours (juce::Colour mainCol, juce::Colour sideCol);
+    bool hasPublishedSpectrumForTesting() const noexcept
+    {
+        return publishedSpectrumSequence.load (std::memory_order_acquire) != 0;
+    }
 
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent& e) override;
@@ -28,8 +35,13 @@ public:
     std::function<void()> onToggleCleanMode;
 
 private:
-    void calculateSpectrum();
+    class SpectrumWorker;
+
+    bool calculateSpectrum();
+    void runSpectrumWorker();
+    void publishSpectrumSnapshot();
     void rebuildBinCache();
+    void rebuildSpectrumPaths();
     void drawWaveLegend(juce::Graphics& g, juce::Rectangle<float> bounds) const;
 
     SpectrumFifo& spectrumFifo;
@@ -55,8 +67,24 @@ private:
     std::array<float, historyLength * 2> fftScratchSideR {};
     juce::dsp::WindowingFunction<float> fftWindow { historyLength, juce::dsp::WindowingFunction<float>::hann, false };
 
+    // Written only by the spectrum worker. The UI reads a copied latest
+    // snapshot, never the mutable FFT workspace.
+    std::array<float, historyLength> workerSpectrumMain {};
+    std::array<float, historyLength> workerSpectrumSide {};
     std::array<float, historyLength> spectrumMain {};
     std::array<float, historyLength> spectrumSide {};
+    std::array<float, historyLength> publishedSpectrumMain {};
+    std::array<float, historyLength> publishedSpectrumSide {};
+    juce::Path spectrumMainPath;
+    juce::Path spectrumSidePath;
+    juce::Path spectrumMainFillPath;
+    juce::Path spectrumSideFillPath;
+    std::mutex spectrumSnapshotMutex;
+    std::atomic<uint64_t> publishedSpectrumSequence { 0 };
+    std::atomic<bool> spectrumWorkerStopping { false };
+    uint64_t consumedSpectrumSequence = 0;
+    std::unique_ptr<SpectrumWorker> spectrumWorker;
+    static constexpr int cooperativeTeardownBoundMs = 3000;
 
     struct PixelBinCache {
         float x;
@@ -69,7 +97,7 @@ private:
     float lastCacheX = 0.0f;
 
     juce::ComboBox speedComboBox;
-    float smoothingFactor = 0.4f;
+    std::atomic<float> smoothingFactor { 0.4f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrumAnalyzer)
 };

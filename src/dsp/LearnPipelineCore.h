@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "FixedTimingRotatorSearch.h"
+#include "ConstrainedDtwRefiner.h"
 #include "FrozenCrossoverPhaseSimulation.h"
 #include "HitConsensus.h"
 #include "../util/LearnHitQueue.h"
@@ -64,6 +65,7 @@ public:
         std::vector<HitObservation> observations;
         std::vector<int> observationToHit;
         hits.reserve (windows.size()); observations.reserve (windows.size()); observationToHit.reserve (windows.size());
+        ConstrainedDtwRefiner::Scratch dtwScratch;
 
         for (const auto& window : windows)
         {
@@ -73,7 +75,8 @@ public:
             hit.analysis.sequence = window.sequence;
             hit.analysis.trackedFundamentalHz = window.trackedHzAtTrigger;
             const int n = (int) std::min (window.bass.size(), window.kick.size());
-            if (n <= 32 || ! finiteSignal (window.bass, n) || ! finiteSignal (window.kick, n))
+            if (n <= 32 || ! finiteSignal (window.bass, n, shouldCancel)
+                || ! finiteSignal (window.kick, n, shouldCancel))
             {
                 hit.analysis.signalUsable = false;
                 ++diag.unusableSignalHits;
@@ -89,18 +92,49 @@ public:
                 hits.push_back (std::move (hit));
                 continue;
             }
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
 
-            const auto timing = PhaseFixEngine::analyze (hit.bass.data(), hit.kick.data(), n, config.sampleRate,
-                                                          config.maxDelayMs, config.delayInterpolation, false);
+            auto timing = PhaseFixEngine::analyze (hit.bass.data(), hit.kick.data(), n, config.sampleRate,
+                                                    config.maxDelayMs, config.delayInterpolation, false);
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
+            if (timing.valid && timing.enoughSignal && ! timing.largeTimingOffset
+                && ! timing.requiresTimelineMove)
+            {
+                const auto refined = ConstrainedDtwRefiner::refine (
+                    hit.bass.data(), hit.kick.data(), n, config.sampleRate,
+                    timing.bassDelayMs * (float) config.sampleRate / 1000.0f,
+                    timing.bassPolarityInvert, dtwScratch, shouldCancel);
+                if (refined.cancelled || cancelled (shouldCancel))
+                    return fail (result, "Learn cancelled.");
+                if (refined.valid)
+                {
+                    timing.bassDelayMs = refined.delaySamples * 1000.0f / (float) config.sampleRate;
+                    timing.confidence = std::min (timing.confidence, refined.confidence);
+                }
+                else if (refined.ambiguous)
+                {
+                    timing.unstableRecommendation = true;
+                }
+            }
             hit.timing = timing;
             hit.analysis.signalUsable = timing.valid && timing.enoughSignal;
             hit.analysis.timingUsable = hit.analysis.signalUsable && std::isfinite (timing.bassDelayMs)
-                                      && std::isfinite (timing.confidence);
+                                       && std::isfinite (timing.confidence);
+            hit.analysis.coarseLagMs = timing.detectedTimingOffsetMs;
+            hit.analysis.fractionalLagMs = timing.bassDelayMs;
+            hit.analysis.timingConfidence = std::clamp (timing.confidence, 0.0f, 1.0f);
+            hit.analysis.timingAmbiguous = timing.unstableRecommendation
+                                         || timing.largeTimingOffset
+                                         || timing.requiresTimelineMove;
 
             // Pitch is deliberately independent of timing eligibility.  A bad
             // pitch is global-only, not a reason to discard timing evidence.
             const auto pitch = OfflineFundamentalEstimator::estimate (hit.bass.data(), n, config.sampleRate,
                                                                         NoteMap::kFundamentalMinHz, NoteMap::kFundamentalMaxHz);
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
             hit.analysis.offlineFundamentalHz = pitch.frequencyHz;
             hit.analysis.offlinePitchConfidence = pitch.confidence;
             classifyPitch (hit.analysis, pitch);
@@ -108,6 +142,8 @@ public:
             if (hit.analysis.timingUsable)
             {
                 const auto multi = MultiBandCorrelation::analyze (hit.bass.data(), hit.kick.data(), n, config.sampleRate);
+                if (cancelled (shouldCancel))
+                    return fail (result, "Learn cancelled.");
                 hit.analysis.lowBandEnergy = weightedEnergy (multi);
                 hit.analysis.timingObservation = makeObservation (timing, multi, hit.analysis.lowBandEnergy);
                 hit.analysis.timingObservation.hitIndex = (int) hits.size();
@@ -125,7 +161,12 @@ public:
         }
 
         result.hitAnalyses.reserve (hits.size());
-        for (const auto& hit : hits) result.hitAnalyses.push_back (hit.analysis);
+        for (const auto& hit : hits)
+        {
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
+            result.hitAnalyses.push_back (hit.analysis);
+        }
         if ((int) observations.size() < LearnPipelineConfig::kMinUsableTimingObservations)
             return fail (result, "Too few usable timing observations.");
 
@@ -197,8 +238,8 @@ public:
         map.base.delayInterpolationIndex = config.delayInterpolation == InterpolationType::Linear ? 0 : 1;
         map.base.learnedSampleRate = config.sampleRate;
         map.global = makeGlobalEntry (hits, dominantHits, globalHelps ? globalCandidate.allpassFreqHz : fallbackFreq,
-                                      globalHelps ? globalCandidate.allpassQ : fallbackQ, globalHelps,
-                                      consensus.consensusConfidence);
+                                       globalHelps ? globalCandidate.allpassQ : fallbackQ, globalHelps,
+                                       consensus.consensusConfidence, globalDelay, globalPolarity);
 
         std::array<NoteLearnAccumulator, (size_t) NotePhaseMapSnapshot::size> buckets;
         for (const int index : dominantHits)
@@ -208,9 +249,14 @@ public:
             auto& hit = hits[(size_t) index];
             if (! hit.analysis.pitchAccepted)
                 continue;
+            if (hit.analysis.timingAmbiguous
+                || std::abs (hit.timing.bassDelayMs) > config.maxDelayMs + 1.0e-4f)
+                continue;
             const auto perHit = FixedTimingRotatorSearch::search (hit.bass.data(), hit.kick.data(), (int) hit.bass.size(),
                 config.sampleRate, globalDelay, globalPolarity, config.delayInterpolation,
                 config.stages(), config.freqs(), config.qs(), globalStages, shouldCancel);
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
             const auto candidate = FixedTimingRotatorSearch::candidateForStage (perHit, globalStages);
             hit.analysis.rotatorHelps = candidate.helps;
             hit.analysis.allpassFreqHz = candidate.allpassFreqHz;
@@ -221,13 +267,17 @@ public:
             if (note >= 0)
             {
                 buckets[(size_t) note].add ({ hit.analysis.trackedFundamentalHz, candidate.allpassFreqHz,
-                    candidate.allpassQ, std::min (hit.analysis.offlinePitchConfidence, candidate.confidence), candidate.helps });
+                    candidate.allpassQ, hit.timing.bassDelayMs, hit.timing.bassPolarityInvert,
+                    hit.analysis.timingConfidence,
+                    std::min (hit.analysis.offlinePitchConfidence, candidate.confidence), candidate.helps });
             }
         }
 
         int learnedNotes = 0;
         for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
         {
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
             const auto entry = buckets[(size_t) i].finalizeEntry();
             if (entry.learned) { map.notes[(size_t) i] = entry; ++learnedNotes; }
         }
@@ -250,7 +300,12 @@ public:
         PhaseFixEngine::updateDerivedResultFields (timingFix);
         result.globalFix = timingFix;
         result.hitAnalyses.clear();
-        for (const auto& hit : hits) result.hitAnalyses.push_back (hit.analysis);
+        for (const auto& hit : hits)
+        {
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
+            result.hitAnalyses.push_back (hit.analysis);
+        }
         map.valid = NoteMap::isValidGlobalEntry (map.global) && NoteMap::isValidBaseContext (map.base);
         result.map = map;
         result.valid = NoteMap::isValidNoteMap (map);
@@ -272,8 +327,17 @@ private:
 
     static LearnFinalizeResult fail (LearnFinalizeResult& result, const juce::String& message)
     { result.valid = false; result.map = NoteMap::makeEmptyNoteMap(); result.message = message; result.diagnostics.warning = message; return result; }
-    static bool finiteSignal (const std::vector<float>& values, int n)
-    { for (int i = 0; i < n; ++i) if (! std::isfinite (values[(size_t) i])) return false; return true; }
+    static bool finiteSignal (const std::vector<float>& values, int n, const std::function<bool()>& shouldCancel)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            if ((i & 255) == 0 && cancelled (shouldCancel))
+                return false;
+            if (! std::isfinite (values[(size_t) i]))
+                return false;
+        }
+        return true;
+    }
     static float frozenCrossoverHz (const LearnPipelineConfig& c)
     { return std::isfinite (c.crossoverHz) ? juce::jlimit (20.0f, (float) (c.sampleRate * 0.45), c.crossoverHz) : 150.0f; }
     static float sanitizeFallbackFreq (float value)
@@ -306,8 +370,28 @@ private:
     { if (a.pitchInvalid) ++d.pitchInvalidHits; if (a.pitchDisagrees) ++d.pitchDisagreementHits; if (a.octaveAmbiguous) ++d.octaveAmbiguousHits; d.rejectedPitchHits = d.pitchInvalidHits + d.pitchDisagreementHits + d.octaveAmbiguousHits; }
     static int chooseStage (const FixedTimingRotatorResult& search)
     { int chosen = 2; float gain = -std::numeric_limits<float>::infinity(); for (const auto& c : search.perStage) if (c.helps && (c.gainPoints > gain + 1.0e-4f || (std::abs (c.gainPoints-gain)<=1.0e-4f && c.stages < chosen))) { gain = c.gainPoints; chosen = c.stages; } return chosen; }
-    static NoteEntry makeGlobalEntry (const std::vector<AnalyzedHit>& hits, const std::vector<int>& indexes, float f, float q, bool helps, float confidence)
-    { NoteEntry e; std::vector<float> tracks; for (int i : indexes) if (hits[(size_t)i].analysis.pitchAccepted) tracks.push_back (hits[(size_t)i].analysis.trackedFundamentalHz); std::sort (tracks.begin(), tracks.end()); e.fundamentalHz = tracks.empty() ? 0.0f : tracks[tracks.size()/2]; e.allpassFreqHz=f; e.allpassQ=q; e.confidence=std::clamp(confidence,0.0f,1.0f); e.hitCount=(int)indexes.size(); e.rotatorHelps=helps; e.learned=helps; return e; }
+    static NoteEntry makeGlobalEntry (const std::vector<AnalyzedHit>& hits, const std::vector<int>& indexes,
+                                      float f, float q, bool helps, float confidence,
+                                      float delayMs, bool polarityInvert)
+    {
+        NoteEntry e;
+        std::vector<float> tracks;
+        for (int i : indexes)
+            if (hits[(size_t) i].analysis.pitchAccepted)
+                tracks.push_back (hits[(size_t) i].analysis.trackedFundamentalHz);
+        std::sort (tracks.begin(), tracks.end());
+        e.fundamentalHz = tracks.empty() ? 0.0f : tracks[tracks.size() / 2];
+        e.allpassFreqHz = f;
+        e.allpassQ = q;
+        e.delayMs = delayMs;
+        e.polarityInvert = polarityInvert;
+        e.timingConfidence = std::clamp (confidence, 0.0f, 1.0f);
+        e.confidence = e.timingConfidence;
+        e.hitCount = (int) indexes.size();
+        e.rotatorHelps = helps;
+        e.learned = helps;
+        return e;
+    }
     static PhaseFixResult timingDiagnostic (float delay, bool polarity, const ConsensusResult& consensus, const std::vector<AnalyzedHit>& hits, const std::vector<int>& indexes)
     { PhaseFixResult fix; fix.valid=true; fix.enoughSignal=true; fix.bassDelayMs=delay; fix.bassPolarityInvert=polarity; fix.confidence=consensus.consensusConfidence; for (int i:indexes) { const auto& t=hits[(size_t)i].timing; fix.largeTimingOffset |= t.largeTimingOffset; fix.requiresTimelineMove |= t.requiresTimelineMove; fix.unstableRecommendation |= t.unstableRecommendation; fix.detectedTimingOffsetMs=std::max(fix.detectedTimingOffsetMs,t.detectedTimingOffsetMs); } return fix; }
 };

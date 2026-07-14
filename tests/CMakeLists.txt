@@ -41,15 +41,14 @@ target_link_libraries(KickLockDspTests
         juce::juce_audio_utils
 )
 
+if(MSVC)
+    # LearnOrchestration intentionally keeps many lifecycle fixtures in one
+    # JUCE UnitTest method; Debug builds retain those scoped locals in one frame.
+    target_link_options(KickLockDspTests PRIVATE "/STACK:8388608")
+    # The DSP reliability/performance fixtures exercise header-only analysis
+    # code. Keep their Debug runtime representative without changing the
+    # plugin's Debug optimization level or its debug information.
+    target_compile_options(KickLockDspTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
+endif()
+
 add_test(NAME KickLockDspTests COMMAND KickLockDspTests)
-add_test(NAME KickLockDspTests.DSP COMMAND KickLockDspTests DSP)
-add_test(NAME KickLockDspTests.Processor COMMAND KickLockDspTests Processor)
-add_test(NAME KickLockDspTests.P10 COMMAND KickLockDspTests P10)
-add_test(NAME KickLockDspTests.Stabilization COMMAND KickLockDspTests Stabilization)
-add_test(NAME KickLockDspTests.Phase1 COMMAND KickLockDspTests Phase1)
-add_test(NAME KickLockDspTests.Phase2 COMMAND KickLockDspTests Phase2)
-add_test(NAME KickLockDspTests.Phase3 COMMAND KickLockDspTests Phase3)
-add_test(NAME KickLockDspTests.Phase4 COMMAND KickLockDspTests Phase4)
-add_test(NAME KickLockDspTests.Phase5 COMMAND KickLockDspTests Phase5)
-add_test(NAME KickLockDspTests.SyntheticMaterialValidation COMMAND KickLockDspTests SyntheticMaterialValidation)
-add_test(NAME KickLockDspTests.UIHelpers COMMAND KickLockDspTests "UI Helpers")

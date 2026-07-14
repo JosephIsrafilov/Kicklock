@@ -267,6 +267,44 @@ public:
             expectEquals (core.reportLatencySamples(), (int) std::ceil (kSampleRate * 0.020));
         }
 
+        beginTest ("Runtime fractional delay uses a four-point click-safe tap without changing PDC");
+        {
+            constexpr int n = 2048;
+            MultibandPhaseCore core;
+            core.prepare (kSampleRate, n, 2, 20.0f);
+            MultibandPhaseCore::Params params;
+            params.crossoverEnabled = false;
+            params.userDelayMs = 0.5f * 1000.0f / (float) kSampleRate;
+
+            auto renderImpulse = [&]
+            {
+                juce::AudioBuffer<float> main (2, n), sidechain (2, n);
+                main.clear(); sidechain.clear();
+                main.setSample (0, 0, 1.0f);
+                main.setSample (1, 0, 1.0f);
+                core.process (main, sidechain, params, n);
+                return main;
+            };
+
+            const auto first = renderImpulse();
+            const int latency = core.reportLatencySamples();
+            int nonZeroTaps = 0;
+            for (int i = latency - 2; i <= latency + 3; ++i)
+            {
+                if (i >= 0 && std::abs (first.getSample (0, i)) > 1.0e-4f)
+                    ++nonZeroTaps;
+                if (i >= 0)
+                    expectWithinAbsoluteError (first.getSample (0, i), first.getSample (1, i), 1.0e-6f);
+            }
+            expectGreaterOrEqual (nonZeroTaps, 3, "third-order Lagrange spans more than a linear two-point tap");
+            expectEquals (core.reportLatencySamples(), (int) std::ceil (kSampleRate * 0.020));
+
+            core.reset();
+            const auto second = renderImpulse();
+            for (int i = 0; i < n; ++i)
+                expectWithinAbsoluteError (first.getSample (0, i), second.getSample (0, i), 1.0e-6f);
+        }
+
         beginTest ("Kick-punch meter reads positive when bass reinforces the kick");
         {
             TransientPunchMeter meter;

@@ -23,6 +23,7 @@ from those checks.
 | Dynamic Strength automation | Automated pass | Runtime interpolation is finite/bounded; verify host lane UX manually. |
 | CPU comparison: Static, Dynamic fallback, Dynamic learned note, editor open/closed | Not run / no local DAW CPU harness | Existing runtime tests verify finite, deterministic paths; no universal CPU claim is made. |
 | Linux ASan + UBSan | Automated pass in CI | Linux Debug workflow runs the complete test executable under sanitizers. |
+| Cooperative worker teardown | Automated pass | Maximum Learn material, active Static analysis, and active Spectrum FFT teardown complete within the conservative 3,000 ms bound. |
 
 ## Manual DAW Follow-up
 

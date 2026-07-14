@@ -39,6 +39,10 @@ namespace
         note.fundamentalHz = NoteQuantizer::midiToHz (33);
         note.allpassFreqHz = 100.0f;
         note.allpassQ = 1.5f;
+        note.delayMs = 2.5f;
+        note.polarityInvert = false;
+        note.timingConfidence = 0.8f;
+        note.timingSpreadMs = 0.03f;
         note.confidence = 0.8f;
         note.fundamentalSpreadRatio = 0.05f;
         note.hitCount = NoteMap::kMinHitsPerNote;
@@ -211,12 +215,20 @@ public:
             expectEquals (learned.selectedMidi, 33);
             expectWithinAbsoluteError (learned.targetFreqHz, 100.0f, 1.0e-5f);
             expectWithinAbsoluteError (learned.targetQ, 1.5f, 1.0e-5f);
+            expectWithinAbsoluteError (learned.targetDelayMs, 1.0f, 1.0e-5f,
+                                       "delay stays pinned to current regardless of the learned note");
+            expect (learned.targetPolarityInvert,
+                    "polarity stays pinned to current regardless of the learned note");
 
-            state.reset();
             const auto unknown = select (map, NoteQuantizer::midiToHz (34), 1.0f, state);
             expect (unknown.mapUsable && unknown.fallbackActive && ! unknown.usingLearnedNote);
             expectEquals (unknown.selectedMidi, 34);
-            expectWithinAbsoluteError (unknown.targetFreqHz, 50.0f, 1.0e-5f);
+            expectWithinAbsoluteError (unknown.targetFreqHz, 100.0f, 1.0e-5f,
+                                       "weak tracking holds the last stable entry briefly");
+            expect (unknown.targetDelayMs == 1.0f,
+                    "held fallback delay stays pinned to current");
+            expect (unknown.targetPolarityInvert,
+                    "held fallback polarity stays pinned to current");
 
             const auto zero = select (map, 0.0f, 1.0f, state);
             expect (zero.fallbackActive);
@@ -276,12 +288,41 @@ public:
                                                  + (std::log (100.0f) - std::log (50.0f)) * strength);
                 expectWithinAbsoluteError (result.targetFreqHz, expectedF, 1.0e-5f);
                 expectWithinAbsoluteError (result.targetQ, 0.7f + 0.8f * strength, 1.0e-5f);
+                expectWithinAbsoluteError (result.targetDelayMs, 1.0f, 1.0e-5f,
+                                           "delay must not move with dynamicStrength");
+                expect (result.targetPolarityInvert,
+                        "polarity must not flip with dynamicStrength");
                 expectGreaterOrEqual (result.targetFreqHz, previous);
                 previous = result.targetFreqHz;
             }
             DynamicNoteState state;
             const auto clamped = select (map, NoteQuantizer::midiToHz (33), 5.0f, state);
             expectWithinAbsoluteError (clamped.targetFreqHz, 100.0f, 1.0e-5f);
+        }
+
+        beginTest ("T12: Delay and polarity remain global for learned and fallback notes");
+        {
+            const auto current = matchingBase();
+            const auto map = makeMap();
+            for (float strength : { 0.0f, 0.5f, 1.0f })
+            {
+                DynamicNoteState state;
+                const auto result = select (map, NoteQuantizer::midiToHz (33), strength, state, current);
+                expect (result.targetDelayMs == current.delayMs,
+                        "learned-note delay must exactly match current");
+                expect (result.targetPolarityInvert == current.polarityInvert,
+                        "learned-note polarity must exactly match current");
+            }
+
+            auto fallbackMap = makeMap();
+            fallbackMap.notes[(size_t) NotePhaseMapSnapshot::indexForMidi (33)].timingConfidence = 0.0f;
+            DynamicNoteState state;
+            const auto fallback = select (fallbackMap, NoteQuantizer::midiToHz (33), 0.5f, state, current);
+            expect (fallback.fallbackActive && ! fallback.usingLearnedNote);
+            expect (fallback.targetDelayMs == current.delayMs,
+                    "fallback delay must exactly match current");
+            expect (fallback.targetPolarityInvert == current.polarityInvert,
+                    "fallback polarity must exactly match current");
         }
 
         beginTest ("T13: context tolerance is inclusive and sample rate is metadata");

@@ -415,8 +415,10 @@ private:
     juce::AudioBuffer<float> lowBuffer;
     juce::AudioBuffer<float> highBuffer;
     LinkwitzRileyCrossover crossover;
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> lowDelay;
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> highDelay;
+    // JUCE's Lagrange3rd is a four-point, third-order fractional-delay tap.
+    // Both low taps stay in the same preallocated delay line during a crossfade.
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd> lowDelay;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd> highDelay;
     std::array<std::array<juce::dsp::IIR::Filter<float>, (size_t) maxAllpassStages>, 2> allpassFilters;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoothedCrossover;

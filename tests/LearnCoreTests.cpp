@@ -1,6 +1,7 @@
 #include "TestCommon.h"
 
 #include "FixedTimingRotatorSearch.h"
+#include "ConstrainedDtwRefiner.h"
 #include "FrozenCrossoverPhaseSimulation.h"
 #include "LearnHitQueue.h"
 #include "LearnPipelineCore.h"
@@ -138,7 +139,101 @@ namespace
     }
 
     int midiFor (double hz) { return NoteQuantizer::hzToMidi ((float) hz); }
+
+    void addDeterministicNoise (LearnHitWindow& hit, float amount)
+    {
+        for (int i = 0; i < (int) hit.kick.size(); ++i)
+            hit.kick[(size_t) i] += amount * std::sin ((float) i * 0.173f + 0.37f);
+    }
 }
+
+//============================================================================//
+// Learn-only constrained DTW timing refinement
+//============================================================================//
+class ConstrainedDtwRefinerTests : public juce::UnitTest
+{
+public:
+    ConstrainedDtwRefinerTests() : juce::UnitTest ("ConstrainedDtwRefiner", "Phase3") {}
+
+    void runTest() override
+    {
+        beginTest ("FFT-coarse Learn refinement recovers signed fractional offsets with noise");
+        {
+            const double sr = 48000.0;
+            ConstrainedDtwRefiner::Scratch scratch;
+            for (const float delayMs : { 2.35f, -2.65f })
+            {
+                auto hit = makeHit (sr, 55.0, delayMs, false, 0);
+                addDeterministicNoise (hit, 0.005f);
+                const auto coarse = PhaseFixEngine::analyze (
+                    hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                    20.0f, InterpolationType::Linear, false);
+                expect (coarse.valid && coarse.enoughSignal);
+                const auto refined = ConstrainedDtwRefiner::refine (
+                    hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                    coarse.bassDelayMs * (float) sr / 1000.0f,
+                    coarse.bassPolarityInvert, scratch);
+                expect (refined.valid && ! refined.ambiguous,
+                        "delay=" + juce::String (delayMs, 2));
+                expectWithinAbsoluteError (refined.delaySamples * 1000.0f / (float) sr,
+                                           -delayMs, 0.20f,
+                                           "delay=" + juce::String (delayMs, 2));
+
+                const auto repeated = ConstrainedDtwRefiner::refine (
+                    hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), sr,
+                    coarse.bassDelayMs * (float) sr / 1000.0f,
+                    coarse.bassPolarityInvert, scratch);
+                expectWithinAbsoluteError (repeated.delaySamples, refined.delaySamples, 0.0f,
+                                           "reuses fixed scratch deterministically");
+            }
+        }
+
+        beginTest ("Periodic alternatives inside the narrow band are rejected as ambiguous");
+        {
+            constexpr int n = 1200;
+            std::vector<float> bass ((size_t) n), kick ((size_t) n);
+            for (int i = 0; i < n; ++i)
+                bass[(size_t) i] = kick[(size_t) i]
+                    = (float) std::sin (kTwoPi * 4000.0 * (double) i / 48000.0);
+            ConstrainedDtwRefiner::Scratch scratch;
+            const auto result = ConstrainedDtwRefiner::refine (
+                bass.data(), kick.data(), n, 48000.0, 0.0f, false, scratch);
+            expect (! result.valid && result.ambiguous);
+        }
+
+        beginTest ("Cancellation is observed at bounded DTW work units");
+        {
+            auto hit = makeHit (48000.0, 55.0, 2.25f, false, 0);
+            ConstrainedDtwRefiner::Scratch scratch;
+            std::atomic<int> checks { 0 };
+            const auto result = ConstrainedDtwRefiner::refine (
+                hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), 48000.0,
+                2.25f * 48.0f, false, scratch,
+                [&checks] { return checks.fetch_add (1, std::memory_order_relaxed) >= 2; });
+            expect (result.cancelled && ! result.valid);
+        }
+
+        beginTest ("Multiple notes retain one refined scalar timing and offsets beyond 20 ms fail");
+        {
+            const double sr = 48000.0;
+            std::vector<LearnHitWindow> multiNote;
+            int sequence = 0;
+            for (double hz : { 55.0, 82.41 })
+                for (int i = 0; i < 5; ++i)
+                    multiNote.push_back (makeHit (sr, hz, 2.35f, false, sequence++));
+            const auto refined = LearnPipelineCore::finalize (multiNote, testConfig (sr));
+            expect (refined.valid);
+            expectWithinAbsoluteError (refined.map.base.delayMs, -2.35f, 0.10f);
+
+            std::vector<LearnHitWindow> outsideBudget;
+            for (int i = 0; i < 5; ++i)
+                outsideBudget.push_back (makeHit (sr, 55.0, 25.25f, false, i));
+            const auto rejected = LearnPipelineCore::finalize (outsideBudget, testConfig (sr));
+            expect (! rejected.valid);
+            expect (rejected.message.containsIgnoreCase ("budget"));
+        }
+    }
+};
 
 //============================================================================//
 // Pass A - global timing recovery
@@ -767,6 +862,7 @@ public:
 };
 
 static LearnPassATests learnPassATests;
+static ConstrainedDtwRefinerTests constrainedDtwRefinerTests;
 static LearnPassBTests learnPassBTests;
 static LearnFixedTimingTests learnFixedTimingTests;
 static FrozenCrossoverTests frozenCrossoverTests;

@@ -493,6 +493,9 @@ public:
         g.fundamentalHz = 55.0f;
         g.allpassFreqHz = 90.0f;
         g.allpassQ = 1.1f;
+        g.delayMs = -2.3f;
+        g.polarityInvert = true;
+        g.timingConfidence = 0.7f;
         g.confidence = 0.7f;
         g.fundamentalSpreadRatio = 0.05f;
         g.hitCount = 24;
@@ -507,6 +510,10 @@ public:
         e.fundamentalHz = fundamentalHz;
         e.allpassFreqHz = allpassFreqHz;
         e.allpassQ = q;
+        e.delayMs = 1.25f;
+        e.polarityInvert = false;
+        e.timingConfidence = 0.79f;
+        e.timingSpreadMs = 0.03f;
         e.confidence = 0.82f;
         e.fundamentalSpreadRatio = 0.04f;
         e.hitCount = 6;
@@ -520,6 +527,10 @@ public:
         expectWithinAbsoluteError (a.fundamentalHz, b.fundamentalHz, 1.0e-3f, tag + " fundamentalHz");
         expectWithinAbsoluteError (a.allpassFreqHz, b.allpassFreqHz, 1.0e-3f, tag + " allpassFreqHz");
         expectWithinAbsoluteError (a.allpassQ, b.allpassQ, 1.0e-3f, tag + " q");
+        expectWithinAbsoluteError (a.delayMs, b.delayMs, 1.0e-3f, tag + " delay");
+        expect (a.polarityInvert == b.polarityInvert, tag + " polarity");
+        expectWithinAbsoluteError (a.timingConfidence, b.timingConfidence, 1.0e-3f, tag + " timing confidence");
+        expectWithinAbsoluteError (a.timingSpreadMs, b.timingSpreadMs, 1.0e-3f, tag + " timing spread");
         expectWithinAbsoluteError (a.confidence, b.confidence, 1.0e-3f, tag + " confidence");
         expectWithinAbsoluteError (a.fundamentalSpreadRatio, b.fundamentalSpreadRatio, 1.0e-3f, tag + " spread");
         expectEquals (a.hitCount, b.hitCount, tag + " hits");
@@ -584,6 +595,32 @@ public:
             const auto parsed = noteMapFromValueTree (tree);
             expect (! parsed.valid);
             expect (! parsed.notes[(size_t) NotePhaseMapSnapshot::indexForMidi (33)].learned);
+        }
+
+        beginTest ("Schema v2 maps load with their global timing as each note fallback");
+        {
+            auto original = makePopulatedMap();
+            original.base.delayMs = -2.5f;
+            original.base.polarityInvert = true;
+            auto tree = noteMapToValueTree (original);
+            tree.setProperty (juce::Identifier (NoteMapKeys::schemaVersion),
+                              (int) NoteMap::kPreviousSchemaVersion, nullptr);
+            for (int c = 0; c < tree.getNumChildren(); ++c)
+            {
+                auto child = tree.getChild (c);
+                child.removeProperty (juce::Identifier (NoteMapKeys::noteDelayMs), nullptr);
+                child.removeProperty (juce::Identifier (NoteMapKeys::notePolarity), nullptr);
+                child.removeProperty (juce::Identifier (NoteMapKeys::noteTimingConfidence), nullptr);
+                child.removeProperty (juce::Identifier (NoteMapKeys::noteTimingSpreadMs), nullptr);
+            }
+
+            const auto parsed = noteMapFromValueTree (tree);
+            const int idx = NotePhaseMapSnapshot::indexForMidi (33);
+            expect (parsed.valid);
+            expectEquals ((int) parsed.schemaVersion, (int) NoteMap::kSchemaVersion);
+            expectWithinAbsoluteError (parsed.notes[(size_t) idx].delayMs, -2.5f, 1.0e-6f);
+            expect (parsed.notes[(size_t) idx].polarityInvert);
+            expectWithinAbsoluteError (parsed.notes[(size_t) idx].timingConfidence, 1.0f, 1.0e-6f);
         }
 
         beginTest ("Corrupted float values cannot produce NaN/Inf and reject the note");

@@ -5,9 +5,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <vector>
 
 #include "util/ScopeFifo.h"
@@ -39,6 +39,8 @@ class KickLockAudioProcessor : public juce::AudioProcessor,
                                private juce::Timer
 {
 public:
+    static constexpr int cooperativeTeardownBoundMs = 3000;
+
     struct CallbackPauseControlForTesting
     {
         void pause();
@@ -303,6 +305,7 @@ public:
 
 private:
     class AutoAlignEngine;
+    class LearnWorker;
 
     struct ParameterSnapshot
     {
@@ -447,11 +450,18 @@ private:
     std::atomic<bool> learnCancelRequested { false };
     std::atomic<bool> learnAudioCaptureAcknowledged { false };
     std::atomic<bool> shuttingDown { false };
-    std::thread learnWorker;
+    std::unique_ptr<LearnWorker> learnWorker;
+    std::atomic<std::shared_ptr<const LearnSessionContext>> learnWorkerSession;
+    std::atomic<int> learnQueueUsers { 0 };
+    std::atomic<bool> learnQueueReconfiguring { false };
+    std::atomic<bool> learnQueueReady { false };
+    std::atomic<bool> learnQueuePrepareRequested { false };
+    std::atomic<bool> learnQueueResetRequested { false };
+    std::atomic<double> learnQueueSampleRate { 44100.0 };
+    std::atomic<uint64_t> learnQueuePreparedGeneration { 0 };
+    std::atomic<uint64_t> learnQueueRequestedGeneration { 0 };
+    std::atomic<uint64_t> learnQueueActiveGeneration { 0 };
     std::mutex learnControlMutex;
-    std::mutex learnWorkerCompletionMutex;
-    std::condition_variable learnWorkerCompletionCondition;
-    bool learnWorkerFinished = true;
     std::shared_ptr<LearnWorkerPauseControlForTesting> learnWorkerPauseControlForTesting =
         std::make_shared<LearnWorkerPauseControlForTesting>();
     mutable std::mutex learnMutex;
@@ -483,8 +493,9 @@ private:
     // synchronous analyzeFix() and the background worker; publishes the result
     // and window under resultMutex.
     PhaseFixResult computeAndPublishFix (const std::vector<float>& bass,
-                                         const std::vector<float>& kick,
-                                         int numSamples);
+                                          const std::vector<float>& kick,
+                                          int numSamples,
+                                          const std::function<bool()>& shouldCancel = {});
 
     // Shared observation path (used by both processBlock() and
     // processBlockBypassed()) so diagnostic metering — Analyze capture, the
@@ -539,13 +550,17 @@ private:
     void serviceLearnAudioCommands() noexcept;
     void drainPendingMapUpdates() noexcept;
     void runLearnWorker (uint64_t sessionId, LearnSessionContext context);
+    bool prepareLearnQueueIfSafe();
+    bool resetLearnQueueIfSafe();
+    bool enterLearnQueue() noexcept;
+    void leaveLearnQueue() noexcept;
+    bool beginLearnQueueMutation() noexcept;
+    void endLearnQueueMutation() noexcept;
     void requestMapPublication (const NotePhaseMapSnapshot& map);
     bool retryMapPublication();
-    bool waitForLearnWorker (int timeoutMs);
-    void waitForLearnWorkerUntilFinished();
-    void signalLearnWorkerFinished();
     bool pauseLearnWorkerForTesting (LearnState state, uint64_t sessionId);
     void clearPendingLearnCandidate();
+    void cancelLearnLocked();
     juce::String getLearnApplyBlockedReason (const PendingLearnCandidate&) const;
     void invalidateLearnSession();
     void resetResolvedLearnStateToIdle();

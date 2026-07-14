@@ -1,5 +1,6 @@
 #include "TestCommon.h"
 #include "PluginEditor.h"
+#include "util/SpectrumFifo.h"
 
 class ScopeVisualTests : public juce::UnitTest
 {
@@ -489,6 +490,24 @@ public:
             expectWithinAbsoluteError (spectrumDisplayMaximumFrequency (96000.0f), 20000.0f, 1.0e-4f);
         }
 
+        beginTest ("Spectrum FIFO drops stale frames and keeps storage stable across reprepare");
+        {
+            SpectrumFifo fifo;
+            fifo.prepare (8); // AbstractFifo stores seven usable samples.
+            const auto firstGeneration = fifo.getGeneration();
+            for (int i = 0; i < 16; ++i)
+                fifo.pushSample ((float) i, (float) i, 0.0f, 0.0f, 1, 0);
+
+            std::array<float, 4> mainL {}, mainR {}, sideL {}, sideR {};
+            expectEquals (fifo.readLatest (mainL.data(), mainR.data(), sideL.data(), sideR.data(), 4), 4);
+            expectWithinAbsoluteError (mainL[0], 3.0f, 1.0e-6f);
+            expectWithinAbsoluteError (mainL[3], 6.0f, 1.0e-6f);
+            expectGreaterThan (fifo.getDroppedSampleCount(), 0);
+
+            fifo.prepare (8);
+            expectGreaterThan ((int) fifo.getGeneration(), (int) firstGeneration);
+        }
+
         beginTest ("Separate mode lane helper follows shared geometry");
         {
             const auto geometry = calculateSeparateModeGeometry (100.0f);
@@ -860,7 +879,7 @@ public:
             expectEquals (formatDynamicStrength (0.506f), juce::String ("51%"));
             expectEquals (formatDynamicStrength (1.0f), juce::String ("100%"));
             expectEquals (juce::String (dynamicStrengthTooltip()),
-                          juce::String ("0% uses the learned global correction. 100% uses the full per-note correction."));
+                          juce::String ("0% uses the global phase filter setting for every note. 100% uses each note's learned Freq/Q; Delay and Polarity stay global."));
         }
 
         beginTest ("Learn note chips use MIDI names and the shared readiness policy");

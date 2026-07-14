@@ -1,4 +1,6 @@
 # CMake and build files
+/build-codex/
+/build-codex-asan/
 /build/
 /build-phase5/
 /build2/
