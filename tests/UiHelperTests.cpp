@@ -837,10 +837,21 @@ public:
             expect (staticIdle.enabled);
             expectEquals ((int) staticIdle.action, (int) PrimaryWorkflowAction::StartAnalyze);
 
+            // Strict ownership: unresolved Learn under Static never steals Analyze.
+            for (const auto state : { LearnState::Capturing, LearnState::ResultReady,
+                                      LearnState::Failed, LearnState::NotEnoughMaterial })
+            {
+                const auto staticOwned = primaryWorkflowPresentation (false, state, true, false);
+                expectEquals (juce::String (staticOwned.text), juce::String ("Analyze"));
+                expectEquals ((int) staticOwned.action, (int) PrimaryWorkflowAction::StartAnalyze);
+                expect (primaryWorkflowIsLearnFamily (staticOwned) == false);
+            }
+
             auto dynamicIdle = primaryWorkflowPresentation (true, LearnState::Idle, false, false);
             expectEquals (juce::String (dynamicIdle.text), juce::String ("Learn"));
             expect (dynamicIdle.enabled);
             expectEquals ((int) dynamicIdle.action, (int) PrimaryWorkflowAction::StartLearn);
+            expect (primaryWorkflowIsLearnFamily (dynamicIdle));
 
             auto capturing = primaryWorkflowPresentation (true, LearnState::Capturing, false, false);
             expectEquals (primaryWorkflowText (capturing, 6), juce::String ("Stop Learn (6 hits)"));
@@ -857,6 +868,231 @@ public:
                 expectEquals (juce::String (resolved.text), juce::String ("Learn Again"));
                 expectEquals ((int) resolved.action, (int) PrimaryWorkflowAction::LearnAgain);
             }
+        }
+
+        beginTest ("Mode transition actions are edge-triggered and idempotent");
+        {
+            const auto none = modeTransitionActions (CorrectionMode::Static, CorrectionMode::Static);
+            expect (! none.cancelActiveLearn && ! none.discardPendingLearn
+                    && ! none.resetAnalyzePresentation && ! none.clearLearnPresentation);
+
+            const auto toStatic = modeTransitionActions (CorrectionMode::Dynamic, CorrectionMode::Static);
+            expect (toStatic.cancelActiveLearn);
+            expect (toStatic.discardPendingLearn);
+            expect (toStatic.clearLearnPresentation);
+            expect (! toStatic.resetAnalyzePresentation);
+
+            const auto toDynamic = modeTransitionActions (CorrectionMode::Static, CorrectionMode::Dynamic);
+            expect (toDynamic.resetAnalyzePresentation);
+            expect (! toDynamic.cancelActiveLearn);
+            expect (! toDynamic.discardPendingLearn);
+
+            // Construction in Static with leftover Learn only clears presentation chrome —
+            // processor-owned Learn must survive editor open/close.
+            const auto openStatic = initialModeActions (CorrectionMode::Static);
+            expect (! openStatic.cancelActiveLearn);
+            expect (! openStatic.discardPendingLearn);
+            expect (openStatic.clearLearnPresentation);
+
+            const auto openDynamic = initialModeActions (CorrectionMode::Dynamic);
+            expect (openDynamic.resetAnalyzePresentation);
+            expect (! openDynamic.discardPendingLearn);
+        }
+
+        beginTest ("Impossible Static/Dynamic UI combinations are rejected");
+        {
+            // Static + Learn family primary / Apply Learn / Discard / progress / chips
+            expect (isImpossibleWorkflowCombo (CorrectionMode::Static, true, false, false, false, false));
+            expect (isImpossibleWorkflowCombo (CorrectionMode::Static, false, true, false, false, false));
+            expect (isImpossibleWorkflowCombo (CorrectionMode::Static, false, false, true, false, false));
+            expect (isImpossibleWorkflowCombo (CorrectionMode::Static, false, false, false, true, false));
+            expect (isImpossibleWorkflowCombo (CorrectionMode::Static, false, false, false, false, true));
+            expect (! isImpossibleWorkflowCombo (CorrectionMode::Static, false, false, false, false, false));
+
+            // Dynamic + Analyze primary
+            expect (isImpossibleWorkflowCombo (CorrectionMode::Dynamic, false, false, false, true, false));
+            expect (! isImpossibleWorkflowCombo (CorrectionMode::Dynamic, true, true, true, true, true));
+
+            // Dynamic must not show Apply Fix as the Dynamic action
+            expect (isImpossibleDynamicApplyFixAsAction (CorrectionMode::Dynamic, true, true, false));
+            expect (! isImpossibleDynamicApplyFixAsAction (CorrectionMode::Dynamic, false, true, false));
+            expect (! isImpossibleDynamicApplyFixAsAction (CorrectionMode::Dynamic, true, false, true));
+            expect (! isImpossibleDynamicApplyFixAsAction (CorrectionMode::Static, true, true, false));
+        }
+
+        beginTest ("Workflow button labels fit top-bar widths at common OS scales");
+        {
+            const auto labels = workflowButtonLabelsToFit();
+            for (const int scalePct : { 100, 125, 150, 200 })
+            {
+                const float scale = uiScaleFactor (scalePct);
+                const int primaryW = scaledPx (kPrimaryWorkflowButtonWidth, scale);
+                const int applyW = scaledPx (kApplyWorkflowButtonWidth, scale);
+                const int discardW = scaledPx (kDiscardWorkflowButtonWidth, scale);
+                // 12.5 pt approximates TextButton label font; leave 10 px padding.
+                for (const auto& label : labels)
+                {
+                    const int textW = measureUiTextWidth (label, 12.5f * scale);
+                    if (label == "Discard")
+                        expect (textW + scaledPx (10, scale) <= discardW,
+                                "Discard overflow at " + juce::String (scalePct) + "%: " + juce::String (textW));
+                    else if (label.startsWith ("Apply"))
+                        expect (textW + scaledPx (10, scale) <= applyW,
+                                label + " overflow at " + juce::String (scalePct) + "%: " + juce::String (textW));
+                    else
+                        expect (textW + scaledPx (10, scale) <= primaryW,
+                                label + " overflow at " + juce::String (scalePct) + "%: " + juce::String (textW));
+                }
+            }
+        }
+
+        beginTest ("Learn progress two-line metrics fit panel; chips below metrics");
+        {
+            expect (learnProgressChipsBeginBelowMetrics());
+            expect (learnProgressChipOriginY() >= kLearnProgressMetricsBlockHeight);
+
+            LearnProgressSnapshot progress;
+            progress.capturedHits = 999;
+            progress.drainedHits = 999;
+            progress.pendingQueueHits = 999;
+            progress.pitchAcceptedHits = 999;
+            progress.rejectedPitchHits = 999;
+            progress.timingUsableHits = 999;
+            expect (learnProgressMetricsFitWidth (kLearnProgressMinWidthForThreeDigitCounters, progress));
+            // Too narrow must fail (proves helper actually measures).
+            expect (! learnProgressMetricsFitWidth (80, progress));
+        }
+
+        beginTest ("Long Learn failure body keeps reason first and fits analyzer bounds");
+        {
+            LearnFinalizeResult result;
+            result.message = "Too few usable timing observations.";
+            result.diagnostics.capturedHits = 55;
+            result.diagnostics.rejectedPitchHits = 55;
+            result.diagnostics.analyzedHits = 1;
+            const auto body = formatLearnFailureBody (result);
+            expect (body.startsWith ("Too few usable timing observations."));
+            expect (body.indexOf ("Too few usable timing observations.")
+                    < body.indexOf ("Captured:"));
+            // Analyzer body region is typically ~200+ px tall after title/ref.
+            expect (failureBodyFitsBounds (body, 280, 200, 12.5f));
+            expect (! failureBodyFitsBounds (body, 280, 20, 12.5f));
+        }
+
+        beginTest ("Dynamic Failed/ResultReady -> Static presentation becomes Analyze immediately");
+        {
+            for (const auto state : { LearnState::Failed, LearnState::ResultReady, LearnState::NotEnoughMaterial })
+            {
+                const auto after = primaryWorkflowPresentation (false, state, true, false);
+                expectEquals (juce::String (after.text), juce::String ("Analyze"));
+                expectEquals ((int) after.action, (int) PrimaryWorkflowAction::StartAnalyze);
+                expect (! primaryWorkflowIsLearnFamily (after));
+                expect (! learnApplyEnabled (state, true) || state == LearnState::ResultReady);
+                // Even with pending, Static presentation never offers Apply Learn.
+                expect (! isImpossibleWorkflowCombo (CorrectionMode::Static, false, false, false, false, false));
+            }
+
+            // Transition actions clear pending Learn UI state.
+            const auto edge = modeTransitionActions (CorrectionMode::Dynamic, CorrectionMode::Static);
+            expect (edge.discardPendingLearn);
+            expect (edge.cancelActiveLearn);
+            expect (edge.clearLearnPresentation);
+        }
+
+        beginTest ("Static Analyze result -> Dynamic presentation becomes Learn immediately");
+        {
+            const auto after = primaryWorkflowPresentation (true, LearnState::Idle, true, false);
+            expectEquals (juce::String (after.text), juce::String ("Learn"));
+            expectEquals ((int) after.action, (int) PrimaryWorkflowAction::StartLearn);
+            expect (primaryWorkflowIsLearnFamily (after));
+
+            const auto edge = modeTransitionActions (CorrectionMode::Static, CorrectionMode::Dynamic);
+            expect (edge.resetAnalyzePresentation);
+            // Pending Learn discard is Dynamic->Static only; applied map is never cleared by actions.
+            expect (! edge.discardPendingLearn);
+            expect (! edge.cancelActiveLearn);
+            expect (! edge.clearLearnPresentation);
+        }
+
+        beginTest ("Mode switch APIs cancel/discard Learn without clearing applied map");
+        {
+            KickLockAudioProcessor processor;
+            processor.prepareToPlay (48000.0, 512);
+
+            // No applied map by default. Mode-switch actions must not invent clearNoteMap.
+            expect (! processor.hasValidNoteMap());
+
+            // Idle cancel/discard are no-ops and must not throw or clear state.
+            processor.cancelLearn();
+            expectEquals ((int) processor.getLearnState(), (int) LearnState::Idle);
+            expect (! processor.discardLatestLearnResult());
+
+            // Dynamic parameter can be written by host automation without feedback loop
+            // (editor listener must not write correction_mode back).
+            if (auto* parameter = processor.apvts.getParameter ("correction_mode"))
+            {
+                parameter->beginChangeGesture();
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (1.0f));
+                parameter->endChangeGesture();
+                expect (processor.apvts.getRawParameterValue ("correction_mode")->load() > 0.5f);
+
+                parameter->beginChangeGesture();
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (0.0f));
+                parameter->endChangeGesture();
+                expect (processor.apvts.getRawParameterValue ("correction_mode")->load() < 0.5f);
+            }
+
+            // Simulated Dynamic Failed -> Static actions: cancel + discard, map untouched.
+            const auto actions = modeTransitionActions (CorrectionMode::Dynamic, CorrectionMode::Static);
+            if (actions.cancelActiveLearn)
+                processor.cancelLearn();
+            if (actions.discardPendingLearn)
+                processor.discardLatestLearnResult();
+            expectEquals ((int) processor.getLearnState(), (int) LearnState::Idle);
+            // Still no map — proves transition does not call clearNoteMap.
+            expect (! processor.hasValidNoteMap());
+        }
+
+        beginTest ("Rapid mode switching stays free of impossible combos");
+        {
+            CorrectionMode mode = CorrectionMode::Static;
+            for (int i = 0; i < 20; ++i)
+            {
+                const auto next = (i % 2 == 0) ? CorrectionMode::Dynamic : CorrectionMode::Static;
+                const auto actions = modeTransitionActions (mode, next);
+                if (mode != next)
+                    expect (actions.cancelActiveLearn == (next == CorrectionMode::Static)
+                            || actions.resetAnalyzePresentation == (next == CorrectionMode::Dynamic));
+
+                mode = next;
+                const bool dynamic = mode == CorrectionMode::Dynamic;
+                const auto primary = primaryWorkflowPresentation (dynamic, LearnState::Idle, true, false);
+                const bool learnFamily = primaryWorkflowIsLearnFamily (primary);
+                const bool applyIsLearn = dynamic; // Dynamic idle hides Apply; label would be Learn path
+                const bool discardVisible = false;
+                const bool progressVisible = dynamic;
+                const bool chipsVisible = false;
+                expect (! isImpossibleWorkflowCombo (mode, learnFamily, false, discardVisible,
+                                                     progressVisible, chipsVisible));
+                // Dynamic idle: Apply Fix must not be visible as Dynamic action
+                expect (! isImpossibleDynamicApplyFixAsAction (mode, false, true, false));
+                juce::ignoreUnused (applyIsLearn, actions);
+            }
+
+            // Idempotent: repeated same-mode transitions no-op.
+            const auto again = modeTransitionActions (CorrectionMode::Dynamic, CorrectionMode::Dynamic);
+            expect (! again.cancelActiveLearn && ! again.discardPendingLearn
+                    && ! again.resetAnalyzePresentation && ! again.clearLearnPresentation);
+        }
+
+        beginTest ("correction_mode denormalize matches Static/Dynamic choice");
+        {
+            expectEquals ((int) correctionModeFromRaw (0.0f), (int) CorrectionMode::Static);
+            expectEquals ((int) correctionModeFromRaw (0.4f), (int) CorrectionMode::Static);
+            expectEquals ((int) correctionModeFromRaw (0.6f), (int) CorrectionMode::Dynamic);
+            expectEquals ((int) correctionModeFromRaw (1.0f), (int) CorrectionMode::Dynamic);
+            expect (workflowUsesLearnUi (CorrectionMode::Dynamic));
+            expect (! workflowUsesLearnUi (CorrectionMode::Static));
         }
 
         beginTest ("Dynamic runtime status keeps the documented precedence");

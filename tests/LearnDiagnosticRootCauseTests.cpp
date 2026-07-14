@@ -483,9 +483,9 @@ public:
                     expect (distinctAcceptedNotes (s) <= 6);
                 }
 
-                // B2: third note only 4 musical kicks, but first transition burns one
-                // accepted hit → third note often ends below kMinHitsPerNote after
-                // pitch filtering. Build unequal sequence manually.
+                // B2: third note only 4 musical kicks; first E2 transition burns pitch
+                // acceptance → third note falls below kMinHitsPerNote. Loss is
+                // pitch rejection + min-hit aggregation, not UI chips / MIDI merge.
                 {
                     std::vector<double> seq;
                     for (int i = 0; i < 5; ++i) seq.push_back (55.0);
@@ -511,23 +511,47 @@ public:
                     auto s = runRealChain ("three_note_third_has_4", sr, bass, kick, midi, 0.0f,
                                            (int) seq.size());
 
-                    const int midi40 = NotePhaseMapSnapshot::indexForMidi (40);
-                    const int acceptedThird = midi40 >= 0 ? s.noteHitCounts[(size_t) midi40] : 0;
-                    // Transition hold on first E2 hit means acceptedThird is typically
-                    // < kMinHitsPerNote (4). Document: loss is min-hit / pitch path,
-                    // not the six-chip UI limit.
-                    expect (distinctAcceptedNotes (s) <= 3, hitTable (s));
-                    expect (acceptedThird <= 4, hitTable (s));
-                    if (acceptedThird > 0 && acceptedThird < NoteMap::kMinHitsPerNote)
-                    {
-                        // Explicit regression lock: third note dies at aggregation
-                        // threshold, not because MIDI merge collapsed it.
-                        expectEquals (NoteQuantizer::hzToMidi (82.41f), 40);
-                    }
-                    // Prove NoteQuantizer does not merge A1/C2/E2.
+                    // Prove NoteQuantizer does not merge A1/C2/E2 into one bucket.
                     expectEquals (NoteQuantizer::hzToMidi (55.0f), 33);
                     expectEquals (NoteQuantizer::hzToMidi (65.41f), 36);
                     expectEquals (NoteQuantizer::hzToMidi (82.41f), 40);
+
+                    const int midi40 = NotePhaseMapSnapshot::indexForMidi (40);
+                    const int acceptedThird = midi40 >= 0 ? s.noteHitCounts[(size_t) midi40] : 0;
+
+                    // First E2 hit after C2→E2 transition: stale previous pitch
+                    // (tracked MIDI still previous) and/or explicit pitchDisagrees.
+                    const HitDiag* firstE2 = nullptr;
+                    for (const auto& h : s.hits)
+                    {
+                        if (h.expectedMidi == 40)
+                        {
+                            firstE2 = &h;
+                            break;
+                        }
+                    }
+                    expect (firstE2 != nullptr, hitTable (s));
+                    if (firstE2 != nullptr)
+                    {
+                        const bool trackedPrevious = firstE2->quantizedMidi >= 0
+                                                   && firstE2->quantizedMidi != 40;
+                        const bool rejectedAsDisagreement = firstE2->pitchDisagrees;
+                        expect (trackedPrevious || rejectedAsDisagreement, hitTable (s));
+                        // Deterministic current path rejects that transition hit on pitch.
+                        expect (! firstE2->pitchAccepted, hitTable (s));
+                        if (trackedPrevious && firstE2->offlineHz > 0.0f)
+                            expect (firstE2->pitchDisagrees || firstE2->pitchInvalid
+                                    || firstE2->octaveAmbiguous, hitTable (s));
+                    }
+
+                    // Aggregation: accepted E2 hits strictly below map threshold, so
+                    // final learned map cannot contain MIDI 40.
+                    expect (acceptedThird < NoteMap::kMinHitsPerNote, hitTable (s));
+                    expect (acceptedThird < 4, hitTable (s));
+                    expect (! learnNoteHasEnoughMaterial (acceptedThird), hitTable (s));
+                    // Not the 6-chip UI limit: at most three distinct pitch buckets.
+                    expect (distinctAcceptedNotes (s) <= 3, hitTable (s));
+                    expect (distinctAcceptedNotes (s) <= 6, hitTable (s));
                 }
 
                 // B3: transitions exactly on kicks (continuous bass, no gap).
@@ -564,20 +588,55 @@ public:
                 }
 
                 // B4: short silence (< 300 ms tracker timeout) between notes.
+                // Prove STALE TRACKER at first C2 and first E2 after the gap —
+                // not merely queue capture/drain equality.
                 {
                     std::vector<float> bass, kick;
                     std::vector<int> midi;
                     int musical = 0;
-                    // kick period 200 ms + no long pad → silence between note groups short
+                    // kick period 200 ms + 120 ms bass → ~80 ms gap, well under 300 ms.
                     buildIsolatedKickBass (sr, notes, 3, 200.0f, 0.0f, 120.0f, false,
                                            bass, kick, midi, musical);
                     auto s = runRealChain ("three_note_short_silence", sr, bass, kick, midi,
                                            0.0f, musical);
-                    // Tracker may still hold previous note across short gaps.
                     expect (s.completedCaptures == s.drained, hitTable (s));
+
+                    auto firstHitWithExpected = [&] (int expected) -> const HitDiag*
+                    {
+                        for (const auto& h : s.hits)
+                            if (h.expectedMidi == expected)
+                                return &h;
+                        return nullptr;
+                    };
+
+                    const auto* firstC2 = firstHitWithExpected (36);
+                    const auto* firstE2 = firstHitWithExpected (40);
+                    expect (firstC2 != nullptr, hitTable (s));
+                    expect (firstE2 != nullptr, hitTable (s));
+
+                    auto isStaleHold = [] (const HitDiag& h, int previousMidi) -> bool
+                    {
+                        const bool trackedPrevious = h.trackedHzAtTrigger > 0.0f
+                                                   && h.quantizedMidi == previousMidi
+                                                   && previousMidi != h.expectedMidi;
+                        const bool pitchDisagreement = h.pitchDisagrees
+                                                    && h.expectedMidi >= 0
+                                                    && h.quantizedMidi >= 0
+                                                    && h.expectedMidi != h.quantizedMidi;
+                        return trackedPrevious || pitchDisagreement;
+                    };
+
+                    // C2 after A1 (33), E2 after C2 (36). Short silence keeps hold.
+                    if (firstC2 != nullptr)
+                        expect (isStaleHold (*firstC2, 33), hitTable (s));
+                    if (firstE2 != nullptr)
+                        expect (isStaleHold (*firstE2, 36), hitTable (s));
                 }
 
                 // B5: long silence clears tracker (> 300 ms).
+                // Inspect ONLY the first C2 and first E2 after the long pad —
+                // do not count arbitrary zero-pitch hits, and do not let the
+                // session-start A1 hit alone satisfy the clear condition.
                 {
                     std::vector<float> bass, kick;
                     std::vector<int> midi;
@@ -586,13 +645,32 @@ public:
                                            bass, kick, midi, musical);
                     auto s = runRealChain ("three_note_long_silence_clear", sr, bass, kick, midi,
                                            0.0f, musical);
-                    // After long silence, first hit of a new group often has tracked=0
-                    // (not previous note) until re-lock.
-                    int zeroTrackedFirsts = 0;
-                    for (const auto& h : s.hits)
-                        if (h.sequence >= 0 && ! (h.trackedHzAtTrigger > 0.0f))
-                            ++zeroTrackedFirsts;
-                    expect (zeroTrackedFirsts >= 1, hitTable (s));
+
+                    auto firstHitWithExpected = [&] (int expected) -> const HitDiag*
+                    {
+                        for (const auto& h : s.hits)
+                            if (h.expectedMidi == expected)
+                                return &h;
+                        return nullptr;
+                    };
+
+                    const auto* firstC2 = firstHitWithExpected (36);
+                    const auto* firstE2 = firstHitWithExpected (40);
+                    expect (firstC2 != nullptr, hitTable (s));
+                    expect (firstE2 != nullptr, hitTable (s));
+
+                    auto clearedPrevious = [] (const HitDiag& h, int previousMidi) -> bool
+                    {
+                        // Cleared: not holding previous note. 0 Hz re-lock is OK.
+                        if (! (h.trackedHzAtTrigger > 0.0f))
+                            return true;
+                        return h.quantizedMidi != previousMidi;
+                    };
+
+                    if (firstC2 != nullptr)
+                        expect (clearedPrevious (*firstC2, 33), hitTable (s));
+                    if (firstE2 != nullptr)
+                        expect (clearedPrevious (*firstE2, 36), hitTable (s));
                 }
             }
         }
@@ -624,9 +702,9 @@ public:
                 expect (s.detections <= musical + 4, hitTable (s));
                 // Overlaps possible if secondary fires during capture.
                 expect (s.ignoredOverlaps >= 0, hitTable (s));
-                // Long tail alone does not force zero pitch-accepted notes when bass is on-time.
-                // (May still fail finalize for timing/rotator reasons with reduced grid.)
-                expect (s.pitchAccepted >= 1 || s.timingUsable >= 1, hitTable (s));
+                // On-time bass through a long-tail kick must still yield pitch-accepted hits.
+                // Long tail alone is not the zero-note failure mode.
+                expect (s.pitchAccepted >= 1, hitTable (s));
             }
         }
 

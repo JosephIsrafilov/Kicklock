@@ -129,7 +129,8 @@ private:
 // analyzer panel explains what Analyze recommends. All heavy DSP lives in the
 // processor — the editor only wires parameters and polls published state.
 class KickLockAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                     private juce::Timer
+                                     private juce::Timer,
+                                     private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     explicit KickLockAudioProcessorEditor (KickLockAudioProcessor&);
@@ -141,6 +142,7 @@ public:
 
 private:
     void timerCallback() override;
+    void parameterChanged (const juce::String& parameterID, float newValue) override;
 
     void configureRotary (juce::Slider& slider);
     void configureSectionLabel (juce::Label& label, const juce::String& text);
@@ -154,6 +156,13 @@ private:
     void pushScopeSettings();
     void updateVisualOffsetAvailability (ScopeViewMode mode);
     void setChromeVisible (bool shouldBeVisible);
+
+    // Single edge-triggered owner for Static <-> Dynamic presentation.
+    // Covers user click, host automation, preset restore, and construction.
+    void handleCorrectionModeChanged (CorrectionMode newMode, bool force = false);
+    CorrectionMode readCorrectionMode() const noexcept;
+    void applyModeTransitionSideEffects (const ModeTransitionActions& actions);
+    void applyWorkflowChromeForMode (CorrectionMode mode, bool layoutMayChange);
 
     KickLockAudioProcessor& audioProcessor;
     KickLockLookAndFeel lookAndFeel;
@@ -264,6 +273,13 @@ private:
     bool latestResultAutoApplied = false;
     bool showingLearnWorkflow = false;
     bool dynamicModeSelected = false;
+    bool hasRenderedCorrectionMode = false;
+    CorrectionMode renderedCorrectionMode = CorrectionMode::Static;
+    uint64_t lastLearnBodySessionId = 0;
+    LearnState lastLearnBodyState = LearnState::Idle;
+    juce::String lastLearnBodyText;
+    juce::String lastPrimaryButtonText;
+    juce::String lastApplyButtonText;
     LearnProgressSnapshot latestLearnProgress;
     NotePhaseMapSnapshot latestNoteMap;
 
