@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Fixed
+- **macOS build compatibility.** Use portable synchronized access
+  for the Learn worker session and correct a const Timer test helper, enabling
+  Release VST3/AU builds on Xcode.
+
 ## [0.2.0]
 
 ### Added

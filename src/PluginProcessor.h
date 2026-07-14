@@ -284,7 +284,7 @@ public:
     }
     bool serviceMapPublicationRetryForTesting();
     void requestMapPublicationForTesting (const NotePhaseMapSnapshot& map) { requestMapPublication (map); }
-    bool isMapPublicationRetryScheduledForTesting() const noexcept { return isTimerRunning(); }
+    bool isMapPublicationRetryScheduledForTesting() noexcept { return isTimerRunning(); }
     void setMapPublicationRetryObserverForTesting (std::shared_ptr<std::atomic<int>> observer)
     {
         mapPublicationRetryObserver = std::move (observer);
@@ -451,7 +451,8 @@ private:
     std::atomic<bool> learnAudioCaptureAcknowledged { false };
     std::atomic<bool> shuttingDown { false };
     std::unique_ptr<LearnWorker> learnWorker;
-    std::atomic<std::shared_ptr<const LearnSessionContext>> learnWorkerSession;
+    std::mutex learnWorkerSessionMutex;
+    std::shared_ptr<const LearnSessionContext> learnWorkerSession;
     std::atomic<int> learnQueueUsers { 0 };
     std::atomic<bool> learnQueueReconfiguring { false };
     std::atomic<bool> learnQueueReady { false };

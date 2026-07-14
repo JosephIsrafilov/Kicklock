@@ -7,7 +7,7 @@ if(MSVC AND NOT DEFINED CMAKE_GENERATOR_TOOLSET)
     set(CMAKE_GENERATOR_TOOLSET "host=x64")
 endif()
 
-project(KickLock VERSION 0.2.0)
+project(KickLock VERSION 0.2.1)
 
 # Only meaningful for Visual Studio generators; setting it under Makefiles/
 # Ninja (Linux CI) makes every sub-configure — including JUCE's FetchContent

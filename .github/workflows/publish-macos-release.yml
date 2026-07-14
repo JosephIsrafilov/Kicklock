@@ -1,4 +1,4 @@
-name: Publish macOS Release Assets
+name: Publish KickLock Release
 
 on:
   workflow_dispatch:
@@ -6,14 +6,59 @@ on:
       tag:
         description: Existing Git tag to build and publish
         required: true
-        default: v0.2.0
+        default: v0.2.1
         type: string
 
 permissions:
   contents: write
 
 jobs:
-  publish:
+  windows:
+    name: Windows x64 VST3
+    runs-on: windows-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tagged source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          if [ "$TAG" = "v0.2.0" ]; then
+            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
+          fi
+
+      - name: Configure Release build
+        shell: bash
+        run: cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
+
+      - name: Build VST3
+        shell: bash
+        run: cmake --build build-release --config Release --parallel 4
+
+      - name: Validate Release build and VST3
+        shell: bash
+        run: ctest --test-dir build-release -C Release --output-on-failure
+
+      - name: Package VST3 bundle
+        shell: pwsh
+        run: |
+          $vst3 = "build-release/KickLock_artefacts/Release/VST3/KickLock.vst3"
+          if (-not (Test-Path -LiteralPath $vst3 -PathType Container)) { throw "Missing VST3 bundle: $vst3" }
+          Compress-Archive -Path $vst3 -DestinationPath "KickLock-$env:TAG-windows-x64-vst3.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: KickLock-${{ inputs.tag }}-windows-x64-vst3.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal VST3 and AU
     runs-on: macos-14
     env:
       GH_TOKEN: ${{ github.token }}
@@ -22,6 +67,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tagged source
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          if [ "$TAG" = "v0.2.0" ]; then
+            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
+          fi
 
       - name: Configure universal Release build
         run: >
@@ -32,8 +85,39 @@ jobs:
       - name: Build VST3 and AU
         run: cmake --build build-release --config Release --parallel 4
 
-      - name: Validate Release build
+      - name: Validate Release build and VST3
         run: ctest --test-dir build-release -C Release --output-on-failure
+
+      - name: Validate bundles and universal architectures
+        run: |
+          vst3="build-release/KickLock_artefacts/Release/VST3/KickLock.vst3"
+          au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
+          test -d "$vst3"
+          test -d "$au"
+          for binary in "$vst3/Contents/MacOS/KickLock" "$au/Contents/MacOS/KickLock"; do
+            test -f "$binary"
+            lipo -info "$binary"
+            lipo -info "$binary" | grep -qw arm64
+            lipo -info "$binary" | grep -qw x86_64
+          done
+
+      - name: Validate AU
+        run: |
+          au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
+          component_dir="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$component_dir"
+          rm -rf "$component_dir/KickLock.component"
+          ditto "$au" "$component_dir/KickLock.component"
+          auval_line=""
+          for _ in 1 2 3 4 5; do
+            auval_line="$(auval -a 2>/dev/null | awk '/[[:space:]]KickLock([[:space:]]|$)/ { print; exit }')"
+            test -n "$auval_line" && break
+            sleep 1
+          done
+          test -n "$auval_line"
+          set -- $auval_line
+          test "$#" -ge 3
+          auval -v "$2" "$1" "$3"
 
       - name: Package macOS plugins
         run: |
@@ -44,23 +128,114 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$vst3" "KickLock-${TAG}-macos-universal-vst3.zip"
           ditto -c -k --sequesterRsrc --keepParent "$au" "KickLock-${TAG}-macos-universal-au.zip"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-assets
+          path: |
+            KickLock-${{ inputs.tag }}-macos-universal-vst3.zip
+            KickLock-${{ inputs.tag }}-macos-universal-au.zip
+          if-no-files-found: error
+
+  linux-sanitizers:
+    name: Linux ASan and UBSan
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tagged source
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          if [ "$TAG" = "v0.2.0" ]; then
+            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
+          fi
+
+      - name: Install JUCE Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libx11-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev \
+            libgl1-mesa-dev libcurl4-openssl-dev ninja-build
+
+      - name: Configure Debug sanitizer build
+        run: |
+          cmake -B build-sanitizers -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DKICKLOCK_ENABLE_PLUGINVAL=OFF \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build tests
+        run: cmake --build build-sanitizers --target KickLockDspTests --parallel 4
+
+      - name: Run ASan and UBSan tests
+        env:
+          KICKLOCK_SKIP_TIMED_ASSERTS: "1"
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: ctest --test-dir build-sanitizers -R '^KickLockDspTests$' --output-on-failure
+
+  publish:
+    name: Publish release assets
+    needs: [windows, macos, linux-sanitizers]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify tagged source
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          if [ "$TAG" = "v0.2.0" ]; then
+            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release if needed
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "KickLock $TAG" \
+              --notes-file CHANGELOG.md
+          fi
+
+      - name: State macOS signing status
+        run: |
+          notes="$(gh release view "$TAG" --json body --jq .body)"
+          if ! printf '%s' "$notes" | grep -Fqi "unsigned and not notarized"; then
+            gh release edit "$TAG" --notes "${notes}
+
+          ## macOS distribution
+          The macOS VST3 and AU binaries are unsigned and not notarized."
+          fi
+
+      - name: Remove stale assets
+        run: |
+          while IFS= read -r asset; do
+            case "$asset" in
+              "KickLock-${TAG}-windows-x64-vst3.zip"|"KickLock-${TAG}-macos-universal-vst3.zip"|"KickLock-${TAG}-macos-universal-au.zip") ;;
+              *) gh release delete-asset "$TAG" "$asset" --yes ;;
+            esac
+          done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
+
       - name: Upload release assets
         run: |
           gh release upload "$TAG" \
-            "KickLock-${TAG}-macos-universal-vst3.zip" \
-            "KickLock-${TAG}-macos-universal-au.zip" \
+            "release-assets/KickLock-${TAG}-windows-x64-vst3.zip" \
+            "release-assets/KickLock-${TAG}-macos-universal-vst3.zip" \
+            "release-assets/KickLock-${TAG}-macos-universal-au.zip" \
             --clobber
-
-      - name: Update release notes
-        run: |
-          gh release edit "$TAG" --notes "## Highlights
-          - Static and Dynamic correction workflows, including per-note trusted Freq/Q learning with global Delay and Polarity.
-          - Persistent Dynamic note maps, explicit Apply Learn flow, and project-state compatibility.
-          - Runtime, worker lifecycle, spectrum, and release-validation hardening.
-
-          ## Assets
-          - Windows x64 VST3.
-          - macOS universal VST3 and AU. These macOS binaries are unsigned and not notarized.
-
-          ## Validation
-          - Release test suite and pluginval strictness 10 passed."

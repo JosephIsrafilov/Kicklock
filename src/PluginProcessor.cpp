@@ -683,7 +683,11 @@ public:
       owner.prepareLearnQueueIfSafe();
       owner.resetLearnQueueIfSafe();
 
-      const auto context = owner.learnWorkerSession.load (std::memory_order_acquire);
+      std::shared_ptr<const LearnSessionContext> context;
+      {
+        const std::lock_guard<std::mutex> lock (owner.learnWorkerSessionMutex);
+        context = owner.learnWorkerSession;
+      }
       const auto sessionId = owner.activeLearnSessionId.load (std::memory_order_acquire);
       if (context != nullptr && context->sessionId == sessionId
           && learnStateIsBusy (owner.learnState.load (std::memory_order_acquire)))
@@ -809,7 +813,10 @@ KickLockAudioProcessor::~KickLockAudioProcessor() {
           learnWorker->waitForThreadToExit (-1);
        learnWorker.reset();
      }
-   learnWorkerSession.store (nullptr, std::memory_order_release);
+   {
+     const std::lock_guard<std::mutex> lock (learnWorkerSessionMutex);
+     learnWorkerSession.reset();
+   }
 
   for (const auto *id :
        {"delay_ms", "delayMs", "polarity_invert", "polarityInvert",
@@ -2978,7 +2985,10 @@ bool KickLockAudioProcessor::beginLearn()
   learnCancelRequested.store (false, std::memory_order_release);
   learnAudioCaptureAcknowledged.store (false, std::memory_order_release);
   learnState.store (LearnState::Preparing, std::memory_order_release);
-  learnWorkerSession.store (std::make_shared<LearnSessionContext> (context), std::memory_order_release);
+  {
+    const std::lock_guard<std::mutex> lock (learnWorkerSessionMutex);
+    learnWorkerSession = std::make_shared<LearnSessionContext> (context);
+  }
   learnQueueRequestedGeneration.store (
       learnQueuePreparedGeneration.load (std::memory_order_acquire) + 1,
       std::memory_order_release);
