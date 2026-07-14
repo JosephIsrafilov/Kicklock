@@ -59,7 +59,7 @@ jobs:
 
   macos:
     name: macOS universal VST3 and AU
-    runs-on: macos-14
+    runs-on: macos-13
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ inputs.tag }}
