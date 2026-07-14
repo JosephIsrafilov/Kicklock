@@ -104,12 +104,12 @@ jobs:
       - name: Validate AU
         run: |
           au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
-          component_dir="$HOME/Library/Audio/Plug-Ins/Components"
-          mkdir -p "$component_dir"
-          rm -rf "$component_dir/KickLock.component"
-          ditto "$au" "$component_dir/KickLock.component"
-          # Sign only the installed validation copy; the packaged bundle is unchanged.
-          codesign --force --deep --sign - "$component_dir/KickLock.component"
+          component_dir="/Library/Audio/Plug-Ins/Components"
+          sudo mkdir -p "$component_dir"
+          sudo rm -rf "$component_dir/KickLock.component"
+          sudo ditto "$au" "$component_dir/KickLock.component"
+          sudo killall -9 AudioComponentRegistrar || true
+          sleep 2
           auval_line=""
           for _ in 1 2 3 4 5; do
             auval_line="$(auval -a 2>/dev/null | awk '/[[:space:]]KickLock([[:space:]]|$)/ { print; exit }')"
