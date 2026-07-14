@@ -108,6 +108,8 @@ jobs:
           mkdir -p "$component_dir"
           rm -rf "$component_dir/KickLock.component"
           ditto "$au" "$component_dir/KickLock.component"
+          # Sign only the installed validation copy; the packaged bundle is unchanged.
+          codesign --force --deep --sign - "$component_dir/KickLock.component"
           auval_line=""
           for _ in 1 2 3 4 5; do
             auval_line="$(auval -a 2>/dev/null | awk '/[[:space:]]KickLock([[:space:]]|$)/ { print; exit }')"
