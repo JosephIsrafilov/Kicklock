@@ -121,3 +121,55 @@ inline bool learnNoteHasEnoughMaterial (int acceptedHits) noexcept
 {
     return acceptedHits >= NoteMap::kMinHitsPerNote;
 }
+
+// Honest Learn progress copy. CAPTURED = completed capture windows,
+// PROCESSED = drained queue windows (not "successfully analyzed"),
+// PITCH OK / REJECTED / TIMING OK come from post-finalize diagnostics.
+inline juce::String formatLearnProgressSummaryLine1 (const LearnProgressSnapshot& progress)
+{
+    return "CAPTURED " + juce::String (juce::jmax (0, progress.capturedHits))
+         + "   PROCESSED " + juce::String (juce::jmax (0, progress.drainedHits))
+         + "   QUEUE " + juce::String (juce::jmax (0, progress.pendingQueueHits));
+}
+
+inline juce::String formatLearnProgressSummaryLine2 (const LearnProgressSnapshot& progress)
+{
+    return "PITCH OK " + juce::String (juce::jmax (0, progress.pitchAcceptedHits))
+         + "   REJECTED " + juce::String (juce::jmax (0, progress.rejectedPitchHits))
+         + "   TIMING OK " + juce::String (juce::jmax (0, progress.timingUsableHits));
+}
+
+inline int countPitchAcceptedHits (const LearnFinalizeResult& result) noexcept
+{
+    int count = 0;
+    for (const auto& hit : result.hitAnalyses)
+        if (hit.pitchAccepted)
+            ++count;
+    return count;
+}
+
+// Body text for NotEnoughMaterial / Failed. present==false must not hide
+// result.message or diagnostics — only Apply Learn is gated by present.
+inline juce::String formatLearnFailureBody (const LearnFinalizeResult& result)
+{
+    juce::String body = result.message.isNotEmpty()
+                            ? result.message
+                            : juce::String ("Learn needs more usable kick and bass hits. Play the loop, then try again.");
+
+    const int pitchOk = countPitchAcceptedHits (result);
+    const int pitchRejected = juce::jmax (0, result.diagnostics.rejectedPitchHits);
+    const int timingOk = juce::jmax (0, result.diagnostics.analyzedHits);
+    const int captured = juce::jmax (0, result.diagnostics.capturedHits);
+
+    body << "\n\nCaptured: " << captured
+         << "\nPitch accepted: " << pitchOk
+         << "\nPitch rejected: " << pitchRejected
+         << "\nTiming usable: " << timingOk;
+    return body;
+}
+
+// Apply Learn is enabled only for ResultReady with a present/applicable candidate.
+inline bool learnApplyEnabled (LearnState learnState, bool hasPendingApplicableResult) noexcept
+{
+    return learnState == LearnState::ResultReady && hasPendingApplicableResult;
+}

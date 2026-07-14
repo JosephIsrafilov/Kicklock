@@ -3236,6 +3236,7 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
     completedProgress.capturedHits = result.diagnostics.capturedHits;
     completedProgress.drainedHits = (int) windows.size();
     completedProgress.rejectedPitchHits = result.diagnostics.rejectedPitchHits;
+    completedProgress.timingUsableHits = result.diagnostics.analyzedHits;
     completedProgress.unusableSignalHits = result.diagnostics.unusableSignalHits;
     completedProgress.droppedQueueHits = result.diagnostics.droppedQueueHits;
     completedProgress.ignoredOverlappingTriggers = result.diagnostics.ignoredOverlappingTriggers;
@@ -3243,6 +3244,7 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
     {
       if (! hit.pitchAccepted)
         continue;
+      ++completedProgress.pitchAcceptedHits;
       const int index = NotePhaseMapSnapshot::indexForMidi (
           NoteQuantizer::hzToMidi (hit.trackedFundamentalHz));
       if (index >= 0)
@@ -3273,7 +3275,9 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
     learnProgress.state = resolvedState;
     learnProgress.capturedHits = completedProgress.capturedHits;
     learnProgress.drainedHits = completedProgress.drainedHits;
+    learnProgress.pitchAcceptedHits = completedProgress.pitchAcceptedHits;
     learnProgress.rejectedPitchHits = completedProgress.rejectedPitchHits;
+    learnProgress.timingUsableHits = completedProgress.timingUsableHits;
     learnProgress.unusableSignalHits = completedProgress.unusableSignalHits;
     learnProgress.droppedQueueHits = completedProgress.droppedQueueHits;
     learnProgress.ignoredOverlappingTriggers = completedProgress.ignoredOverlappingTriggers;

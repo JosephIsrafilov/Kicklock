@@ -47,11 +47,13 @@ struct LearnProgressSnapshot
     uint64_t sessionId = 0;
     LearnState state = LearnState::Idle;
     int capturedHits = 0;
-    int drainedHits = 0;
+    int drainedHits = 0;              // windows drained by the worker (UI: PROCESSED)
     int pendingQueueHits = 0;
     int droppedQueueHits = 0;
     int ignoredOverlappingTriggers = 0;
-    int rejectedPitchHits = 0;
+    int pitchAcceptedHits = 0;        // pitch-accepted hits (UI: PITCH OK)
+    int rejectedPitchHits = 0;        // UI: PITCH REJECTED / REJECTED
+    int timingUsableHits = 0;         // LearnDiagnostics::analyzedHits (UI: TIMING OK)
     int unusableSignalHits = 0;
     std::array<int, NotePhaseMapSnapshot::size> trackedNoteHitCounts {};
     bool stopRequested = false;

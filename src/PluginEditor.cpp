@@ -113,7 +113,9 @@ void LearnProgressComponent::setModel (const LearnProgressSnapshot& nextProgress
                       || progress.drainedHits != nextProgress.drainedHits
                       || progress.pendingQueueHits != nextProgress.pendingQueueHits
                       || progress.droppedQueueHits != nextProgress.droppedQueueHits
+                      || progress.pitchAcceptedHits != nextProgress.pitchAcceptedHits
                       || progress.rejectedPitchHits != nextProgress.rejectedPitchHits
+                      || progress.timingUsableHits != nextProgress.timingUsableHits
                       || progress.unusableSignalHits != nextProgress.unusableSignalHits
                       || progress.ignoredOverlappingTriggers != nextProgress.ignoredOverlappingTriggers
                       || noteCounts != nextCounts || learnedNotes != nextLearned || activeMidi != nextActiveMidi;
@@ -136,16 +138,16 @@ void LearnProgressComponent::paint (juce::Graphics& g)
     g.setColour (border);
     g.drawRoundedRectangle (area.toFloat(), 6.0f, 1.0f);
 
-    auto summary = area.reduced (8, 6).removeFromTop (15);
+    auto summary = area.reduced (8, 5).removeFromTop (28);
     g.setColour (mutedText);
-    g.setFont (juce::Font (juce::FontOptions (10.5f)).boldened());
-    g.drawText ("HITS " + juce::String (progress.capturedHits)
-                    + "  ANALYZED " + juce::String (progress.drainedHits)
-                    + "  QUEUE " + juce::String (progress.pendingQueueHits),
-                summary, juce::Justification::centredLeft);
+    g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
+    auto line1 = summary.removeFromTop (13);
+    auto line2 = summary.removeFromTop (13);
+    g.drawText (formatLearnProgressSummaryLine1 (progress), line1, juce::Justification::centredLeft);
+    g.drawText (formatLearnProgressSummaryLine2 (progress), line2, juce::Justification::centredLeft);
 
     auto chips = area.reduced (8, 4);
-    chips.removeFromTop (20);
+    chips.removeFromTop (32);
     int shown = 0;
     for (int i = 0; i < NotePhaseMapSnapshot::size && shown < 6; ++i)
     {
@@ -1042,8 +1044,14 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     }
 
     latestLearnProgress = audioProcessor.getLearnProgress();
+    // present==false means "no applicable map to Apply", not "no diagnostics".
+    // Always read the stored finalize result for resolved Learn states.
     const bool hasPending = audioProcessor.hasPendingLearnResult();
-    const auto pendingResult = hasPending ? audioProcessor.getPendingLearnResult() : LearnFinalizeResult {};
+    const bool learnResolved = learnState == LearnState::ResultReady
+                            || learnState == LearnState::NotEnoughMaterial
+                            || learnState == LearnState::Failed;
+    const auto learnResult = learnResolved ? audioProcessor.getPendingLearnResult()
+                                           : LearnFinalizeResult {};
     // Runtime status must describe the applied processor-owned map. A pending
     // Learn result is intentionally inert until Apply Learn succeeds.
     latestNoteMap = audioProcessor.getNoteMapSnapshot();
@@ -1058,7 +1066,7 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
                                   ? "Stops new Learn captures and finishes the current captured material."
                                   : "Starts a Dynamic Learn session. Nothing changes until Apply Learn.");
 
-    const bool resultReady = learnState == LearnState::ResultReady && hasPending;
+    const bool resultReady = learnApplyEnabled (learnState, hasPending);
     const auto blockedReason = resultReady ? audioProcessor.getLearnApplyBlockedReason() : juce::String {};
     applyFixButton.setVisible (resultReady || ! dynamic);
     applyFixButton.setButtonText (resultReady ? "Apply Learn" : "Apply Fix");
@@ -1080,30 +1088,30 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     if (learnState == LearnState::ResultReady)
     {
         int learnedNotes = 0;
-        for (const auto& entry : pendingResult.map.notes)
+        for (const auto& entry : learnResult.map.notes)
             learnedNotes += NoteMap::isValidNoteEntry (entry) ? 1 : 0;
-        body << "Learned " << learnedNotes << " notes from " << pendingResult.diagnostics.analyzedHits
-             << " usable hits.\nGlobal base: " << formatSignedDelayMs (pendingResult.globalFix.bassDelayMs)
-             << ", " << (pendingResult.globalFix.bassPolarityInvert ? "invert" : "normal")
-             << " polarity, " << pendingResult.map.base.allpassStages << " stages.";
-        if (pendingResult.diagnostics.rejectedPitchHits > 0 || pendingResult.diagnostics.unusableSignalHits > 0)
-            body << "\nRejected " << pendingResult.diagnostics.rejectedPitchHits << " pitch / "
-                 << pendingResult.diagnostics.unusableSignalHits << " unusable hits.";
-        if (pendingResult.diagnostics.warning.isNotEmpty())
-            body << "\nWarning: " << pendingResult.diagnostics.warning;
-        else if (pendingResult.diagnostics.multipleTimingFamilies)
+        body << "Learned " << learnedNotes << " notes from " << learnResult.diagnostics.analyzedHits
+             << " usable hits.\nGlobal base: " << formatSignedDelayMs (learnResult.globalFix.bassDelayMs)
+             << ", " << (learnResult.globalFix.bassPolarityInvert ? "invert" : "normal")
+             << " polarity, " << learnResult.map.base.allpassStages << " stages.";
+        if (learnResult.diagnostics.rejectedPitchHits > 0 || learnResult.diagnostics.unusableSignalHits > 0)
+            body << "\nRejected " << learnResult.diagnostics.rejectedPitchHits << " pitch / "
+                 << learnResult.diagnostics.unusableSignalHits << " unusable hits.";
+        if (learnResult.diagnostics.warning.isNotEmpty())
+            body << "\nWarning: " << learnResult.diagnostics.warning;
+        else if (learnResult.diagnostics.multipleTimingFamilies)
             body << "\nWarning: multiple timing families; using the dominant consensus.";
         body << "\n\nNothing has been applied yet.";
     }
     else if (learnState == LearnState::NotEnoughMaterial || learnState == LearnState::Failed)
     {
-        body = pendingResult.message.isNotEmpty() ? pendingResult.message
-                                                   : "Learn needs more usable kick and bass hits. Play the loop, then try again.";
+        body = formatLearnFailureBody (learnResult);
     }
     else
     {
-        body << "Captured " << latestLearnProgress.capturedHits << " hits, analyzed "
-             << latestLearnProgress.drainedHits << ".\nQueue " << latestLearnProgress.pendingQueueHits
+        body << "Captured " << latestLearnProgress.capturedHits
+             << ", processed " << latestLearnProgress.drainedHits
+             << ".\nQueue " << latestLearnProgress.pendingQueueHits
              << ", dropped " << latestLearnProgress.droppedQueueHits
              << ", overlaps " << latestLearnProgress.ignoredOverlappingTriggers << ".";
     }

@@ -889,6 +889,64 @@ public:
             expect (learnNoteHasEnoughMaterial (NoteMap::kMinHitsPerNote));
         }
 
+        beginTest ("Learn progress labels are honest: PROCESSED not ANALYZED");
+        {
+            LearnProgressSnapshot progress;
+            progress.capturedHits = 55;
+            progress.drainedHits = 55;
+            progress.pendingQueueHits = 0;
+            progress.pitchAcceptedHits = 0;
+            progress.rejectedPitchHits = 55;
+            progress.timingUsableHits = 1;
+
+            const auto line1 = formatLearnProgressSummaryLine1 (progress);
+            const auto line2 = formatLearnProgressSummaryLine2 (progress);
+            expect (line1.contains ("CAPTURED 55"));
+            expect (line1.contains ("PROCESSED 55"));
+            expect (line1.contains ("QUEUE 0"));
+            expect (! line1.contains ("ANALYZED"));
+            expect (! line1.contains ("HITS"));
+            expect (line2.contains ("PITCH OK 0"));
+            expect (line2.contains ("REJECTED 55"));
+            expect (line2.contains ("TIMING OK 1"));
+        }
+
+        beginTest ("Failed Learn body keeps backend message when present=false");
+        {
+            LearnFinalizeResult result;
+            result.message = "Too few usable timing observations.";
+            result.diagnostics.capturedHits = 55;
+            result.diagnostics.rejectedPitchHits = 55;
+            result.diagnostics.analyzedHits = 1;
+            // Simulate a pitch-accepted-free hit list with one timing-usable path only.
+            LearnHitAnalysis a;
+            a.pitchAccepted = false;
+            result.hitAnalyses.push_back (a);
+
+            PendingLearnCandidate cand;
+            cand.present = false;
+            cand.result = result;
+
+            // present gates Apply only.
+            expect (! learnApplyEnabled (LearnState::NotEnoughMaterial, cand.present));
+            expect (! learnApplyEnabled (LearnState::Failed, cand.present));
+            expect (learnApplyEnabled (LearnState::ResultReady, true));
+            expect (! learnApplyEnabled (LearnState::ResultReady, false));
+
+            // UI still reads result even when present=false.
+            const auto body = formatLearnFailureBody (cand.result);
+            expect (body.startsWith ("Too few usable timing observations."));
+            expect (body.contains ("Captured: 55"));
+            expect (body.contains ("Pitch accepted: 0"));
+            expect (body.contains ("Pitch rejected: 55"));
+            expect (body.contains ("Timing usable: 1"));
+            expect (! body.containsIgnoreCase ("Learn needs more usable kick and bass hits"));
+
+            LearnFinalizeResult empty;
+            const auto fallback = formatLearnFailureBody (empty);
+            expect (fallback.containsIgnoreCase ("Learn needs more usable kick and bass hits"));
+        }
+
         beginTest ("Mode and Strength attachments follow host restore without changing Pitch Follow");
         {
             KickLockAudioProcessor processor;
