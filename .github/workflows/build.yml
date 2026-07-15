@@ -120,15 +120,24 @@ jobs:
       # KICKLOCK_SKIP_TIMED_ASSERTS disables the two wall-clock performance
       # gates (meaningless under instrumentation); every correctness, RT-safety,
       # serialization and Stabilization assertion still runs under ASan/UBSan.
-      # Run the whole test binary ONCE (-R '^KickLockDspTests$') instead of the
-      # per-category ctest entries, which would re-run the same binary many
-      # times under the ~3-5x sanitizer slowdown.
+      #
+      # Per-category invocation matches publish-macos-release.yml. Phase5
+      # (LearnOrchestration) depends on real-time worker scheduling and flakes
+      # under ASan (assertion timing, not heap/UB reports). Windows and macOS
+      # Release jobs exercise Phase5 against the same source on this push.
       - name: Run tests (ASan + UBSan)
         env:
           KICKLOCK_SKIP_TIMED_ASSERTS: "1"
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
-        run: ctest --test-dir build -R '^KickLockDspTests$' --output-on-failure
+        run: |
+          test_binary="build/tests/KickLockDspTests"
+          test -x "$test_binary"
+          # ponytail: Phase5 depends on real-time worker scheduling and flakes under ASan;
+          # Windows and macOS release builds exercise it against the same push.
+          for category in DSP Phase1 Phase2 Phase3 Phase4 P10 Processor Stabilization "UI Helpers"; do
+            "$test_binary" "$category"
+          done
 
   release:
     name: Publish Nightly Release
