@@ -1133,6 +1133,8 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
 
   // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
   rawCapture.prepare((int)(sampleRate * 2.0));
+  // ~20 s covers long multi-bar Learn loops without sharing the 2 s Analyze ring.
+  learnLoopCapture.prepare((int)(sampleRate * 20.0));
   transientDetector.prepare(sampleRate);
   transientDetector.setThreshold(1.0e-7f);
   transientDetector.setMinimumEnergyGate(1.0e-8f);
@@ -1335,6 +1337,8 @@ void KickLockAudioProcessor::processObservationCapture(
               && ! learnStopRequested.load (std::memory_order_acquire);
           learnHitQueue.pushSample(rawBassLow, kickLow, learnTrigger,
                                    pitchTracker.getFrequencyHz(), acceptTrigger);
+          // Same sample index timeline as LearnHitQueue::absoluteSampleAtTrigger.
+          learnLoopCapture.push(rawBassLow, kickLow);
         }
 
       if (autoAlignEngine != nullptr)
@@ -2810,6 +2814,7 @@ bool KickLockAudioProcessor::resetLearnQueueIfSafe()
   // The producer and consumer are quiescent while reconfiguring is held. This
   // is deliberately the only place a new Learn generation clears pre-roll.
   learnHitQueue.reset();
+  learnLoopCapture.reset();
   learnTransientDetector.reset();
   learnQueueReady.store (true, std::memory_order_release);
   learnQueuePreparedGeneration.fetch_add (1, std::memory_order_acq_rel);
@@ -3224,7 +3229,11 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
 
   try
   {
-    auto result = LearnPipelineCore::finalize (windows, config, diagnostics, cancelled);
+    std::vector<float> loopBass, loopKick;
+    const int loopN = learnLoopCapture.snapshot (loopBass, loopKick);
+    auto result = LearnPipelineCore::finalize (
+        windows, config, diagnostics, cancelled,
+        loopN > 0 ? loopBass.data() : nullptr, loopN);
     if (cancelled())
       return;
 

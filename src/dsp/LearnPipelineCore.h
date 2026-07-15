@@ -15,6 +15,7 @@
 #include "NoteLearnAccumulator.h"
 #include "NoteQuantizer.h"
 #include "OfflineFundamentalEstimator.h"
+#include "OfflineNoteSegmenter.h"
 #include "PhaseBands.h"
 
 struct LearnPipelineConfig
@@ -45,10 +46,17 @@ struct LearnPipelineConfig
 class LearnPipelineCore
 {
 public:
+    // fullLoopBass: optional full Learn-session bass (same timeline as
+    // LearnHitWindow::absoluteSampleAtTrigger). When present, note bucketing
+    // uses offline non-causal segmentation over the whole loop instead of the
+    // live PitchTracker value frozen at the kick trigger. PitchTracker is
+    // intentionally left alone for DynamicRuntimeSelector.
     static LearnFinalizeResult finalize (const std::vector<LearnHitWindow>& windows,
                                          const LearnPipelineConfig& config,
                                          const LearnDiagnostics& transportDiagnostics = {},
-                                         const std::function<bool()>& shouldCancel = {})
+                                         const std::function<bool()>& shouldCancel = {},
+                                         const float* fullLoopBass = nullptr,
+                                         int fullLoopBassSamples = 0)
     {
         LearnFinalizeResult result;
         result.map = NoteMap::makeEmptyNoteMap();
@@ -60,6 +68,22 @@ public:
             return fail (result, "Learn cancelled.");
         if (windows.empty() || ! (config.sampleRate > 0.0) || ! std::isfinite (config.sampleRate))
             return fail (result, "No hits to learn from.");
+
+        // Offline note map over the full captured loop (worker thread only).
+        // Forward search is capped at the Learn hit post-roll (~150 ms) so a
+        // true late-arrangement bass outside the capture/correction window is
+        // not rescued by segmentation.
+        const bool useOfflineSegments = fullLoopBass != nullptr && fullLoopBassSamples > 0;
+        const auto noteSegments = useOfflineSegments
+            ? OfflineNoteSegmenter::segment (fullLoopBass, fullLoopBassSamples, config.sampleRate,
+                                            OfflineNoteSegmenter::kDefaultWindowMs,
+                                            OfflineNoteSegmenter::kDefaultHopMs,
+                                            shouldCancel)
+            : std::vector<OfflineNoteSegment> {};
+        if (cancelled (shouldCancel))
+            return fail (result, "Learn cancelled.");
+        const int segmentForwardSearch = juce::jmax (
+            1, (int) std::lround (0.150 * config.sampleRate));
 
         std::vector<AnalyzedHit> hits;
         std::vector<HitObservation> observations;
@@ -73,7 +97,9 @@ public:
                 return fail (result, "Learn cancelled.");
             AnalyzedHit hit;
             hit.analysis.sequence = window.sequence;
-            hit.analysis.trackedFundamentalHz = window.trackedHzAtTrigger;
+            const float segmentHz = resolveTrackedPitch (
+                window, noteSegments, useOfflineSegments, segmentForwardSearch);
+            hit.analysis.trackedFundamentalHz = segmentHz;
             const int n = (int) std::min (window.bass.size(), window.kick.size());
             if (n <= 32 || ! finiteSignal (window.bass, n, shouldCancel)
                 || ! finiteSignal (window.kick, n, shouldCancel))
@@ -131,13 +157,44 @@ public:
 
             // Pitch is deliberately independent of timing eligibility.  A bad
             // pitch is global-only, not a reason to discard timing evidence.
-            const auto pitch = OfflineFundamentalEstimator::estimate (hit.bass.data(), n, config.sampleRate,
-                                                                        NoteMap::kFundamentalMinHz, NoteMap::kFundamentalMaxHz);
-            if (cancelled (shouldCancel))
-                return fail (result, "Learn cancelled.");
-            hit.analysis.offlineFundamentalHz = pitch.frequencyHz;
-            hit.analysis.offlinePitchConfidence = pitch.confidence;
-            classifyPitch (hit.analysis, pitch);
+            //
+            // With a full-loop segment map, the segment pitch is the authority
+            // for bucketing (non-causal). Classification still requires real
+            // bass energy inside the hit capture window so true late-arrangement
+            // material outside post-roll is not rescued by the loop map alone.
+            if (useOfflineSegments && segmentHz > 0.0f
+                && window.absoluteSampleAtTrigger >= 0)
+            {
+                const float conf = OfflineNoteSegmenter::confidenceAt (
+                    noteSegments, window.absoluteSampleAtTrigger, segmentForwardSearch);
+                hit.analysis.offlineFundamentalHz = segmentHz;
+                hit.analysis.offlinePitchConfidence = conf;
+
+                double energy = 0.0;
+                for (int i = 0; i < n; ++i)
+                    energy += (double) hit.bass[(size_t) i] * (double) hit.bass[(size_t) i];
+                const double rms = std::sqrt (energy / (double) juce::jmax (1, n));
+                // Slightly above OfflineFundamentalEstimator::kMinRms so near-empty
+                // post-roll tails (bass just at the 150 ms edge) do not count.
+                constexpr float kMinHitRms = 5.0e-3f;
+                FundamentalEstimate segPitch;
+                segPitch.valid = conf >= NoteMap::kMinOfflinePitchConfidence
+                                 && rms >= (double) kMinHitRms;
+                segPitch.frequencyHz = segmentHz;
+                segPitch.confidence = conf;
+                classifyPitch (hit.analysis, segPitch);
+            }
+            else
+            {
+                const auto pitch = OfflineFundamentalEstimator::estimate (
+                    hit.bass.data(), n, config.sampleRate,
+                    NoteMap::kFundamentalMinHz, NoteMap::kFundamentalMaxHz);
+                if (cancelled (shouldCancel))
+                    return fail (result, "Learn cancelled.");
+                hit.analysis.offlineFundamentalHz = pitch.frequencyHz;
+                hit.analysis.offlinePitchConfidence = pitch.confidence;
+                classifyPitch (hit.analysis, pitch);
+            }
 
             if (hit.analysis.timingUsable)
             {
@@ -321,6 +378,24 @@ public:
 
 private:
     struct AnalyzedHit { std::vector<float> bass, kick; LearnHitAnalysis analysis; PhaseFixResult timing; };
+
+    // Prefer offline full-loop segment pitch when available; fall back to the
+    // live trigger snapshot only when no full loop was supplied (unit fixtures).
+    static float resolveTrackedPitch (const LearnHitWindow& window,
+                                      const std::vector<OfflineNoteSegment>& segments,
+                                      bool useOfflineSegments,
+                                      int segmentForwardSearch) noexcept
+    {
+        if (useOfflineSegments && window.absoluteSampleAtTrigger >= 0)
+        {
+            const float offlineHz = OfflineNoteSegmenter::frequencyAt (
+                segments, window.absoluteSampleAtTrigger, segmentForwardSearch);
+            if (offlineHz > 0.0f && std::isfinite (offlineHz))
+                return offlineHz;
+            return 0.0f;
+        }
+        return window.trackedHzAtTrigger;
+    }
 
     static bool cancelled (const std::function<bool()>& shouldCancel)
     { return shouldCancel && shouldCancel(); }
