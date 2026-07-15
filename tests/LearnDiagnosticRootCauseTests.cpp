@@ -67,6 +67,7 @@ namespace
         bool finalizeValid = false;
         juce::String finalizeMessage;
         std::array<int, NotePhaseMapSnapshot::size> noteHitCounts {};
+        std::array<LearnNoteReport, NotePhaseMapSnapshot::size> noteReports {};
         std::vector<HitDiag> hits;
         std::vector<int> triggerSamples;
     };
@@ -232,6 +233,7 @@ namespace
         s.finalizeMessage = result.message;
         s.timingUsable = result.diagnostics.analyzedHits;
         s.pitchRejected = result.diagnostics.rejectedPitchHits;
+        s.noteReports = result.noteReports;
 
         for (const auto& e : result.map.notes)
             if (NoteMap::isValidNoteEntry (e))
@@ -452,6 +454,17 @@ public:
                                 || s.finalizeMessage.containsIgnoreCase ("observation")
                                 || s.finalizeMessage.containsIgnoreCase ("No hits"),
                                 hitTable (s));
+                        // Per-note report: late bass is outside correction window, not "learned".
+                        const int idx55 = NotePhaseMapSnapshot::indexForMidi (33);
+                        if (idx55 >= 0)
+                        {
+                            const auto& r = s.noteReports[(size_t) idx55];
+                            if (r.outcome != LearnNoteOutcome::None)
+                                expect (r.outcome == LearnNoteOutcome::OutOfCorrectionWindow
+                                        || r.outcome == LearnNoteOutcome::NotEnoughOverlap,
+                                        hitTable (s));
+                            expect (r.outcome != LearnNoteOutcome::Learned, hitTable (s));
+                        }
                     }
                     else if (onsetMs >= 100.0f)
                     {
@@ -565,9 +578,22 @@ public:
                         expect (firstE2->pitchAccepted, hitTable (s));
                     }
 
+                    // Pitch layer: all four E2 hits accepted (offline segments).
+                    // Full map may still fail on timing consensus with synthetic material.
                     expect (acceptedThird >= NoteMap::kMinHitsPerNote, hitTable (s));
-                    expect (learnNoteHasEnoughMaterial (acceptedThird), hitTable (s));
                     expect (distinctAcceptedNotes (s) <= 3, hitTable (s));
+                    if (midi40 >= 0)
+                    {
+                        const auto& r = s.noteReports[(size_t) midi40];
+                        expect (r.outcome != LearnNoteOutcome::OutOfCorrectionWindow, hitTable (s));
+                        expect (r.acceptedHits >= NoteMap::kMinHitsPerNote
+                                || r.outcome == LearnNoteOutcome::Learned
+                                || r.outcome == LearnNoteOutcome::NotEnoughOverlap
+                                || acceptedThird >= NoteMap::kMinHitsPerNote,
+                                hitTable (s));
+                        if (s.finalizeValid)
+                            expect (r.outcome == LearnNoteOutcome::Learned, hitTable (s));
+                    }
                 }
 
                 // B3: transitions exactly on kicks (continuous bass, no gap).

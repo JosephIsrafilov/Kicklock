@@ -111,15 +111,24 @@ private:
 class LearnProgressComponent : public juce::Component
 {
 public:
-    void setModel (const LearnProgressSnapshot&, const NotePhaseMapSnapshot&, int activeMidiNote);
+    void setModel (const LearnProgressSnapshot&, const NotePhaseMapSnapshot&, int activeMidiNote,
+                   int selectedMidiNote = -1);
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+    std::function<void (int midi)> onNoteSelected;
+    int getSelectedMidi() const noexcept { return selectedMidi; }
 
 private:
     LearnProgressSnapshot progress;
     std::array<int, NotePhaseMapSnapshot::size> noteCounts {};
     std::array<bool, NotePhaseMapSnapshot::size> learnedNotes {};
     std::array<juce::String, NotePhaseMapSnapshot::size> noteTexts {};
+    std::array<juce::Rectangle<int>, 6> chipBounds {};
+    std::array<int, 6> chipMidi {};
+    int chipCount = 0;
     int activeMidi = -1;
+    int selectedMidi = -1;
 };
 
 // Full visual + manual phase-alignment editor. The oscilloscope is the visual
@@ -278,10 +287,12 @@ private:
     uint64_t lastLearnBodySessionId = 0;
     LearnState lastLearnBodyState = LearnState::Idle;
     juce::String lastLearnBodyText;
+    int lastLearnBodySelectedMidi = -1;
     juce::String lastPrimaryButtonText;
     juce::String lastApplyButtonText;
     LearnProgressSnapshot latestLearnProgress;
     NotePhaseMapSnapshot latestNoteMap;
+    int selectedLearnMidi = -1;
 
     // Panel backgrounds computed in resized(), painted behind the child
     // controls in paint() so the geometry lives in one place.

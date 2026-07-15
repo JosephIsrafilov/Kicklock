@@ -224,6 +224,10 @@ public:
                 return fail (result, "Learn cancelled.");
             result.hitAnalyses.push_back (hit.analysis);
         }
+        // Provisional reports from hits alone (empty map). Refined after buckets if map forms.
+        fillNoteReports (result.noteReports, hits, NoteMap::makeEmptyNoteMap(), config.maxDelayMs,
+                         noteSegments);
+
         if ((int) observations.size() < LearnPipelineConfig::kMinUsableTimingObservations)
             return fail (result, "Too few usable timing observations.");
 
@@ -348,6 +352,8 @@ public:
             if (note < 0 || ! map.notes[(size_t) note].learned) ++diag.globalOnlyHits;
         }
 
+        fillNoteReports (result.noteReports, hits, map, config.maxDelayMs, noteSegments);
+
         timingFix.phaseFilterEnabled = globalHelps;
         timingFix.phaseFilterFreqHz = map.global.allpassFreqHz;
         timingFix.phaseFilterQ = map.global.allpassQ;
@@ -378,6 +384,111 @@ public:
 
 private:
     struct AnalyzedHit { std::vector<float> bass, kick; LearnHitAnalysis analysis; PhaseFixResult timing; };
+
+    // Runtime-only per-note outcomes for UI. Deterministic from hit analyses + map.
+    // noteSegments (optional): full-loop offline map used to flag notes that exist
+    // in the loop but never earned an in-window overlap (true late arrangement).
+    static void fillNoteReports (std::array<LearnNoteReport, NotePhaseMapSnapshot::size>& reports,
+                                 const std::vector<AnalyzedHit>& hits,
+                                 const NotePhaseMapSnapshot& map,
+                                 float maxDelayMs,
+                                 const std::vector<OfflineNoteSegment>& noteSegments = {}) noexcept
+    {
+        reports = {};
+        for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
+            reports[(size_t) i].midi = NotePhaseMapSnapshot::midiForIndex (i);
+
+        bool anyDominantAssigned = false;
+        for (const auto& hit : hits)
+            if (hit.analysis.dominantTimingClusterMember)
+            {
+                anyDominantAssigned = true;
+                break;
+            }
+
+        for (const auto& hit : hits)
+        {
+            float hz = hit.analysis.trackedFundamentalHz;
+            if (! (hz > 0.0f) || ! std::isfinite (hz))
+                hz = hit.analysis.offlineFundamentalHz;
+            if (! (hz > 0.0f) || ! std::isfinite (hz))
+                continue;
+            const int note = NotePhaseMapSnapshot::indexForMidi (NoteQuantizer::hzToMidi (hz));
+            if (note < 0)
+                continue;
+
+            auto& r = reports[(size_t) note];
+            ++r.recognizedHits;
+
+            const bool timingOk = hit.analysis.timingUsable
+                && std::isfinite (hit.timing.bassDelayMs)
+                && std::abs (hit.timing.bassDelayMs) <= maxDelayMs + 1.0e-4f;
+            // timingAmbiguous still counts as an overlap for UI reasons (note was
+            // present with kick); only out-of-budget / unusable timing is "window".
+            const bool inCluster = ! anyDominantAssigned || hit.analysis.dominantTimingClusterMember;
+            const bool overlapOk = hit.analysis.pitchAccepted && timingOk && inCluster;
+
+            if (overlapOk)
+                ++r.acceptedHits;
+            else
+                ++r.outOfWindowHits;
+        }
+
+        // Notes present in the full-loop segment map but never overlap-accepted
+        // (e.g. bass only after post-roll) count as out-of-window recognition.
+        for (const auto& seg : noteSegments)
+        {
+            if (! (seg.frequencyHz > 0.0f) || ! std::isfinite (seg.frequencyHz))
+                continue;
+            const int note = NotePhaseMapSnapshot::indexForMidi (
+                NoteQuantizer::hzToMidi (seg.frequencyHz));
+            if (note < 0)
+                continue;
+            auto& r = reports[(size_t) note];
+            if (r.acceptedHits == 0 && r.recognizedHits == 0)
+            {
+                ++r.recognizedHits;
+                ++r.outOfWindowHits;
+            }
+        }
+
+        for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
+        {
+            auto& r = reports[(size_t) i];
+            if (map.notes[(size_t) i].learned)
+            {
+                r.outcome = LearnNoteOutcome::Learned;
+                if (r.acceptedHits <= 0)
+                    r.acceptedHits = map.notes[(size_t) i].hitCount;
+                continue;
+            }
+            if (r.recognizedHits <= 0 && r.acceptedHits <= 0 && r.outOfWindowHits <= 0)
+            {
+                r.outcome = LearnNoteOutcome::None;
+                continue;
+            }
+            if (r.acceptedHits > 0 && r.acceptedHits < NoteMap::kMinHitsPerNote)
+            {
+                r.outcome = LearnNoteOutcome::NotEnoughOverlap;
+                continue;
+            }
+            if (r.outOfWindowHits > 0 && r.acceptedHits == 0)
+            {
+                r.outcome = LearnNoteOutcome::OutOfCorrectionWindow;
+                continue;
+            }
+            if (r.acceptedHits >= NoteMap::kMinHitsPerNote)
+            {
+                // Enough overlaps but aggregator/rotator did not accept the note.
+                r.outcome = LearnNoteOutcome::NotEnoughOverlap;
+                continue;
+            }
+            if (r.recognizedHits > 0)
+                r.outcome = LearnNoteOutcome::NotEnoughOverlap;
+            else
+                r.outcome = LearnNoteOutcome::None;
+        }
+    }
 
     // Prefer offline full-loop segment pitch when available; fall back to the
     // live trigger snapshot only when no full loop was supplied (unit fixtures).

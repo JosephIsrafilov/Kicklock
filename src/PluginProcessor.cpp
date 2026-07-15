@@ -3259,6 +3259,7 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
       if (index >= 0)
         ++completedProgress.trackedNoteHitCounts[(size_t) index];
     }
+    completedProgress.noteReports = result.noteReports;
 
     {
       const std::lock_guard<std::mutex> lock (learnMutex);
@@ -3291,6 +3292,7 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
     learnProgress.droppedQueueHits = completedProgress.droppedQueueHits;
     learnProgress.ignoredOverlappingTriggers = completedProgress.ignoredOverlappingTriggers;
     learnProgress.trackedNoteHitCounts = completedProgress.trackedNoteHitCounts;
+    learnProgress.noteReports = completedProgress.noteReports;
   }
   catch (...)
   {
