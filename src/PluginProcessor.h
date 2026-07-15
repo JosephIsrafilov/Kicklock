@@ -407,6 +407,9 @@ private:
     // button. Sized in prepareToPlay (~2 s). Written on the audio thread,
     // then copied into a published buffer that the message thread snapshots.
     RawCaptureBuffer rawCapture;
+    // Full Learn-session bass/kick timeline (reset on Learn start). Used by
+    // offline note segmentation at finalize; not shared with Static Analyze.
+    RawCaptureBuffer learnLoopCapture;
     TransientDetector transientDetector;
     HitCaptureBuffer hitCapture;
     PitchTracker pitchTracker;

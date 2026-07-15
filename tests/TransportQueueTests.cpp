@@ -137,6 +137,8 @@ public:
             expectEquals ((int) w.kick.size(), win);
             expectEquals (w.sequence, 0);
             expectWithinAbsoluteError (w.trackedHzAtTrigger, 55.0f, 1.0e-6f);
+            // Absolute timeline matches feed index at trigger (global `pre`).
+            expectEquals (w.absoluteSampleAtTrigger, pre);
 
             // Window covers global [0 .. win-1]; bass[k]=k, kick[k]=k+0.5.
             expectWithinAbsoluteError (w.bass[0], 0.0f, 1.0e-4f);

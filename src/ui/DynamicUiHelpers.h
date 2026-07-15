@@ -251,11 +251,60 @@ inline bool learnNoteHasEnoughMaterial (int acceptedHits) noexcept
     return acceptedHits >= NoteMap::kMinHitsPerNote;
 }
 
+inline int countDetectedLearnNotes (const LearnProgressSnapshot& progress) noexcept
+{
+    int n = 0;
+    for (int c : progress.trackedNoteHitCounts)
+        if (c > 0)
+            ++n;
+    // After finalize, noteReports may show recognized notes with zero pitch-ok hits.
+    if (n == 0)
+    {
+        for (const auto& r : progress.noteReports)
+            if (r.outcome != LearnNoteOutcome::None || r.recognizedHits > 0 || r.acceptedHits > 0)
+                ++n;
+    }
+    return n;
+}
+
+inline int countLearnedNotesInReports (const std::array<LearnNoteReport, NotePhaseMapSnapshot::size>& reports) noexcept
+{
+    int n = 0;
+    for (const auto& r : reports)
+        if (r.outcome == LearnNoteOutcome::Learned)
+            ++n;
+    return n;
+}
+
+// Human status during capture (line above technical counters).
+inline juce::String formatLearnListeningStatus (const LearnProgressSnapshot& progress)
+{
+    const int notes = countDetectedLearnNotes (progress);
+    if (progress.state == LearnState::Capturing || progress.state == LearnState::Preparing)
+        return "Listening… notes detected: " + juce::String (notes);
+    if (progress.state == LearnState::Stopping || progress.state == LearnState::Draining
+        || progress.state == LearnState::Finalizing)
+        return "Finishing… notes detected: " + juce::String (notes);
+    if (progress.state == LearnState::ResultReady)
+        return "Ready — learned " + juce::String (countLearnedNotesInReports (progress.noteReports))
+             + " note(s)";
+    if (progress.state == LearnState::NotEnoughMaterial || progress.state == LearnState::Failed)
+        return "No map — see note details below";
+    return {};
+}
+
 // Honest Learn progress copy. CAPTURED = completed capture windows,
 // PROCESSED = drained queue windows (not "successfully analyzed"),
 // PITCH OK / REJECTED / TIMING OK come from post-finalize diagnostics.
 inline juce::String formatLearnProgressSummaryLine1 (const LearnProgressSnapshot& progress)
 {
+    const auto status = formatLearnListeningStatus (progress);
+    if (status.isNotEmpty()
+        && (progress.state == LearnState::Capturing || progress.state == LearnState::Preparing
+            || progress.state == LearnState::Stopping || progress.state == LearnState::Draining
+            || progress.state == LearnState::Finalizing))
+        return status;
+
     return "CAPTURED " + juce::String (juce::jmax (0, progress.capturedHits))
          + "   PROCESSED " + juce::String (juce::jmax (0, progress.drainedHits))
          + "   QUEUE " + juce::String (juce::jmax (0, progress.pendingQueueHits));
@@ -263,6 +312,16 @@ inline juce::String formatLearnProgressSummaryLine1 (const LearnProgressSnapshot
 
 inline juce::String formatLearnProgressSummaryLine2 (const LearnProgressSnapshot& progress)
 {
+    // During capture: keep technical counters on line 2.
+    if (progress.state == LearnState::Capturing || progress.state == LearnState::Preparing
+        || progress.state == LearnState::Stopping || progress.state == LearnState::Draining
+        || progress.state == LearnState::Finalizing)
+    {
+        return "CAPTURED " + juce::String (juce::jmax (0, progress.capturedHits))
+             + "   PROCESSED " + juce::String (juce::jmax (0, progress.drainedHits))
+             + "   PITCH OK " + juce::String (juce::jmax (0, progress.pitchAcceptedHits));
+    }
+
     return "PITCH OK " + juce::String (juce::jmax (0, progress.pitchAcceptedHits))
          + "   REJECTED " + juce::String (juce::jmax (0, progress.rejectedPitchHits))
          + "   TIMING OK " + juce::String (juce::jmax (0, progress.timingUsableHits));
@@ -277,13 +336,54 @@ inline int countPitchAcceptedHits (const LearnFinalizeResult& result) noexcept
     return count;
 }
 
-// Body text for NotEnoughMaterial / Failed. present==false must not hide
-// result.message or diagnostics — only Apply Learn is gated by present.
+inline juce::String formatLearnNoteOutcomeLine (const LearnNoteReport& report)
+{
+    if (report.outcome == LearnNoteOutcome::None || report.midi < 0)
+        return {};
+
+    const auto name = juce::MidiMessage::getMidiNoteName (report.midi, true, true, 4);
+    switch (report.outcome)
+    {
+        case LearnNoteOutcome::Learned:
+            return name + ": learned (" + juce::String (juce::jmax (0, report.acceptedHits)) + " hits)";
+        case LearnNoteOutcome::NotEnoughOverlap:
+            return name + ": not enough kick overlaps ("
+                 + juce::String (juce::jmax (0, report.acceptedHits)) + "/"
+                 + juce::String (NoteMap::kMinHitsPerNote) + ")";
+        case LearnNoteOutcome::OutOfCorrectionWindow:
+            return name + ": outside correction window";
+        default:
+            return {};
+    }
+}
+
+// Body text for NotEnoughMaterial / Failed / ResultReady detail.
+// present==false must not hide result.message — only Apply Learn is gated by present.
 inline juce::String formatLearnFailureBody (const LearnFinalizeResult& result)
 {
-    juce::String body = result.message.isNotEmpty()
-                            ? result.message
-                            : juce::String ("Learn needs more usable kick and bass hits. Play the loop, then try again.");
+    const int learned = countLearnedNotesInReports (result.noteReports);
+    juce::String body;
+    if (result.message.isNotEmpty())
+        body = result.message;
+    else if (learned > 0)
+        body = "Learned " + juce::String (learned) + " note(s).";
+    else
+        body = "Learn needs more usable kick and bass hits. Play the loop, then try again.";
+
+    juce::StringArray noteLines;
+    for (const auto& r : result.noteReports)
+    {
+        const auto line = formatLearnNoteOutcomeLine (r);
+        if (line.isNotEmpty())
+            noteLines.add (line);
+    }
+
+    if (noteLines.size() > 0)
+    {
+        body << "\n\nNotes:";
+        for (const auto& line : noteLines)
+            body << "\n• " << line;
+    }
 
     const int pitchOk = countPitchAcceptedHits (result);
     const int pitchRejected = juce::jmax (0, result.diagnostics.rejectedPitchHits);
@@ -295,6 +395,20 @@ inline juce::String formatLearnFailureBody (const LearnFinalizeResult& result)
          << "\nPitch rejected: " << pitchRejected
          << "\nTiming usable: " << timingOk;
     return body;
+}
+
+// Selected learned note summary for Dynamic UI (runtime only).
+inline juce::String formatSelectedLearnNoteDetail (const NotePhaseMapSnapshot& map, int midi)
+{
+    if (midi < 0)
+        return {};
+    const auto* e = map.lookup (midi);
+    if (e == nullptr || ! NoteMap::isValidNoteEntry (*e))
+        return {};
+    const auto name = juce::MidiMessage::getMidiNoteName (midi, true, true, 4);
+    return name + "  F " + juce::String (e->allpassFreqHz, 1) + " Hz"
+         + "  Q " + juce::String (e->allpassQ, 2)
+         + "  hits " + juce::String (e->hitCount);
 }
 
 // Apply Learn is enabled only for ResultReady with a present/applicable candidate.

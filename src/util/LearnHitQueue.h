@@ -12,6 +12,10 @@ struct LearnHitWindow
 {
     int sequence = -1;
     float trackedHzAtTrigger = 0.0f;
+    // Absolute sample index of the kick trigger within the same timeline as the
+    // full-session Learn loop capture (0 at queue reset / Learn start). -1 if
+    // unknown (unit fixtures that only supply hit windows).
+    int absoluteSampleAtTrigger = -1;
 
     std::vector<float> bass;
     std::vector<float> kick;
@@ -81,6 +85,7 @@ public:
         currentSlot = -1;
         preRollWrite = 0;
         sequenceCounter = 0;
+        absoluteSampleCounter = 0;
 
         for (auto& v : preRollBass) v = 0.0f;
         for (auto& v : preRollKick) v = 0.0f;
@@ -125,6 +130,7 @@ public:
 
                     s.sequence = sequenceCounter++;
                     s.trackedHzAtTrigger = trackedHz;
+                    s.absoluteSampleAtTrigger = absoluteSampleCounter;
                     captureIndex = preRollSamples;
                     capturing = true;
                     inProgress.store (true, std::memory_order_relaxed);
@@ -157,6 +163,7 @@ public:
         preRollBass[(size_t) preRollWrite] = rawBassLow;
         preRollKick[(size_t) preRollWrite] = rawKickLow;
         preRollWrite = (preRollWrite + 1) % preRollSamples;
+        ++absoluteSampleCounter;
     }
 
     void stopAcceptingNewHits() noexcept
@@ -175,6 +182,7 @@ public:
         const Slot& s = slots[(size_t) start1];
         out.sequence = s.sequence;
         out.trackedHzAtTrigger = s.trackedHzAtTrigger;
+        out.absoluteSampleAtTrigger = s.absoluteSampleAtTrigger;
         out.bass.assign (s.bass.begin(), s.bass.end());
         out.kick.assign (s.kick.begin(), s.kick.end());
 
@@ -199,6 +207,7 @@ private:
     {
         int sequence = -1;
         float trackedHzAtTrigger = 0.0f;
+        int absoluteSampleAtTrigger = -1;
         std::vector<float> bass;
         std::vector<float> kick;
     };
@@ -219,6 +228,7 @@ private:
     int currentSlot = -1;
     int preRollWrite = 0;
     int sequenceCounter = 0;
+    int absoluteSampleCounter = 0;
 
     // Cross-thread flags / diagnostics.
     std::atomic<bool> accepting { true };

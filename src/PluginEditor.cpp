@@ -93,7 +93,8 @@ void SegmentedModeSelector::paint (juce::Graphics& g)
 
 void LearnProgressComponent::setModel (const LearnProgressSnapshot& nextProgress,
                                        const NotePhaseMapSnapshot& map,
-                                       int nextActiveMidi)
+                                       int nextActiveMidi,
+                                       int nextSelectedMidi)
 {
     std::array<int, NotePhaseMapSnapshot::size> nextCounts {};
     std::array<bool, NotePhaseMapSnapshot::size> nextLearned {};
@@ -102,7 +103,11 @@ void LearnProgressComponent::setModel (const LearnProgressSnapshot& nextProgress
     {
         const auto& entry = map.notes[(size_t) i];
         nextCounts[(size_t) i] = juce::jmax (nextProgress.trackedNoteHitCounts[(size_t) i], entry.hitCount);
+        if (nextCounts[(size_t) i] == 0 && nextProgress.noteReports[(size_t) i].recognizedHits > 0)
+            nextCounts[(size_t) i] = juce::jmax (1, nextProgress.noteReports[(size_t) i].acceptedHits
+                                                  + nextProgress.noteReports[(size_t) i].outOfWindowHits);
         nextLearned[(size_t) i] = NoteMap::isValidNoteEntry (entry)
+                                   || nextProgress.noteReports[(size_t) i].outcome == LearnNoteOutcome::Learned
                                    || learnNoteHasEnoughMaterial (nextCounts[(size_t) i]);
         if (nextCounts[(size_t) i] > 0)
             nextTexts[(size_t) i] = formatLearnNoteChip (NotePhaseMapSnapshot::midiForIndex (i), nextCounts[(size_t) i]);
@@ -118,7 +123,9 @@ void LearnProgressComponent::setModel (const LearnProgressSnapshot& nextProgress
                       || progress.timingUsableHits != nextProgress.timingUsableHits
                       || progress.unusableSignalHits != nextProgress.unusableSignalHits
                       || progress.ignoredOverlappingTriggers != nextProgress.ignoredOverlappingTriggers
-                      || noteCounts != nextCounts || learnedNotes != nextLearned || activeMidi != nextActiveMidi;
+                      || progress.noteReports != nextProgress.noteReports
+                      || noteCounts != nextCounts || learnedNotes != nextLearned
+                      || activeMidi != nextActiveMidi || selectedMidi != nextSelectedMidi;
     if (! changed)
         return;
 
@@ -127,6 +134,7 @@ void LearnProgressComponent::setModel (const LearnProgressSnapshot& nextProgress
     learnedNotes = std::move (nextLearned);
     noteTexts = std::move (nextTexts);
     activeMidi = nextActiveMidi;
+    selectedMidi = nextSelectedMidi;
     repaint();
 }
 
@@ -148,6 +156,7 @@ void LearnProgressComponent::paint (juce::Graphics& g)
 
     auto chips = area.reduced (8, 4);
     chips.removeFromTop (kLearnProgressChipRowTop - 4);
+    chipCount = 0;
     int shown = 0;
     for (int i = 0; i < NotePhaseMapSnapshot::size && shown < 6; ++i)
     {
@@ -158,22 +167,51 @@ void LearnProgressComponent::paint (juce::Graphics& g)
         if (chips.getWidth() < width)
             break;
         auto chip = chips.removeFromLeft (width).reduced (1, 2);
-        const auto colour = midi == activeMidi && learnedNotes[(size_t) i] ? teal
-                           : learnedNotes[(size_t) i] ? green : amber;
+        chipBounds[(size_t) shown] = chip;
+        chipMidi[(size_t) shown] = midi;
+
+        const auto outcome = progress.noteReports[(size_t) i].outcome;
+        juce::Colour colour = amber;
+        if (outcome == LearnNoteOutcome::Learned || learnedNotes[(size_t) i])
+            colour = green;
+        else if (outcome == LearnNoteOutcome::OutOfCorrectionWindow)
+            colour = juce::Colour (0xffc45c26); // darker amber / rust
+        else if (outcome == LearnNoteOutcome::NotEnoughOverlap)
+            colour = amber;
+        if (midi == selectedMidi)
+            colour = teal;
+        else if (midi == activeMidi && learnedNotes[(size_t) i])
+            colour = teal;
+
         g.setColour (colour.withAlpha (0.22f));
         g.fillRoundedRectangle (chip.toFloat(), 4.0f);
         g.setColour (colour);
-        g.drawRoundedRectangle (chip.toFloat(), 4.0f, 1.0f);
+        g.drawRoundedRectangle (chip.toFloat(), 4.0f, midi == selectedMidi ? 2.0f : 1.0f);
         g.setFont (juce::Font (juce::FontOptions (10.0f)).boldened());
         g.drawText (noteTexts[(size_t) i], chip, juce::Justification::centred);
         chips.removeFromLeft (3);
         ++shown;
+        ++chipCount;
     }
     if (shown == 0)
     {
         g.setColour (mutedText.withAlpha (0.8f));
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
         g.drawText ("Waiting for accepted note hits", chips, juce::Justification::centredLeft);
+    }
+}
+
+void LearnProgressComponent::mouseDown (const juce::MouseEvent& e)
+{
+    for (int i = 0; i < chipCount; ++i)
+    {
+        if (chipBounds[(size_t) i].contains (e.getPosition()))
+        {
+            const int midi = chipMidi[(size_t) i];
+            if (onNoteSelected)
+                onNoteSelected (midi);
+            break;
+        }
     }
 }
 
@@ -588,6 +626,11 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     addAndMakeVisible (analyzerBody);
     addAndMakeVisible (transientPunch);
     addAndMakeVisible (learnProgressDisplay);
+    learnProgressDisplay.onNoteSelected = [this] (int midi)
+    {
+        selectedLearnMidi = (selectedLearnMidi == midi) ? -1 : midi;
+        refreshDynamicWorkflow();
+    };
 
     setRefButton.setButtonText ("Set Ref");
     setRefButton.setColour (juce::TextButton::buttonColourId, panel);
@@ -941,7 +984,9 @@ void KickLockAudioProcessorEditor::applyModeTransitionSideEffects (const ModeTra
         lastLearnBodySessionId = 0;
         lastLearnBodyState = LearnState::Idle;
         lastLearnBodyText.clear();
-        learnProgressDisplay.setModel ({}, audioProcessor.getNoteMapSnapshot(), -1);
+        lastLearnBodySelectedMidi = -1;
+        selectedLearnMidi = -1;
+        learnProgressDisplay.setModel ({}, audioProcessor.getNoteMapSnapshot(), -1, -1);
 
         // Drop Learn-looking body text from this editor instance.
         latestResult = audioProcessor.getLatestFixResult();
@@ -1270,10 +1315,13 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     const auto learnResult = learnResolved ? audioProcessor.getPendingLearnResult()
                                            : LearnFinalizeResult {};
 
-    // Runtime status must describe the applied processor-owned map.
+    // Runtime status must describe the applied processor-owned map for status
+    // chips; Learn pending map (not yet applied) drives post-Learn note list.
     latestNoteMap = audioProcessor.getNoteMapSnapshot();
     const int activeMidi = audioProcessor.activeMidiNote.load (std::memory_order_acquire);
-    learnProgressDisplay.setModel (latestLearnProgress, latestNoteMap, activeMidi);
+    const NotePhaseMapSnapshot& chipMap =
+        (learnResolved && learnResult.map.valid) ? learnResult.map : latestNoteMap;
+    learnProgressDisplay.setModel (latestLearnProgress, chipMap, activeMidi, selectedLearnMidi);
 
     const auto primary = primaryWorkflowPresentation (dynamic, learnState, canStartAnalyze,
                                                       analyzeStateIsBusy (audioProcessor.getAnalyzeState()));
@@ -1331,6 +1379,27 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
              << " usable hits.\nGlobal base: " << formatSignedDelayMs (learnResult.globalFix.bassDelayMs)
              << ", " << (learnResult.globalFix.bassPolarityInvert ? "invert" : "normal")
              << " polarity, " << learnResult.map.base.allpassStages << " stages.";
+        {
+            juce::StringArray noteLines;
+            for (const auto& r : learnResult.noteReports)
+            {
+                const auto line = formatLearnNoteOutcomeLine (r);
+                if (line.isNotEmpty())
+                    noteLines.add (line);
+            }
+            if (noteLines.size() > 0)
+            {
+                body << "\n\nNotes:";
+                for (const auto& line : noteLines)
+                    body << "\n• " << line;
+            }
+        }
+        if (selectedLearnMidi >= 0)
+        {
+            const auto detail = formatSelectedLearnNoteDetail (learnResult.map, selectedLearnMidi);
+            if (detail.isNotEmpty())
+                body << "\n\nSelected: " << detail;
+        }
         if (learnResult.diagnostics.rejectedPitchHits > 0 || learnResult.diagnostics.unusableSignalHits > 0)
             body << "\nRejected " << learnResult.diagnostics.rejectedPitchHits << " pitch / "
                  << learnResult.diagnostics.unusableSignalHits << " unusable hits.";
@@ -1351,6 +1420,9 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     }
     else
     {
+        body << formatLearnListeningStatus (latestLearnProgress);
+        if (body.isNotEmpty())
+            body << "\n";
         body << "Captured " << latestLearnProgress.capturedHits
              << ", processed " << latestLearnProgress.drainedHits
              << ".\nQueue " << latestLearnProgress.pendingQueueHits
@@ -1359,12 +1431,14 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     }
 
     if (body != lastLearnBodyText || lastLearnBodyState != learnState
-        || lastLearnBodySessionId != latestLearnProgress.sessionId)
+        || lastLearnBodySessionId != latestLearnProgress.sessionId
+        || lastLearnBodySelectedMidi != selectedLearnMidi)
     {
         analyzerBody.setText (body, juce::dontSendNotification);
         lastLearnBodyText = body;
         lastLearnBodyState = learnState;
         lastLearnBodySessionId = latestLearnProgress.sessionId;
+        lastLearnBodySelectedMidi = selectedLearnMidi;
     }
 
     const auto runtime = dynamicRuntimeStatus (dynamic, audioProcessor.dynamicMapStale.load (std::memory_order_acquire),

@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-15
+
+### Added
+- **Offline full-loop note segmentation for Dynamic Learn.** Learn builds the
+  per-note pitch map from a non-causal offline analysis of the whole captured
+  bass loop, instead of the live PitchTracker value frozen at each kick. This
+  removes the common “0 notes / NO MAP” failure on note transitions and swung
+  material when kick and bass honestly overlap.
+- **Honest per-note Learn diagnostics.** Each observed note reports
+  *learned*, *not enough kick overlaps (N/4)*, or *outside correction window*.
+  During capture the UI shows a live “notes detected: N” status; after Learn,
+  chips list notes with Freq/Q/hits on click.
+
+### Notes
+- Bass that truly sits outside the correction window still fails honestly —
+  offline segmentation does not rescue late-arrangement material.
+- Delay budget (±20 ms), post-roll, minimum hits per note, pitch-agreement
+  thresholds, kick handling (reference only), and NoteMap serialization schema
+  are unchanged.
+
 ## [0.2.1]
 
 ### Fixed

@@ -462,6 +462,31 @@ struct LearnDiagnostics
     juce::String warning;
 };
 
+// Runtime-only per-note Learn outcome (never serialized into NoteMap / presets).
+enum class LearnNoteOutcome : uint8_t
+{
+    None = 0,                 // not observed this session
+    Learned,                  // entered the map
+    NotEnoughOverlap,         // recognized but < kMinHitsPerNote usable overlaps
+    OutOfCorrectionWindow     // note in loop, but energy vs kick outside correction window
+};
+
+struct LearnNoteReport
+{
+    LearnNoteOutcome outcome = LearnNoteOutcome::None;
+    int midi = -1;
+    int acceptedHits = 0;     // pitch-accepted, timing-usable overlaps counted toward the note
+    int outOfWindowHits = 0;  // recognized near kick but outside correction / late
+    int recognizedHits = 0;   // any kick-associated recognition for this note
+
+    bool operator== (const LearnNoteReport& o) const noexcept
+    {
+        return outcome == o.outcome && midi == o.midi && acceptedHits == o.acceptedHits
+            && outOfWindowHits == o.outOfWindowHits && recognizedHits == o.recognizedHits;
+    }
+    bool operator!= (const LearnNoteReport& o) const noexcept { return ! (*this == o); }
+};
+
 struct LearnFinalizeResult
 {
     bool valid = false;
@@ -470,6 +495,7 @@ struct LearnFinalizeResult
     PhaseFixResult globalFix;
     LearnDiagnostics diagnostics;
     std::vector<LearnHitAnalysis> hitAnalyses;
+    std::array<LearnNoteReport, NotePhaseMapSnapshot::size> noteReports {};
 
     juce::String message;
 };

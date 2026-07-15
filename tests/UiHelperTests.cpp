@@ -1128,6 +1128,7 @@ public:
         beginTest ("Learn progress labels are honest: PROCESSED not ANALYZED");
         {
             LearnProgressSnapshot progress;
+            progress.state = LearnState::Idle;
             progress.capturedHits = 55;
             progress.drainedHits = 55;
             progress.pendingQueueHits = 0;
@@ -1145,6 +1146,21 @@ public:
             expect (line2.contains ("PITCH OK 0"));
             expect (line2.contains ("REJECTED 55"));
             expect (line2.contains ("TIMING OK 1"));
+        }
+
+        beginTest ("Learn listening status reports detected notes while capturing");
+        {
+            LearnProgressSnapshot progress;
+            progress.state = LearnState::Capturing;
+            progress.capturedHits = 4;
+            progress.trackedNoteHitCounts[(size_t) NotePhaseMapSnapshot::indexForMidi (33)] = 2;
+            progress.trackedNoteHitCounts[(size_t) NotePhaseMapSnapshot::indexForMidi (36)] = 1;
+            const auto line1 = formatLearnProgressSummaryLine1 (progress);
+            expect (line1.containsIgnoreCase ("Listening"));
+            expect (line1.contains ("notes detected: 2"));
+            const auto line2 = formatLearnProgressSummaryLine2 (progress);
+            expect (line2.contains ("CAPTURED 4"));
+            expect (line2.contains ("PITCH OK"));
         }
 
         beginTest ("Failed Learn body keeps backend message when present=false");
@@ -1181,6 +1197,40 @@ public:
             LearnFinalizeResult empty;
             const auto fallback = formatLearnFailureBody (empty);
             expect (fallback.containsIgnoreCase ("Learn needs more usable kick and bass hits"));
+        }
+
+        beginTest ("Per-note Learn outcome lines name the reason");
+        {
+            LearnNoteReport learned;
+            learned.outcome = LearnNoteOutcome::Learned;
+            learned.midi = 33;
+            learned.acceptedHits = 5;
+            expect (formatLearnNoteOutcomeLine (learned).contains ("A1"));
+            expect (formatLearnNoteOutcomeLine (learned).containsIgnoreCase ("learned"));
+
+            LearnNoteReport shortHits;
+            shortHits.outcome = LearnNoteOutcome::NotEnoughOverlap;
+            shortHits.midi = 40;
+            shortHits.acceptedHits = 3;
+            const auto shortLine = formatLearnNoteOutcomeLine (shortHits);
+            expect (shortLine.contains ("E2"));
+            expect (shortLine.contains ("3/" + juce::String (NoteMap::kMinHitsPerNote)));
+
+            LearnNoteReport late;
+            late.outcome = LearnNoteOutcome::OutOfCorrectionWindow;
+            late.midi = 28;
+            expect (formatLearnNoteOutcomeLine (late).containsIgnoreCase ("outside correction"));
+
+            LearnFinalizeResult result;
+            result.message = "Learned data did not form a valid map.";
+            const int e2 = NotePhaseMapSnapshot::indexForMidi (40);
+            const int e1 = NotePhaseMapSnapshot::indexForMidi (28);
+            if (e2 >= 0) result.noteReports[(size_t) e2] = shortHits;
+            if (e1 >= 0) result.noteReports[(size_t) e1] = late;
+            const auto body = formatLearnFailureBody (result);
+            expect (body.contains ("E2"));
+            expect (body.contains ("outside correction"));
+            expect (body.contains ("Notes:"));
         }
 
         beginTest ("Mode and Strength attachments follow host restore without changing Pitch Follow");

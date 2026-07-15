@@ -56,6 +56,8 @@ struct LearnProgressSnapshot
     int timingUsableHits = 0;         // LearnDiagnostics::analyzedHits (UI: TIMING OK)
     int unusableSignalHits = 0;
     std::array<int, NotePhaseMapSnapshot::size> trackedNoteHitCounts {};
+    // Runtime-only per-note outcomes from the last finalize (not serialized).
+    std::array<LearnNoteReport, NotePhaseMapSnapshot::size> noteReports {};
     bool stopRequested = false;
 };
 

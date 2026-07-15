@@ -3,6 +3,7 @@
 #include "NotePhaseMap.h"
 #include "NoteQuantizer.h"
 #include "OfflineFundamentalEstimator.h"
+#include "OfflineNoteSegmenter.h"
 
 // =============================================================================
 // Phase 1 tests: pure data models and pitch helpers only (plan v1.2).
@@ -321,6 +322,95 @@ public:
             expect (a.valid && b.valid);
             expectWithinAbsoluteError (a.frequencyHz, b.frequencyHz, 0.0f);
             expectWithinAbsoluteError (a.confidence, b.confidence, 0.0f);
+        }
+    }
+};
+
+//============================================================================//
+// OfflineNoteSegmenter - full-loop non-causal note map
+//============================================================================//
+class OfflineNoteSegmenterTests : public juce::UnitTest
+{
+public:
+    OfflineNoteSegmenterTests() : juce::UnitTest ("OfflineNoteSegmenter", "Phase1") {}
+
+    void runTest() override
+    {
+        beginTest ("Segments three sequential bass notes");
+        {
+            const double sr = 48000.0;
+            const double notes[] = { 55.0, 65.41, 82.41 };
+            const int perNote = (int) std::lround (sr * 0.5);
+            const int n = perNote * 3;
+            std::vector<float> bass ((size_t) n, 0.0f);
+            for (int ni = 0; ni < 3; ++ni)
+                for (int i = 0; i < perNote; ++i)
+                {
+                    const double t = (double) i / sr;
+                    bass[(size_t) (ni * perNote + i)] = 0.6f * (float) std::sin (kTwoPi * notes[ni] * t);
+                }
+
+            const auto segs = OfflineNoteSegmenter::segment (bass.data(), n, sr);
+            expect (segs.size() >= 3, "expected >= 3 segments, got " + juce::String ((int) segs.size()));
+
+            const int mids[] = {
+                NoteQuantizer::hzToMidi (55.0f),
+                NoteQuantizer::hzToMidi (65.41f),
+                NoteQuantizer::hzToMidi (82.41f)
+            };
+            for (int ni = 0; ni < 3; ++ni)
+            {
+                const int probe = ni * perNote + perNote / 2;
+                const float hz = OfflineNoteSegmenter::frequencyAt (segs, probe, 0);
+                expect (hz > 0.0f, "probe ni=" + juce::String (ni));
+                expectEquals (NoteQuantizer::hzToMidi (hz), mids[ni]);
+            }
+        }
+
+        beginTest ("Forward search finds note starting after kick sample");
+        {
+            const double sr = 48000.0;
+            const int silence = (int) std::lround (sr * 0.03);
+            const int tone = (int) std::lround (sr * 0.25);
+            const int n = silence + tone;
+            std::vector<float> bass ((size_t) n, 0.0f);
+            for (int i = 0; i < tone; ++i)
+            {
+                const double t = (double) i / sr;
+                bass[(size_t) (silence + i)] = 0.6f * (float) std::sin (kTwoPi * 55.0 * t);
+            }
+            const auto segs = OfflineNoteSegmenter::segment (bass.data(), n, sr);
+            expect (! segs.empty());
+            // At sample 0 (kick) no tone yet; forward search within 150 ms finds it.
+            expectWithinAbsoluteError (
+                OfflineNoteSegmenter::frequencyAt (segs, 0, (int) std::lround (0.150 * sr)),
+                55.0f, 3.0f);
+            // No forward search: covering sample 0 is still silence (segment
+            // centres start inside the tone, not padded into the pad).
+            expectEquals (OfflineNoteSegmenter::frequencyAt (segs, 0, 0), 0.0f);
+        }
+
+        beginTest ("Note change on kick prefers the new note via post-kick probe");
+        {
+            const double sr = 48000.0;
+            const int half = (int) std::lround (sr * 0.5);
+            const int n = half * 2;
+            std::vector<float> bass ((size_t) n, 0.0f);
+            for (int i = 0; i < half; ++i)
+            {
+                // Continuous phase per note (local t) — cleaner YIN at boundaries.
+                const double t0 = (double) i / sr;
+                const double t1 = (double) i / sr;
+                bass[(size_t) i] = 0.6f * (float) std::sin (kTwoPi * 55.0 * t0);
+                bass[(size_t) (half + i)] = 0.6f * (float) std::sin (kTwoPi * 82.41 * t1);
+            }
+            const auto segs = OfflineNoteSegmenter::segment (bass.data(), n, sr);
+            const int search = (int) std::lround (0.150 * sr);
+            // Kick at the note change: must map to E2 (82.41), not A1 (55).
+            const float hz = OfflineNoteSegmenter::frequencyAt (segs, half, search);
+            expect (hz > 0.0f, "hz=" + juce::String (hz));
+            expectEquals (NoteQuantizer::hzToMidi (hz), NoteQuantizer::hzToMidi (82.41f),
+                          "hz=" + juce::String (hz));
         }
     }
 };
@@ -710,5 +800,6 @@ public:
 
 static NoteQuantizerTests noteQuantizerTests;
 static OfflineFundamentalEstimatorTests offlineFundamentalEstimatorTests;
+static OfflineNoteSegmenterTests offlineNoteSegmenterTests;
 static NoteMapModelTests noteMapModelTests;
 static NoteMapSerializationTests noteMapSerializationTests;
