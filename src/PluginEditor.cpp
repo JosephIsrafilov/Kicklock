@@ -176,7 +176,8 @@ void LearnProgressComponent::paint (juce::Graphics& g)
             colour = green;
         else if (outcome == LearnNoteOutcome::OutOfCorrectionWindow)
             colour = juce::Colour (0xffc45c26); // darker amber / rust
-        else if (outcome == LearnNoteOutcome::NotEnoughOverlap)
+        else if (outcome == LearnNoteOutcome::NotEnoughOverlap
+                 || outcome == LearnNoteOutcome::CorrectionNotConfident)
             colour = amber;
         if (midi == selectedMidi)
             colour = teal;

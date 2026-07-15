@@ -688,6 +688,92 @@ inline DisplayHistoryIndices resolveRelativeDisplayHistoryIndices (int writeInde
              baseIndex };
 }
 
+// Display-only: same pre/post-roll idea as PhaseFixEngine hit windows.
+// Constrains Δ to one kick↔bass pair so multi-hit scope windows don't
+// compare peaks from different beats.
+inline int findScopeDominantKickPeak (const float* kick, int numSamples, double sampleRate) noexcept
+{
+    if (kick == nullptr || numSamples <= 1 || sampleRate <= 0.0)
+        return -1;
+
+    double meanEnergy = 0.0;
+    float peakEnergy = 0.0f;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const float energy = kick[i] * kick[i];
+        meanEnergy += (double) energy;
+        peakEnergy = std::max (peakEnergy, energy);
+    }
+    meanEnergy /= (double) numSamples;
+
+    const float threshold = std::clamp (std::max ((float) meanEnergy * 6.0f, peakEnergy * 0.08f),
+                                        1.0e-8f, 0.004f);
+    const float minimumEnergyGate = std::clamp (std::max ((float) meanEnergy * 1.5f, peakEnergy * 0.01f),
+                                                1.0e-9f, 0.0004f);
+    const float attackCoeff = (float) std::exp (-1.0 / std::max (1.0, sampleRate * 0.002));
+    const float releaseCoeff = (float) std::exp (-1.0 / std::max (1.0, sampleRate * 0.060));
+    const int holdoffSamples = std::max (1, (int) std::lround (sampleRate * 0.090));
+    const int peakSearch = std::max (1, (int) std::lround (sampleRate * 0.008));
+
+    float envelope = 0.0f;
+    bool wasAbove = false;
+    int holdoffRemaining = 0;
+    int bestPeak = -1;
+    float bestPeakEnergy = -1.0f;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const float energy = kick[i] * kick[i];
+        const float coeff = energy > envelope ? attackCoeff : releaseCoeff;
+        envelope = coeff * envelope + (1.0f - coeff) * energy;
+        if (holdoffRemaining > 0)
+            --holdoffRemaining;
+
+        const bool above = envelope >= threshold && envelope >= minimumEnergyGate;
+        const bool detected = above && ! wasAbove && holdoffRemaining <= 0;
+        wasAbove = above;
+        if (! detected)
+            continue;
+
+        holdoffRemaining = holdoffSamples;
+        const int searchEnd = std::min (numSamples, i + peakSearch);
+        int localPeak = i;
+        float localEnergy = kick[i] * kick[i];
+        for (int j = i; j < searchEnd; ++j)
+        {
+            const float e = kick[j] * kick[j];
+            if (e > localEnergy)
+            {
+                localEnergy = e;
+                localPeak = j;
+            }
+        }
+        if (localEnergy > bestPeakEnergy)
+        {
+            bestPeakEnergy = localEnergy;
+            bestPeak = localPeak;
+        }
+    }
+
+    // Fallback: loudest absolute sample when envelope detection finds nothing.
+    if (bestPeak < 0)
+    {
+        float bestAbs = 0.0f;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float a = std::abs (kick[i]);
+            if (a > bestAbs)
+            {
+                bestAbs = a;
+                bestPeak = i;
+            }
+        }
+        if (bestAbs <= 1.0e-5f)
+            return -1;
+    }
+    return bestPeak;
+}
+
 inline ScopePeakMarkers findScopePeakMarkers (const float* bass,
                                               const float* kick,
                                               int numSamples,
@@ -698,32 +784,39 @@ inline ScopePeakMarkers findScopePeakMarkers (const float* bass,
     if (bass == nullptr || kick == nullptr || numSamples <= 0 || sampleRate <= 0.0)
         return markers;
 
-    float bassPeak = 0.0f;
-    float kickPeak = 0.0f;
+    constexpr float kHitPreRollMs = 20.0f;
+    constexpr float kHitPostRollMs = 150.0f;
+    const int preSamples = std::max (1, (int) std::lround (sampleRate * (double) kHitPreRollMs / 1000.0));
+    const int postSamples = std::max (1, (int) std::lround (sampleRate * (double) kHitPostRollMs / 1000.0));
 
-    for (int i = 0; i < numSamples; ++i)
+    const int kickPeak = findScopeDominantKickPeak (kick, numSamples, sampleRate);
+    if (kickPeak < 0)
+        return markers;
+
+    const int winStart = std::max (0, kickPeak - preSamples);
+    const int winEnd = std::min (numSamples, kickPeak + postSamples + 1);
+
+    float bassPeak = 0.0f;
+    float kickPeakAbs = 0.0f;
+    int bassPeakIndex = -1;
+    for (int i = winStart; i < winEnd; ++i)
     {
         const float bassAbs = std::abs (bass[i]);
         if (bassAbs > bassPeak)
         {
             bassPeak = bassAbs;
-            markers.bassPeakIndex = i;
+            bassPeakIndex = i;
         }
-
         const float kickAbs = std::abs (kick[i]);
-        if (kickAbs > kickPeak)
-        {
-            kickPeak = kickAbs;
-            markers.kickPeakIndex = i;
-        }
+        if (kickAbs > kickPeakAbs)
+            kickPeakAbs = kickAbs;
     }
 
-    if (markers.bassPeakIndex < 0 || markers.kickPeakIndex < 0
-        || bassPeak <= 1.0e-5f || kickPeak <= 1.0e-5f)
-    {
+    if (bassPeakIndex < 0 || bassPeak <= 1.0e-5f || kickPeakAbs <= 1.0e-5f)
         return markers;
-    }
 
+    markers.kickPeakIndex = kickPeak;
+    markers.bassPeakIndex = bassPeakIndex;
     markers.valid = true;
     markers.deltaMs = samplesToMs (markers.bassPeakIndex - markers.kickPeakIndex, sampleRate);
     return markers;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -231,44 +232,157 @@ public:
         if ((int) observations.size() < LearnPipelineConfig::kMinUsableTimingObservations)
             return fail (result, "Too few usable timing observations.");
 
+        // Global HitConsensus stays informational / base-fallback only.
+        // Multi-note loops split into pitch-dependent delay clusters, so a weak
+        // global share must not abort Learn when individual notes still agree.
         const auto consensus = HitConsensus::analyze (observations);
         if (cancelled (shouldCancel))
             return fail (result, "Learn cancelled.");
-        if (! consensus.hasConsensus || consensus.dominantClusterIndex < 0)
-            return fail (result, "No timing consensus across hits.");
-        const auto& dominant = consensus.clusters[(size_t) consensus.dominantClusterIndex];
-        diag.dominantClusterHitCount = (int) dominant.memberIndices.size();
-        diag.dominantClusterShare = consensus.dominantClusterShare;
-        diag.timingOutlierHits = (int) observations.size() - diag.dominantClusterHitCount;
-        diag.multipleTimingFamilies = consensus.clusters.size() > 1;
-        if ((int) dominant.memberIndices.size() < LearnPipelineConfig::kMinDominantClusterMembers
-            || consensus.dominantClusterShare < LearnPipelineConfig::kMinDominantClusterShare
-            || consensus.consensusConfidence < LearnPipelineConfig::kMinConsensusConfidence)
-            return fail (result, "Timing consensus is too weak for Learn.");
 
         std::vector<int> dominantHits;
-        dominantHits.reserve (dominant.memberIndices.size());
-        for (const int observationIndex : dominant.memberIndices)
-            if (observationIndex >= 0 && observationIndex < (int) observationToHit.size())
-                dominantHits.push_back (observationToHit[(size_t) observationIndex]);
-        if ((int) dominantHits.size() < LearnPipelineConfig::kMinDominantClusterMembers)
-            return fail (result, "Dominant timing cluster is incomplete.");
-        for (const int index : dominantHits)
-            hits[(size_t) index].analysis.dominantTimingClusterMember = true;
+        bool strongGlobal = false;
+        float globalDelay = 0.0f;
+        bool globalPolarity = false;
+        float globalConfidence = 0.0f;
+        PhaseFixResult timingFix;
 
-        const float globalDelay = dominant.centroidDelayMs;
-        const bool globalPolarity = dominant.centroidPolarity;
-        PhaseFixResult timingFix = timingDiagnostic (globalDelay, globalPolarity, consensus, hits, dominantHits);
-        if (! std::isfinite (globalDelay) || std::abs (globalDelay) > config.maxDelayMs + 1.0e-4f
-            || timingFix.largeTimingOffset || timingFix.requiresTimelineMove || timingFix.unstableRecommendation)
+        if (consensus.hasConsensus && consensus.dominantClusterIndex >= 0)
         {
-            result.globalFix = timingFix;
-            return fail (result, "Dominant timing solution is not supported by the delay budget.");
+            const auto& dominant = consensus.clusters[(size_t) consensus.dominantClusterIndex];
+            diag.dominantClusterHitCount = (int) dominant.memberIndices.size();
+            diag.dominantClusterShare = consensus.dominantClusterShare;
+            diag.timingOutlierHits = (int) observations.size() - diag.dominantClusterHitCount;
+            diag.multipleTimingFamilies = consensus.clusters.size() > 1;
+
+            const bool shareOk = (int) dominant.memberIndices.size() >= LearnPipelineConfig::kMinDominantClusterMembers
+                && consensus.dominantClusterShare >= LearnPipelineConfig::kMinDominantClusterShare
+                && consensus.consensusConfidence >= LearnPipelineConfig::kMinConsensusConfidence;
+
+            if (shareOk)
+            {
+                dominantHits.reserve (dominant.memberIndices.size());
+                for (const int observationIndex : dominant.memberIndices)
+                    if (observationIndex >= 0 && observationIndex < (int) observationToHit.size())
+                        dominantHits.push_back (observationToHit[(size_t) observationIndex]);
+
+                if ((int) dominantHits.size() >= LearnPipelineConfig::kMinDominantClusterMembers)
+                {
+                    const float candidateDelay = dominant.centroidDelayMs;
+                    const bool candidatePolarity = dominant.centroidPolarity;
+                    PhaseFixResult candidateFix = timingDiagnostic (
+                        candidateDelay, candidatePolarity, consensus, hits, dominantHits);
+                    // Strong global is optional. Over-budget / unstable dominant
+                    // must not abort Learn — per-note path can still form a map.
+                    if (std::isfinite (candidateDelay)
+                        && std::abs (candidateDelay) <= config.maxDelayMs + 1.0e-4f
+                        && ! candidateFix.largeTimingOffset
+                        && ! candidateFix.requiresTimelineMove
+                        && ! candidateFix.unstableRecommendation)
+                    {
+                        strongGlobal = true;
+                        globalDelay = candidateDelay;
+                        globalPolarity = candidatePolarity;
+                        globalConfidence = consensus.consensusConfidence;
+                        timingFix = candidateFix;
+                        for (const int index : dominantHits)
+                            hits[(size_t) index].analysis.dominantTimingClusterMember = true;
+                    }
+                    else
+                    {
+                        result.globalFix = candidateFix;
+                        // Keep dominantHits empty for strongGlobal=false path.
+                        dominantHits.clear();
+                    }
+                }
+            }
         }
 
+        // Timing-eligible hits: timing-usable, in-budget. A disagreeing or
+        // octave-ambiguous pitch label is deliberately NOT required to match
+        // (per the pitch/timing independence policy above) — this list feeds
+        // the global fallback delay, which only needs agreement on WHEN, not
+        // WHICH note. But pitchInvalid means the capture window had no usable
+        // bass energy at all (e.g. bass arriving right at the post-roll edge);
+        // that hit carries no real timing evidence either and must still be
+        // hard-rejected, or a truly-empty hit could fabricate a "consensus".
+        // Soft DTW ambiguity (unstableRecommendation alone) still allows
+        // consensus when the measured delay is finite and inside the budget.
+        // Hard rejects: pitchInvalid / largeTimingOffset / requiresTimelineMove
+        // / out-of-budget.
+        std::vector<int> eligibleHits;
+        eligibleHits.reserve (hits.size());
+        for (int i = 0; i < (int) hits.size(); ++i)
+        {
+            const auto& hit = hits[(size_t) i];
+            if (! hit.analysis.timingUsable || hit.analysis.pitchInvalid)
+                continue;
+            if (hit.timing.largeTimingOffset || hit.timing.requiresTimelineMove)
+                continue;
+            if (! std::isfinite (hit.timing.bassDelayMs)
+                || std::abs (hit.timing.bassDelayMs) > config.maxDelayMs + 1.0e-4f)
+                continue;
+            eligibleHits.push_back (i);
+        }
+
+        // Note-eligible hits: the timing-eligible subset that also carries a
+        // trustworthy pitch, since per-note bucketing must know WHICH note a
+        // hit belongs to. This is strictly narrower than eligibleHits.
+        std::vector<int> noteEligibleHits;
+        noteEligibleHits.reserve (eligibleHits.size());
+        for (const int index : eligibleHits)
+            if (hits[(size_t) index].analysis.pitchAccepted)
+                noteEligibleHits.push_back (index);
+
+        if (! strongGlobal && eligibleHits.empty())
+        {
+            // Distinguish true out-of-budget timing from empty consensus.
+            bool anyOutOfBudget = false;
+            for (const auto& hit : hits)
+            {
+                if (! hit.analysis.timingUsable)
+                    continue;
+                if (hit.timing.largeTimingOffset || hit.timing.requiresTimelineMove
+                    || (std::isfinite (hit.timing.bassDelayMs)
+                        && std::abs (hit.timing.bassDelayMs) > config.maxDelayMs + 1.0e-4f))
+                {
+                    anyOutOfBudget = true;
+                    break;
+                }
+            }
+            if (anyOutOfBudget || result.globalFix.largeTimingOffset
+                || result.globalFix.requiresTimelineMove)
+                return fail (result, "Dominant timing solution is not supported by the delay budget.");
+            return fail (result, "No timing consensus across hits.");
+        }
+
+        // Fallback global delay from eligible hits when the dominant cluster is weak.
+        if (! strongGlobal)
+        {
+            std::vector<float> delays;
+            delays.reserve (eligibleHits.size());
+            int inverted = 0;
+            double confSum = 0.0;
+            for (const int index : eligibleHits)
+            {
+                const auto& hit = hits[(size_t) index];
+                delays.push_back (hit.timing.bassDelayMs);
+                inverted += hit.timing.bassPolarityInvert ? 1 : 0;
+                confSum += std::clamp ((double) hit.analysis.timingConfidence, 0.0, 1.0);
+            }
+            std::sort (delays.begin(), delays.end());
+            const size_t n = delays.size();
+            globalDelay = n % 2 ? delays[n / 2] : 0.5f * (delays[n / 2 - 1] + delays[n / 2]);
+            globalPolarity = inverted * 2 > (int) eligibleHits.size();
+            globalConfidence = (float) (confSum / (double) eligibleHits.size());
+            if (! std::isfinite (globalDelay) || std::abs (globalDelay) > config.maxDelayMs + 1.0e-4f)
+                return fail (result, "Dominant timing solution is not supported by the delay budget.");
+            timingFix = timingDiagnostic (globalDelay, globalPolarity, consensus, hits, eligibleHits);
+        }
+
+        const std::vector<int>& globalSourceHits = strongGlobal ? dominantHits : eligibleHits;
         std::vector<FixedTimingRotatorInput> globalInputs;
-        globalInputs.reserve (dominantHits.size());
-        for (const int index : dominantHits)
+        globalInputs.reserve (globalSourceHits.size());
+        for (const int index : globalSourceHits)
         {
             const auto& hit = hits[(size_t) index];
             globalInputs.push_back ({ hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), hit.analysis.lowBandEnergy });
@@ -278,16 +392,143 @@ public:
             config.stages(), config.freqs(), config.qs(), 0, shouldCancel);
         if (cancelled (shouldCancel))
             return fail (result, "Learn cancelled.");
-        if (! globalSearch.valid)
+
+        const float fallbackFreq = sanitizeFallbackFreq (config.preLearnAllpassFreqHz);
+        const float fallbackQ = sanitizeFallbackQ (config.preLearnAllpassQ);
+        int globalStages = 2;
+        bool globalHelps = false;
+        float globalAllpassFreq = fallbackFreq;
+        float globalAllpassQ = fallbackQ;
+
+        if (globalSearch.valid)
+        {
+            globalStages = chooseStage (globalSearch);
+            const auto globalCandidate = FixedTimingRotatorSearch::candidateForStage (globalSearch, globalStages);
+            globalHelps = globalCandidate.valid && globalCandidate.helps;
+            if (globalHelps)
+            {
+                globalAllpassFreq = globalCandidate.allpassFreqHz;
+                globalAllpassQ = globalCandidate.allpassQ;
+                // The winning rotator was evaluated with its own residual
+                // alignment, so carry that jointly-selected delay forward to
+                // the map/global fix instead of retaining the pre-rotator fit.
+                globalDelay = globalCandidate.delayMs;
+            }
+        }
+        else if (strongGlobal)
         {
             result.globalFix = timingFix;
             return fail (result, "Fixed-timing global rotator baseline is invalid.");
         }
-        const int globalStages = chooseStage (globalSearch);
-        const auto globalCandidate = FixedTimingRotatorSearch::candidateForStage (globalSearch, globalStages);
-        const float fallbackFreq = sanitizeFallbackFreq (config.preLearnAllpassFreqHz);
-        const float fallbackQ = sanitizeFallbackQ (config.preLearnAllpassQ);
-        const bool globalHelps = globalCandidate.valid && globalCandidate.helps;
+        // Weak global: rotator may fail across mixed-pitch hits; per-note path still runs.
+
+        // Per-note delay medians (within-note consensus) for rotator search.
+        std::array<std::vector<int>, (size_t) NotePhaseMapSnapshot::size> noteHitIndexes;
+        for (const int index : noteEligibleHits)
+        {
+            const auto& hit = hits[(size_t) index];
+            const int note = NotePhaseMapSnapshot::indexForMidi (
+                NoteQuantizer::hzToMidi (hit.analysis.trackedFundamentalHz));
+            if (note >= 0)
+                noteHitIndexes[(size_t) note].push_back (index);
+        }
+
+        std::array<float, (size_t) NotePhaseMapSnapshot::size> noteDelayMs {};
+        std::array<bool, (size_t) NotePhaseMapSnapshot::size> notePolarity {};
+        std::array<bool, (size_t) NotePhaseMapSnapshot::size> noteTimingReady {};
+        for (int n = 0; n < NotePhaseMapSnapshot::size; ++n)
+        {
+            const auto& indexes = noteHitIndexes[(size_t) n];
+            if ((int) indexes.size() < NoteMap::kMinHitsPerNote)
+                continue;
+            std::vector<float> delays;
+            delays.reserve (indexes.size());
+            int inverted = 0;
+            for (const int index : indexes)
+            {
+                delays.push_back (hits[(size_t) index].timing.bassDelayMs);
+                inverted += hits[(size_t) index].timing.bassPolarityInvert ? 1 : 0;
+            }
+            std::sort (delays.begin(), delays.end());
+            const size_t dn = delays.size();
+            const float medianDelay = dn % 2 ? delays[dn / 2]
+                                             : 0.5f * (delays[dn / 2 - 1] + delays[dn / 2]);
+            // Within-note agreement: MAD-style spread must stay tight.
+            double spreadSum = 0.0;
+            for (const float d : delays)
+            {
+                const double diff = (double) d - (double) medianDelay;
+                spreadSum += diff * diff;
+            }
+            const float spread = (float) std::sqrt (spreadSum / (double) delays.size());
+            if (! std::isfinite (medianDelay) || ! std::isfinite (spread)
+                || std::abs (medianDelay) > config.maxDelayMs + 1.0e-4f
+                || spread > 1.0f) // ponytail: 1 ms within-note ceiling; raise if real gear needs it
+                continue;
+            noteDelayMs[(size_t) n] = medianDelay;
+            notePolarity[(size_t) n] = inverted * 2 > (int) indexes.size();
+            noteTimingReady[(size_t) n] = true;
+        }
+
+        std::array<NoteLearnAccumulator, (size_t) NotePhaseMapSnapshot::size> buckets;
+        for (int n = 0; n < NotePhaseMapSnapshot::size; ++n)
+        {
+            if (! noteTimingReady[(size_t) n])
+                continue;
+            const float noteDelay = noteDelayMs[(size_t) n];
+            const bool notePol = notePolarity[(size_t) n];
+            const auto& indexes = noteHitIndexes[(size_t) n];
+
+            // Choose this note's own best stage count from its own hits.
+            // Reusing globalStages (picked from the mixed/global hit set) can
+            // silently discard a note whose ideal stage differs from the
+            // global pick, even though its own combined search would clear
+            // the gain threshold.
+            std::vector<FixedTimingRotatorInput> noteInputs;
+            noteInputs.reserve (indexes.size());
+            for (const int index : indexes)
+            {
+                const auto& hit = hits[(size_t) index];
+                noteInputs.push_back ({ hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), hit.analysis.lowBandEnergy });
+            }
+            const auto noteSearch = FixedTimingRotatorSearch::searchCombined (
+                noteInputs, config.sampleRate, noteDelay, notePol, config.delayInterpolation,
+                config.stages(), config.freqs(), config.qs(), 0, shouldCancel);
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
+            const int noteStages = noteSearch.valid ? chooseStage (noteSearch) : globalStages;
+
+            for (const int index : indexes)
+            {
+                if (cancelled (shouldCancel))
+                    return fail (result, "Learn cancelled.");
+                auto& hit = hits[(size_t) index];
+                const auto perHit = FixedTimingRotatorSearch::search (
+                    hit.bass.data(), hit.kick.data(), (int) hit.bass.size(),
+                    config.sampleRate, noteDelay, notePol, config.delayInterpolation,
+                    config.stages(), config.freqs(), config.qs(), noteStages, shouldCancel);
+                if (cancelled (shouldCancel))
+                    return fail (result, "Learn cancelled.");
+                const auto candidate = FixedTimingRotatorSearch::candidateForStage (perHit, noteStages);
+                hit.analysis.rotatorHelps = candidate.helps;
+                hit.analysis.allpassFreqHz = candidate.allpassFreqHz;
+                hit.analysis.allpassQ = candidate.allpassQ;
+                hit.analysis.rotatorGainPoints = candidate.gainPoints;
+                hit.analysis.rotatorConfidence = candidate.confidence;
+                if (candidate.helps)
+                {
+                    // Persist the same candidate-local alignment that earned
+                    // this allpass gain.  The original timing estimate may
+                    // include this allpass's group delay.
+                    hit.timing.bassDelayMs = candidate.delayMs;
+                    hit.analysis.fractionalLagMs = candidate.delayMs;
+                }
+                buckets[(size_t) n].add ({ hit.analysis.trackedFundamentalHz, candidate.allpassFreqHz,
+                    candidate.allpassQ, hit.timing.bassDelayMs, hit.timing.bassPolarityInvert,
+                    hit.analysis.timingConfidence,
+                    std::min (hit.analysis.offlinePitchConfidence, candidate.confidence), candidate.helps });
+            }
+        }
 
         NotePhaseMapSnapshot map = NoteMap::makeEmptyNoteMap();
         map.schemaVersion = NoteMap::kSchemaVersion;
@@ -298,50 +539,43 @@ public:
         map.base.allpassStages = globalStages;
         map.base.delayInterpolationIndex = config.delayInterpolation == InterpolationType::Linear ? 0 : 1;
         map.base.learnedSampleRate = config.sampleRate;
-        map.global = makeGlobalEntry (hits, dominantHits, globalHelps ? globalCandidate.allpassFreqHz : fallbackFreq,
-                                       globalHelps ? globalCandidate.allpassQ : fallbackQ, globalHelps,
-                                       consensus.consensusConfidence, globalDelay, globalPolarity);
-
-        std::array<NoteLearnAccumulator, (size_t) NotePhaseMapSnapshot::size> buckets;
-        for (const int index : dominantHits)
-        {
-            if (cancelled (shouldCancel))
-                return fail (result, "Learn cancelled.");
-            auto& hit = hits[(size_t) index];
-            if (! hit.analysis.pitchAccepted)
-                continue;
-            if (hit.analysis.timingAmbiguous
-                || std::abs (hit.timing.bassDelayMs) > config.maxDelayMs + 1.0e-4f)
-                continue;
-            const auto perHit = FixedTimingRotatorSearch::search (hit.bass.data(), hit.kick.data(), (int) hit.bass.size(),
-                config.sampleRate, globalDelay, globalPolarity, config.delayInterpolation,
-                config.stages(), config.freqs(), config.qs(), globalStages, shouldCancel);
-            if (cancelled (shouldCancel))
-                return fail (result, "Learn cancelled.");
-            const auto candidate = FixedTimingRotatorSearch::candidateForStage (perHit, globalStages);
-            hit.analysis.rotatorHelps = candidate.helps;
-            hit.analysis.allpassFreqHz = candidate.allpassFreqHz;
-            hit.analysis.allpassQ = candidate.allpassQ;
-            hit.analysis.rotatorGainPoints = candidate.gainPoints;
-            hit.analysis.rotatorConfidence = candidate.confidence;
-            const int note = NotePhaseMapSnapshot::indexForMidi (NoteQuantizer::hzToMidi (hit.analysis.trackedFundamentalHz));
-            if (note >= 0)
-            {
-                buckets[(size_t) note].add ({ hit.analysis.trackedFundamentalHz, candidate.allpassFreqHz,
-                    candidate.allpassQ, hit.timing.bassDelayMs, hit.timing.bassPolarityInvert,
-                    hit.analysis.timingConfidence,
-                    std::min (hit.analysis.offlinePitchConfidence, candidate.confidence), candidate.helps });
-            }
-        }
 
         int learnedNotes = 0;
+        std::vector<float> learnedDelays;
+        int learnedInverted = 0;
         for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
         {
             if (cancelled (shouldCancel))
                 return fail (result, "Learn cancelled.");
             const auto entry = buckets[(size_t) i].finalizeEntry();
-            if (entry.learned) { map.notes[(size_t) i] = entry; ++learnedNotes; }
+            if (entry.learned)
+            {
+                map.notes[(size_t) i] = entry;
+                ++learnedNotes;
+                learnedDelays.push_back (entry.delayMs);
+                learnedInverted += entry.polarityInvert ? 1 : 0;
+            }
         }
+
+        // Prefer robust median of learned per-note delays when global cluster was weak.
+        if (! strongGlobal && ! learnedDelays.empty())
+        {
+            std::sort (learnedDelays.begin(), learnedDelays.end());
+            const size_t ln = learnedDelays.size();
+            globalDelay = ln % 2 ? learnedDelays[ln / 2]
+                                 : 0.5f * (learnedDelays[ln / 2 - 1] + learnedDelays[ln / 2]);
+            globalPolarity = learnedInverted * 2 > learnedNotes;
+            map.base.delayMs = globalDelay;
+            map.base.polarityInvert = globalPolarity;
+        }
+
+        map.global = makeGlobalEntry (hits, globalSourceHits, globalAllpassFreq, globalAllpassQ, globalHelps,
+                                      globalConfidence, globalDelay, globalPolarity);
+        // Need either a strong global cluster, at least one learned note, or a
+        // usable global fallback from eligible hits with a valid rotator baseline.
+        if (! strongGlobal && learnedNotes == 0 && ! globalSearch.valid)
+            return fail (result, "No confident timing solution for any note.");
+
         diag.globalOnlyHits = 0;
         for (size_t i = 0; i < hits.size(); ++i)
         {
@@ -358,8 +592,10 @@ public:
         timingFix.phaseFilterFreqHz = map.global.allpassFreqHz;
         timingFix.phaseFilterQ = map.global.allpassQ;
         timingFix.phaseFilterStages = globalStages;
-        timingFix.confidence = consensus.consensusConfidence;
-        timingFix.contributingHits = (int) dominantHits.size();
+        timingFix.confidence = globalConfidence;
+        timingFix.contributingHits = strongGlobal ? (int) dominantHits.size() : (int) eligibleHits.size();
+        timingFix.bassDelayMs = globalDelay;
+        timingFix.bassPolarityInvert = globalPolarity;
         PhaseFixEngine::updateDerivedResultFields (timingFix);
         result.globalFix = timingFix;
         result.hitAnalyses.clear();
@@ -373,10 +609,12 @@ public:
         result.map = map;
         result.valid = NoteMap::isValidNoteMap (map);
         if (! result.valid) return fail (result, "Learned data did not form a valid map.");
-        if (diag.multipleTimingFamilies)
+        if (diag.multipleTimingFamilies && strongGlobal)
             diag.warning = "Multiple timing families detected; used the dominant one.";
+        else if (diag.multipleTimingFamilies && learnedNotes > 0)
+            diag.warning = "Multiple timing families detected; learned per-note solutions.";
         result.message = "Learned " + juce::String (learnedNotes) + " notes from "
-                       + juce::String ((int) dominantHits.size()) + " dominant timing hits.";
+                       + juce::String ((int) eligibleHits.size()) + " usable timing hits.";
         if (cancelled (shouldCancel))
             return fail (result, "Learn cancelled.");
         return result;
@@ -398,14 +636,6 @@ private:
         for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
             reports[(size_t) i].midi = NotePhaseMapSnapshot::midiForIndex (i);
 
-        bool anyDominantAssigned = false;
-        for (const auto& hit : hits)
-            if (hit.analysis.dominantTimingClusterMember)
-            {
-                anyDominantAssigned = true;
-                break;
-            }
-
         for (const auto& hit : hits)
         {
             float hz = hit.analysis.trackedFundamentalHz;
@@ -423,10 +653,9 @@ private:
             const bool timingOk = hit.analysis.timingUsable
                 && std::isfinite (hit.timing.bassDelayMs)
                 && std::abs (hit.timing.bassDelayMs) <= maxDelayMs + 1.0e-4f;
-            // timingAmbiguous still counts as an overlap for UI reasons (note was
-            // present with kick); only out-of-budget / unusable timing is "window".
-            const bool inCluster = ! anyDominantAssigned || hit.analysis.dominantTimingClusterMember;
-            const bool overlapOk = hit.analysis.pitchAccepted && timingOk && inCluster;
+            // Per-note Learn counts every pitch-accepted in-budget overlap.
+            // Dominant-cluster membership is diagnostics-only (global fallback).
+            const bool overlapOk = hit.analysis.pitchAccepted && timingOk;
 
             if (overlapOk)
                 ++r.acceptedHits;
@@ -480,7 +709,7 @@ private:
             if (r.acceptedHits >= NoteMap::kMinHitsPerNote)
             {
                 // Enough overlaps but aggregator/rotator did not accept the note.
-                r.outcome = LearnNoteOutcome::NotEnoughOverlap;
+                r.outcome = LearnNoteOutcome::CorrectionNotConfident;
                 continue;
             }
             if (r.recognizedHits > 0)

@@ -7,6 +7,7 @@
 
 #include "NotePhaseMap.h"
 #include "PhaseFixEngine.h"
+#include "ConstrainedDtwRefiner.h"
 
 struct RotatorCandidate
 {
@@ -20,6 +21,7 @@ struct RotatorCandidate
     float matchPercent = 0.0f;
     float gainPoints = 0.0f; // safety-adjusted gain over fixed baseline
     float confidence = 0.0f;
+    float delayMs = 0.0f; // candidate-local timing fit
 };
 
 struct FixedTimingRotatorResult
@@ -39,12 +41,14 @@ struct FixedTimingRotatorInput
     float energy = 1.0f;
 };
 
-// Worker-only F/Q search. Timing is an input, never an output.  Its defaults,
-// candidate validity rules, and safety penalty are shared with Static Analyze.
+// Worker-only joint delay/F/Q search. The prior Learn timing remains the
+// centre of a small residual window, but every candidate fits its own residual
+// so allpass group delay cannot be committed as ordinary timing beforehand.
 class FixedTimingRotatorSearch
 {
 public:
     static constexpr float kMinGainPoints = 3.0f;
+    static constexpr float kResidualDelayWindowMs = 8.0f;
 
     static const std::vector<float>& defaultFrequencies() { return AlignmentAnalyzer::rotatorFrequencies(); }
     static const std::vector<float>& defaultQs() { return AlignmentAnalyzer::rotatorQs(); }
@@ -101,6 +105,7 @@ private:
         float rawMatch = 0.0f;
         float effectiveMatch = 0.0f;
         float confidence = 0.0f;
+        float delayMs = 0.0f;
     };
 
     // One worker-owned scratch set is reused for every candidate. Candidate
@@ -111,6 +116,7 @@ private:
         std::vector<float> wet;
         std::vector<float> scoreBass;
         std::vector<float> scoreKick;
+        ConstrainedDtwRefiner::Scratch residualTiming;
     };
 
     static bool validStage (int stage) noexcept { return stage == 2 || stage == 3; }
@@ -155,7 +161,8 @@ private:
         }
 
         const auto baseline = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                                        interpolation, false, 0.0f, 0.0f, 2, combined, scratch, shouldCancel);
+                                        interpolation, false, 0.0f, 0.0f, 2, false,
+                                        combined, scratch, shouldCancel);
         if (! baseline.valid)
             return result;
 
@@ -183,10 +190,22 @@ private:
                         return {};
                     if (! std::isfinite (q) || q < NoteMap::kAllpassQMin || q > NoteMap::kAllpassQMax)
                         continue;
-                    const auto candidate = evaluate (inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
-                                                     interpolation, true, freq, q, stage, combined, scratch, shouldCancel);
+                    // The inherited fixed-delay point remains a member of the
+                    // joint candidate set. This preserves the proven sequential
+                    // result whenever a local re-fit scores worse, while still
+                    // permitting an allpass-specific residual alignment to win.
+                    const auto fixedCandidate = evaluate (
+                        inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
+                        interpolation, true, freq, q, stage, false, combined, scratch, shouldCancel);
+                    const auto fittedCandidate = evaluate (
+                        inputs, sampleRate, fixedDelayMs, fixedPolarityInvert,
+                        interpolation, true, freq, q, stage, true, combined, scratch, shouldCancel);
                     if (shouldCancel && shouldCancel())
                         return {};
+                    const auto& candidate = fittedCandidate.valid
+                        && (! fixedCandidate.valid
+                            || fittedCandidate.effectiveMatch > fixedCandidate.effectiveMatch + 1.0e-4f)
+                        ? fittedCandidate : fixedCandidate;
                     if (! candidate.valid)
                         continue;
                     const float gain = candidate.effectiveMatch - baseline.effectiveMatch;
@@ -198,6 +217,7 @@ private:
                         best.matchPercent = candidate.rawMatch;
                         best.gainPoints = gain;
                         best.confidence = candidate.confidence;
+                        best.delayMs = candidate.delayMs;
                     }
                 }
             }
@@ -217,11 +237,11 @@ private:
     static Evaluated evaluate (const std::vector<FixedTimingRotatorInput>& inputs,
                                 double sampleRate, float delayMs, bool polarity,
                                 InterpolationType interpolation, bool useRotator,
-                                float freq, float q, int stages, bool,
+                                float freq, float q, int stages, bool fitResidual, bool,
                                 Scratch& scratch,
                                 const std::function<bool()>& shouldCancel)
     {
-        double weights = 0.0, raw = 0.0, effective = 0.0, confidence = 0.0;
+        double weights = 0.0, raw = 0.0, effective = 0.0, confidence = 0.0, delay = 0.0;
         for (const auto& input : inputs)
         {
             if (shouldCancel && shouldCancel())
@@ -236,6 +256,36 @@ private:
             settings.phaseFilterQ = q;
             settings.phaseFilterStages = stages;
             settings.delayInterpolation = interpolation;
+
+            float candidateDelayMs = delayMs;
+            if (fitResidual)
+            {
+                // Render at the inherited timing first, then locate the small
+                // candidate-specific residual. This reuses the established FFT
+                // correlation + DTW refinement rather than publishing a new timing
+                // estimator or widening Learn's delay budget.
+                PhaseFixEngine::renderCandidate (input.bass, input.numSamples, sampleRate, settings, scratch.wet);
+                if (shouldCancel && shouldCancel())
+                    return {};
+
+                const auto residualAlign = AlignmentAnalyzer::analyze (
+                    scratch.wet.data(), input.kick, input.numSamples, sampleRate,
+                    kResidualDelayWindowMs, 30.0f, 120.0f, 16384, false);
+                const float coarseResidualSamples = residualAlign.valid
+                    ? residualAlign.delayMs * (float) sampleRate / 1000.0f : 0.0f;
+                const auto residual = ConstrainedDtwRefiner::refine (
+                    scratch.wet.data(), input.kick, input.numSamples, sampleRate,
+                    coarseResidualSamples, false, scratch.residualTiming, shouldCancel);
+                if (shouldCancel && shouldCancel())
+                    return {};
+
+                const float residualSamples = residual.valid ? residual.delaySamples
+                                                              : coarseResidualSamples;
+                candidateDelayMs = juce::jlimit (
+                    -PhaseFixEngine::absoluteManualMaxDelayMs, PhaseFixEngine::absoluteManualMaxDelayMs,
+                    delayMs + residualSamples * 1000.0f / (float) sampleRate);
+            }
+            settings.bassDelayMs = candidateDelayMs;
 
             PhaseFixRenderSettings base = settings;
             base.phaseFilterEnabled = false;
@@ -266,10 +316,11 @@ private:
             raw += weight * score.matchPercent;
             effective += weight * ((double) score.matchPercent - penalty * 100.0);
             confidence += weight * score.confidence;
+            delay += weight * candidateDelayMs;
         }
         if (weights <= 0.0)
             return {};
         return { true, (float) (raw / weights), (float) (effective / weights),
-                 (float) (confidence / weights) };
+                 (float) (confidence / weights), (float) (delay / weights) };
     }
 };

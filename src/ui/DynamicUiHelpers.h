@@ -352,6 +352,9 @@ inline juce::String formatLearnNoteOutcomeLine (const LearnNoteReport& report)
                  + juce::String (NoteMap::kMinHitsPerNote) + ")";
         case LearnNoteOutcome::OutOfCorrectionWindow:
             return name + ": outside correction window";
+        case LearnNoteOutcome::CorrectionNotConfident:
+            return name + ": recognized, but no confident correction ("
+                 + juce::String (juce::jmax (0, report.acceptedHits)) + " hits)";
         default:
             return {};
     }

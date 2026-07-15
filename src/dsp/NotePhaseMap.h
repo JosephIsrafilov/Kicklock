@@ -468,7 +468,8 @@ enum class LearnNoteOutcome : uint8_t
     None = 0,                 // not observed this session
     Learned,                  // entered the map
     NotEnoughOverlap,         // recognized but < kMinHitsPerNote usable overlaps
-    OutOfCorrectionWindow     // note in loop, but energy vs kick outside correction window
+    OutOfCorrectionWindow,    // note in loop, but energy vs kick outside correction window
+    CorrectionNotConfident    // enough overlaps, but aggregator/rotator rejected the note
 };
 
 struct LearnNoteReport

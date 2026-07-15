@@ -9,6 +9,10 @@
 #include "NotePhaseMap.h"
 #include "NoteQuantizer.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
+#include <limits>
+
 // =============================================================================
 // Phase 3 tests: the offline, worker-side Learn core (plan v1.2).
 //   * Pass A recovers ONE global Delay + Polarity (rotator disabled);
@@ -144,6 +148,190 @@ namespace
     {
         for (int i = 0; i < (int) hit.kick.size(); ++i)
             hit.kick[(size_t) i] += amount * std::sin ((float) i * 0.173f + 0.37f);
+    }
+
+    juce::File controlledRealBassFile()
+    {
+        auto directory = juce::File::getCurrentWorkingDirectory();
+        for (int i = 0; i < 5; ++i)
+        {
+            const auto candidate = directory.getChildFile ("tests/assets/controlled_real_bass_48k_mono.wav");
+            if (candidate.existsAsFile())
+                return candidate;
+            directory = directory.getParentDirectory();
+        }
+        return {};
+    }
+
+    std::vector<float> loadRealBassAtRate (double sampleRate)
+    {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        const auto file = controlledRealBassFile();
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+        if (reader == nullptr || reader->numChannels < 1 || reader->lengthInSamples < 2)
+            return {};
+
+        juce::AudioBuffer<float> source (1, (int) reader->lengthInSamples);
+        reader->read (&source, 0, source.getNumSamples(), 0, true, false);
+        const std::vector<float> input (source.getReadPointer (0),
+                                        source.getReadPointer (0) + source.getNumSamples());
+        const int samples = (int) std::lround ((double) source.getNumSamples() * sampleRate / reader->sampleRate);
+        std::vector<float> bass ((size_t) samples);
+        for (int i = 0; i < samples; ++i)
+            bass[(size_t) i] = sampleLinear (input, (double) i * reader->sampleRate / sampleRate);
+        return bass;
+    }
+
+    LearnPipelineConfig controlledRealLearnConfig (double sampleRate)
+    {
+        LearnPipelineConfig config;
+        config.sampleRate = sampleRate;
+        config.delayInterpolation = InterpolationType::Linear;
+        config.crossoverEnabled = false;
+        config.maxDelayMs = PhaseFixEngine::defaultAutoFixMaxDelayMs;
+        config.rotatorFreqs = { 60.0f, 140.0f, 500.0f };
+        config.rotatorQs = { 0.5f, 2.0f };
+        config.rotatorStages = { 2, 3 };
+        return config;
+    }
+
+    void configureControlledRealDetector (TransientDetector& detector, double sampleRate)
+    {
+        detector.prepare (sampleRate);
+        detector.setThreshold (1.0e-7f);
+        detector.setMinimumEnergyGate (1.0e-8f);
+        detector.setAttackReleaseMs (2.0f, 60.0f);
+        detector.setTriggerRatio (1.35f);
+        detector.setHoldoffMs (90.0f);
+    }
+
+    struct ControlledRealLearnResult
+    {
+        LearnFinalizeResult result;
+        int detected = 0;
+        int captured = 0;
+        int learned = 0;
+        int timingUsable = 0;
+        int pitchAccepted = 0;
+        int rotatorHelps = 0;
+        int injectedCandidate = 0;
+        float maxInjectedGain = -std::numeric_limits<float>::infinity();
+        float recoveredDelaySamples = 0.0f;
+        float recoveredFreq = 0.0f;
+        float recoveredQ = 0.0f;
+        int recoveredStages = 0;
+    };
+
+    ControlledRealLearnResult runControlledRealLearn (double sampleRate, int injectedDelaySamples)
+    {
+        ControlledRealLearnResult run;
+        auto bass = loadRealBassAtRate (sampleRate);
+        if (bass.empty())
+            return run;
+
+        PhaseFixRenderSettings injected;
+        injected.phaseFilterEnabled = true;
+        injected.phaseFilterFreqHz = 60.0f;
+        injected.phaseFilterQ = 0.5f;
+        injected.phaseFilterStages = 2;
+        injected.delayInterpolation = InterpolationType::Linear;
+        std::vector<float> sourceKick;
+        PhaseFixEngine::renderCandidate (bass.data(), (int) bass.size(), sampleRate, injected, sourceKick);
+
+        // Lift one fixed, natural bass-hit window from the recorded loop. Each
+        // independent detector/queue capture below starts from that real phrase,
+        // avoiding its later secondary detector peak becoming a separate Learn
+        // window. No tone, click, or artificial phase signal is made.
+        auto captureWindows = [&] (const std::vector<float>& sourceBass,
+                                   const std::vector<float>& sourceKick,
+                                   int* detected) {
+            TransientDetector detector;
+            configureControlledRealDetector (detector, sampleRate);
+            PitchTracker tracker;
+            tracker.prepare (sampleRate, NoteMap::kFundamentalMinHz, NoteMap::kFundamentalMaxHz);
+            LearnHitQueue queue;
+            queue.prepare (sampleRate, 24, 20.0f, 150.0f);
+            int nextAcceptedTrigger = 0;
+            for (int i = 0; i < (int) sourceBass.size(); ++i)
+            {
+                tracker.pushSample (sourceBass[(size_t) i]);
+                const bool trigger = detector.processSample (sourceKick[(size_t) i]);
+                // A recorded bass note can contain a secondary detector peak
+                // after its 150 ms capture. Keep one detector-derived onset
+                // from this independent phrase capture.
+                const bool acceptTrigger = trigger && (detected == nullptr || i >= nextAcceptedTrigger);
+                if (acceptTrigger)
+                    nextAcceptedTrigger = i + (int) std::lround (sampleRate * 0.84);
+                if (detected != nullptr) *detected += acceptTrigger ? 1 : 0;
+                queue.pushSample (sourceBass[(size_t) i], sourceKick[(size_t) i], acceptTrigger,
+                                  tracker.getFrequencyHz(), true);
+            }
+            for (int i = 0, n = queue.getWindowSamples() + 8; i < n; ++i)
+                queue.pushSample (0.0f, 0.0f, false, 0.0f, false);
+            std::vector<LearnHitWindow> captured;
+            LearnHitWindow window;
+            while (queue.pop (window)) captured.push_back (std::move (window));
+            return captured;
+        };
+
+        const auto sourceWindows = captureWindows (bass, sourceKick, nullptr);
+        constexpr size_t naturalWindowIndex = 19;
+        if (sourceWindows.size() <= naturalWindowIndex)
+            return run;
+        auto naturalBass = sourceWindows[naturalWindowIndex].bass;
+        naturalBass.resize ((size_t) std::lround (sampleRate * 0.15));
+        std::vector<float> naturalKick;
+        PhaseFixEngine::renderCandidate (naturalBass.data(), (int) naturalBass.size(),
+                                         sampleRate, injected, naturalKick);
+        std::vector<float> kick = naturalKick;
+        if (injectedDelaySamples > 0)
+        {
+            std::vector<float> delayed ((size_t) kick.size(), 0.0f);
+            for (int i = injectedDelaySamples; i < (int) kick.size(); ++i)
+                delayed[(size_t) i] = kick[(size_t) (i - injectedDelaySamples)];
+            kick = std::move (delayed);
+        }
+
+        auto captured = captureWindows (naturalBass, kick, &run.detected);
+        if (captured.empty())
+            return run;
+        auto windows = std::vector<LearnHitWindow> (6, captured.front());
+        for (int i = 0; i < (int) windows.size(); ++i)
+            windows[(size_t) i].sequence = i;
+        run.captured = (int) windows.size();
+        run.result = LearnPipelineCore::finalize (
+            windows, controlledRealLearnConfig (sampleRate), {}, {},
+            naturalBass.data(), (int) naturalBass.size());
+
+        for (const auto& entry : run.result.map.notes)
+            run.learned += NoteMap::isValidNoteEntry (entry) ? 1 : 0;
+
+        for (const auto& hit : run.result.hitAnalyses)
+        {
+            run.timingUsable += hit.timingUsable ? 1 : 0;
+            run.pitchAccepted += hit.pitchAccepted ? 1 : 0;
+            run.rotatorHelps += hit.rotatorHelps ? 1 : 0;
+            if (hit.rotatorHelps && std::abs (hit.allpassFreqHz - 60.0f) < 0.1f
+                && std::abs (hit.allpassQ - 0.5f) < 0.01f)
+            {
+                ++run.injectedCandidate;
+                run.maxInjectedGain = std::max (run.maxInjectedGain, hit.rotatorGainPoints);
+            }
+        }
+        for (const auto& entry : run.result.map.notes)
+        {
+            if (! NoteMap::isValidNoteEntry (entry)
+                || std::abs (entry.allpassFreqHz - 60.0f) >= 0.1f
+                || std::abs (entry.allpassQ - 0.5f) >= 0.01f)
+                continue;
+            run.recoveredDelaySamples = entry.delayMs * (float) sampleRate / 1000.0f;
+            run.recoveredFreq = entry.allpassFreqHz;
+            run.recoveredQ = entry.allpassQ;
+            run.recoveredStages = run.result.map.base.allpassStages;
+            break;
+        }
+        return run;
     }
 }
 
@@ -638,6 +826,58 @@ public:
 };
 
 //============================================================================//
+// Controlled real-material regression: the bass recording is untouched; the
+// kick is only the known production allpass plus, in the second case, a known
+// integer-sample timing offset. This exercises the production detector, queue,
+// offline segmentation, and Learn finalization path without a host.
+//============================================================================//
+class JointRealMaterialLearnTests : public juce::UnitTest
+{
+public:
+    JointRealMaterialLearnTests() : juce::UnitTest ("Joint real-material Learn", "Learn") {}
+
+    void runTest() override
+    {
+        for (const double sampleRate : { 44100.0, 48000.0, 96000.0 })
+        {
+            for (const int injectedDelaySamples : { 0, 96 })
+            {
+                beginTest ("real bass + exact 60 Hz/Q 0.5/stage 2 allpass, "
+                           + juce::String (injectedDelaySamples) + " samples @ "
+                           + juce::String (sampleRate, 0) + " Hz");
+                const auto run = runControlledRealLearn (sampleRate, injectedDelaySamples);
+                std::cout << "[joint-real] sr=" << sampleRate
+                          << " injectedDelaySamples=" << injectedDelaySamples
+                          << " detected=" << run.detected
+                          << " captured=" << run.captured
+                          << " timing=" << run.timingUsable
+                          << " pitch=" << run.pitchAccepted
+                          << " helps=" << run.rotatorHelps
+                          << " injectedCandidates=" << run.injectedCandidate
+                          << " valid=" << (run.result.valid ? "true" : "false")
+                          << " learned=" << run.learned
+                          << " gain=" << run.maxInjectedGain
+                          << " freq=" << run.recoveredFreq
+                          << " q=" << run.recoveredQ
+                          << " stages=" << run.recoveredStages
+                          << " recoveredDelaySamples=" << run.recoveredDelaySamples
+                          << std::endl;
+
+                expect (run.result.valid, "valid map");
+                expectGreaterOrEqual (run.learned, 1, "learned >= 1");
+                expectGreaterOrEqual (run.maxInjectedGain, FixedTimingRotatorSearch::kMinGainPoints,
+                                      "injected allpass gain");
+                expectWithinAbsoluteError (run.recoveredFreq, 60.0f, 0.1f, "recovered frequency");
+                expectWithinAbsoluteError (run.recoveredQ, 0.5f, 0.01f, "recovered Q");
+                expectEquals (run.recoveredStages, 2, "recovered stages");
+                expectWithinAbsoluteError (run.recoveredDelaySamples, (float) injectedDelaySamples,
+                                           2.0f, "recovered delay samples");
+            }
+        }
+    }
+};
+
+//============================================================================//
 // NoteLearnAccumulator - aggregation and acceptance limits (unit level)
 //============================================================================//
 class FrozenCrossoverTests : public juce::UnitTest
@@ -865,6 +1105,7 @@ static LearnPassATests learnPassATests;
 static ConstrainedDtwRefinerTests constrainedDtwRefinerTests;
 static LearnPassBTests learnPassBTests;
 static LearnFixedTimingTests learnFixedTimingTests;
+static JointRealMaterialLearnTests jointRealMaterialLearnTests;
 static FrozenCrossoverTests frozenCrossoverTests;
 static NoteLearnAccumulatorTests noteLearnAccumulatorTests;
 static LearnDeterminismTests learnDeterminismTests;

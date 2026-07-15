@@ -1,5 +1,6 @@
 #include "TestCommon.h"
 #include "PluginEditor.h"
+#include "NoteLearnAccumulator.h"
 #include "util/SpectrumFifo.h"
 
 class ScopeVisualTests : public juce::UnitTest
@@ -1199,38 +1200,102 @@ public:
             expect (fallback.containsIgnoreCase ("Learn needs more usable kick and bass hits"));
         }
 
-        beginTest ("Per-note Learn outcome lines name the reason");
+        beginTest ("Per-note Learn outcome lines are exact for learned and fallback states");
         {
+            const int a1 = NotePhaseMapSnapshot::indexForMidi (33);
+            const int e2 = NotePhaseMapSnapshot::indexForMidi (40);
+            const int e1 = NotePhaseMapSnapshot::indexForMidi (28);
+            expect (a1 >= 0 && e2 >= 0 && e1 >= 0);
+
+            LearnFinalizeResult result;
+            NoteEntry confident;
+            confident.learned = true;
+            confident.fundamentalHz = 55.0f;
+            confident.allpassFreqHz = 60.0f;
+            confident.allpassQ = 0.5f;
+            confident.confidence = 0.90f;
+            confident.hitCount = 5;
+            confident.rotatorHelps = true;
+            expect (NoteMap::isValidNoteEntry (confident));
+            if (a1 >= 0)
+                result.map.notes[(size_t) a1] = confident;
+
             LearnNoteReport learned;
             learned.outcome = LearnNoteOutcome::Learned;
             learned.midi = 33;
             learned.acceptedHits = 5;
-            expect (formatLearnNoteOutcomeLine (learned).contains ("A1"));
-            expect (formatLearnNoteOutcomeLine (learned).containsIgnoreCase ("learned"));
+            if (a1 >= 0)
+                result.noteReports[(size_t) a1] = learned;
+            expectEquals (formatLearnNoteOutcomeLine (learned), juce::String ("A1: learned (5 hits)"));
 
             LearnNoteReport shortHits;
             shortHits.outcome = LearnNoteOutcome::NotEnoughOverlap;
             shortHits.midi = 40;
             shortHits.acceptedHits = 3;
-            const auto shortLine = formatLearnNoteOutcomeLine (shortHits);
-            expect (shortLine.contains ("E2"));
-            expect (shortLine.contains ("3/" + juce::String (NoteMap::kMinHitsPerNote)));
+            expectEquals (formatLearnNoteOutcomeLine (shortHits),
+                          juce::String ("E2: not enough kick overlaps (3/4)"));
 
-            LearnNoteReport late;
-            late.outcome = LearnNoteOutcome::OutOfCorrectionWindow;
-            late.midi = 28;
-            expect (formatLearnNoteOutcomeLine (late).containsIgnoreCase ("outside correction"));
+            LearnNoteReport enoughButRejected;
+            enoughButRejected.outcome = LearnNoteOutcome::CorrectionNotConfident;
+            enoughButRejected.midi = 33;
+            enoughButRejected.acceptedHits = 6;
+            expectEquals (formatLearnNoteOutcomeLine (enoughButRejected),
+                          juce::String ("A1: recognized, but no confident correction (6 hits)"));
 
-            LearnFinalizeResult result;
+            NoteLearnAccumulator lowConfidence;
+            for (int i = 0; i < NoteMap::kMinHitsPerNote; ++i)
+                lowConfidence.add ({ 55.0f, 60.0f, 0.5f, 0.0f, false, 0.9f,
+                                     NoteMap::kMinRuntimeConfidence - 0.01f, true });
+            expect (! lowConfidence.finalizeEntry().learned);
+            expectEquals (formatLearnNoteOutcomeLine (enoughButRejected),
+                          juce::String ("A1: recognized, but no confident correction (6 hits)"));
+
+            LearnHitAnalysis pitchInvalid;
+            pitchInvalid.trackedFundamentalHz = 40.0f;
+            pitchInvalid.pitchInvalid = true;
+            LearnHitAnalysis octaveAmbiguous = pitchInvalid;
+            octaveAmbiguous.pitchInvalid = false;
+            octaveAmbiguous.octaveAmbiguous = true;
+            expect (! pitchInvalid.pitchAccepted && ! octaveAmbiguous.pitchAccepted);
+
+            LearnNoteReport rejectedPitch;
+            rejectedPitch.outcome = LearnNoteOutcome::OutOfCorrectionWindow;
+            rejectedPitch.midi = 28;
+            rejectedPitch.recognizedHits = 2;
+            rejectedPitch.outOfWindowHits = 2;
+            expectEquals (formatLearnNoteOutcomeLine (rejectedPitch),
+                          juce::String ("E1: outside correction window"));
+
             result.message = "Learned data did not form a valid map.";
-            const int e2 = NotePhaseMapSnapshot::indexForMidi (40);
-            const int e1 = NotePhaseMapSnapshot::indexForMidi (28);
             if (e2 >= 0) result.noteReports[(size_t) e2] = shortHits;
-            if (e1 >= 0) result.noteReports[(size_t) e1] = late;
+            if (e1 >= 0) result.noteReports[(size_t) e1] = rejectedPitch;
             const auto body = formatLearnFailureBody (result);
-            expect (body.contains ("E2"));
-            expect (body.contains ("outside correction"));
+            expect (body.contains ("E2: not enough kick overlaps (3/4)"));
+            expect (body.contains ("E1: outside correction window"));
             expect (body.contains ("Notes:"));
+        }
+
+        beginTest ("Peak delta pairs bass to the same kick hit, not a louder distant hit");
+        {
+            // Two hits ~400 ms apart. Hit 0: kick then bass +5 ms.
+            // Hit 1: kick alone, then a much louder bass elsewhere would
+            // previously produce Δ near the cross-hit distance (~400 ms).
+            const int n = 24000; // 500 ms @ 48 kHz
+            std::vector<float> bass ((size_t) n, 0.0f), kick ((size_t) n, 0.0f);
+            const int kick0 = 2000;
+            const int bass0 = kick0 + 240; // +5 ms
+            const int kick1 = 2000 + 19200; // +400 ms
+            const int bass1 = kick1 + 480; // +10 ms on second hit, louder
+            kick[(size_t) kick0] = 0.9f;
+            bass[(size_t) bass0] = 0.5f;
+            kick[(size_t) kick1] = 0.6f; // quieter kick so hit0 dominates if detection works
+            bass[(size_t) bass1] = 1.0f; // loudest bass overall
+
+            const auto markers = findScopePeakMarkers (bass.data(), kick.data(), n, kSampleRate);
+            expect (markers.valid);
+            expectEquals (markers.kickPeakIndex, kick0);
+            expectEquals (markers.bassPeakIndex, bass0);
+            expectWithinAbsoluteError (markers.deltaMs, 5.0f, 1.0e-6f);
         }
 
         beginTest ("Mode and Strength attachments follow host restore without changing Pitch Follow");
