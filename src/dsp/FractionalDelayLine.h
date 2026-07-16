@@ -21,6 +21,8 @@ public:
         const int bufferLength = (int) std::ceil (maxDelaySamplesD) + 1;
         buffer.assign ((size_t) std::max (bufferLength, 1), 0.0f);
 
+        setRampDurationMs (3.0f);
+
         reset();
     }
 
@@ -30,11 +32,34 @@ public:
         writeIndex = 0;
         allpassXPrev = 0.0f;
         allpassYPrev = 0.0f;
+        currentDelayInSamples = delayInSamples;
+        delayInitialised = false;
+        rampSamplesRemaining = 0;
+    }
+
+    // State changes are sample-ramped rather than changing the fractional tap
+    // abruptly.  The 1-5 ms range is short enough for Dynamic onset matching
+    // while avoiding a zipper discontinuity when dense kicks change state.
+    void setRampDurationMs (float milliseconds)
+    {
+        const float ms = std::clamp (std::isfinite (milliseconds) ? milliseconds : 3.0f,
+                                     1.0f, 5.0f);
+        delayRampSamples = std::max (1, (int) std::lround (sampleRate * ms / 1000.0));
     }
 
     void setDelaySamples (float delaySamples)
     {
         delayInSamples = std::clamp (delaySamples, 0.0f, maxDelaySamples);
+        if (! delayInitialised)
+        {
+            currentDelayInSamples = delayInSamples;
+            delayInitialised = true;
+            rampSamplesRemaining = 0;
+        }
+        else if (std::abs (delayInSamples - currentDelayInSamples) > 1.0e-6f)
+        {
+            rampSamplesRemaining = delayRampSamples;
+        }
     }
 
     // Switching interpolation type resets only the allpass interpolator
@@ -56,8 +81,15 @@ public:
         buffer[(size_t) writeIndex] = input;
         writeIndex = (writeIndex + 1) % bufferSize;
 
-        const int integerDelay = (int) delayInSamples;
-        const float frac = delayInSamples - (float) integerDelay;
+        if (rampSamplesRemaining > 0)
+        {
+            currentDelayInSamples += (delayInSamples - currentDelayInSamples)
+                                   / (float) rampSamplesRemaining;
+            --rampSamplesRemaining;
+        }
+
+        const int integerDelay = (int) currentDelayInSamples;
+        const float frac = currentDelayInSamples - (float) integerDelay;
 
         // read position of the two neighboring integer-delay samples
         int readIndex0 = writeIndex - 1 - integerDelay;
@@ -91,6 +123,10 @@ private:
     double sampleRate = 0.0;
     float maxDelaySamples = 0.0f;
     float delayInSamples = 0.0f;
+    float currentDelayInSamples = 0.0f;
+    int delayRampSamples = 1;
+    int rampSamplesRemaining = 0;
+    bool delayInitialised = false;
 
     std::vector<float> buffer;
     int writeIndex = 0;

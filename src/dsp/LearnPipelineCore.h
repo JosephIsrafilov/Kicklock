@@ -9,11 +9,14 @@
 
 #include "FixedTimingRotatorSearch.h"
 #include "ConstrainedDtwRefiner.h"
+#include "ConflictRegionLocalizer.h"
 #include "FrozenCrossoverPhaseSimulation.h"
 #include "HitConsensus.h"
 #include "../util/LearnHitQueue.h"
 #include "MultiBandCorrelation.h"
 #include "NoteLearnAccumulator.h"
+#include "ConflictStateClusterer.h"
+#include "ConflictFingerprint.h"
 #include "NoteQuantizer.h"
 #include "OfflineFundamentalEstimator.h"
 #include "OfflineNoteSegmenter.h"
@@ -98,9 +101,11 @@ public:
                 return fail (result, "Learn cancelled.");
             AnalyzedHit hit;
             hit.analysis.sequence = window.sequence;
-            const float segmentHz = resolveTrackedPitch (
-                window, noteSegments, useOfflineSegments, segmentForwardSearch);
-            hit.analysis.trackedFundamentalHz = segmentHz;
+            hit.analysis.liveTrackedFundamentalHz = window.trackedHzAtTrigger;
+            const OfflineNoteSegment* segment = useOfflineSegments
+                ? OfflineNoteSegmenter::segmentAt (noteSegments, window.absoluteSampleAtTrigger,
+                                                   segmentForwardSearch)
+                : nullptr;
             const int n = (int) std::min (window.bass.size(), window.kick.size());
             if (n <= 32 || ! finiteSignal (window.bass, n, shouldCancel)
                 || ! finiteSignal (window.kick, n, shouldCancel))
@@ -113,6 +118,10 @@ public:
 
             hit.bass.assign (window.bass.begin(), window.bass.begin() + n);
             hit.kick.assign (window.kick.begin(), window.kick.begin() + n);
+            const auto fingerprintBounds = ConflictRegionLocalizer::regionBoundaries (
+                hit.kick.data(), n, config.sampleRate);
+            hit.fingerprint = makeConflictFingerprint (hit.bass.data(), hit.kick.data(), n,
+                                                       config.sampleRate, fingerprintBounds.onsetSample);
             if (config.crossoverEnabled && ! FrozenCrossoverPhaseSimulation::apply (hit.bass, config.sampleRate, frozenCrossoverHz (config)))
             {
                 ++diag.unusableSignalHits;
@@ -122,8 +131,25 @@ public:
             if (cancelled (shouldCancel))
                 return fail (result, "Learn cancelled.");
 
-            auto timing = PhaseFixEngine::analyze (hit.bass.data(), hit.kick.data(), n, config.sampleRate,
-                                                    config.maxDelayMs, config.delayInterpolation, false);
+            // Layer A is Dynamic Learn worker-only.  The shared engine and its
+            // Static-path semantics are untouched; it receives only the
+            // localized attack/body/tail conflict slice.
+            ConflictLocalizationResult localization;
+            auto timing = ConflictLocalizedPhaseAnalyzer::analyze (
+                hit.bass.data(), hit.kick.data(), n, config.sampleRate,
+                config.maxDelayMs, config.delayInterpolation, false, &localization);
+            // Keep the shared full-window timing contract as the canonical
+            // timing axis. The wrapper above supplies the adaptive region and
+            // localized conflict score; this fallback preserves the existing
+            // Static-path timing behaviour for real material whose localized
+            // crop is too short for a stable delay estimate.
+            const auto canonicalTiming = PhaseFixEngine::analyze (
+                hit.bass.data(), hit.kick.data(), n, config.sampleRate,
+                config.maxDelayMs, config.delayInterpolation, false);
+            if (canonicalTiming.valid && canonicalTiming.enoughSignal)
+                timing = canonicalTiming;
+            hit.analysis.regionType = localization.region;
+            hit.analysis.conflictSeverity = localization.severity;
             if (cancelled (shouldCancel))
                 return fail (result, "Learn cancelled.");
             if (timing.valid && timing.enoughSignal && ! timing.largeTimingOffset
@@ -163,13 +189,11 @@ public:
             // for bucketing (non-causal). Classification still requires real
             // bass energy inside the hit capture window so true late-arrangement
             // material outside post-roll is not rescued by the loop map alone.
-            if (useOfflineSegments && segmentHz > 0.0f
-                && window.absoluteSampleAtTrigger >= 0)
+            FundamentalEstimate pitch;
+            if (segment != nullptr)
             {
-                const float conf = OfflineNoteSegmenter::confidenceAt (
-                    noteSegments, window.absoluteSampleAtTrigger, segmentForwardSearch);
-                hit.analysis.offlineFundamentalHz = segmentHz;
-                hit.analysis.offlinePitchConfidence = conf;
+                hit.analysis.offlineFundamentalHz = segment->frequencyHz;
+                hit.analysis.offlinePitchConfidence = segment->confidence;
 
                 double energy = 0.0;
                 for (int i = 0; i < n; ++i)
@@ -178,24 +202,30 @@ public:
                 // Slightly above OfflineFundamentalEstimator::kMinRms so near-empty
                 // post-roll tails (bass just at the 150 ms edge) do not count.
                 constexpr float kMinHitRms = 5.0e-3f;
-                FundamentalEstimate segPitch;
-                segPitch.valid = conf >= NoteMap::kMinOfflinePitchConfidence
+                pitch.valid = segment->confidence >= NoteMap::kMinOfflinePitchConfidence
                                  && rms >= (double) kMinHitRms;
-                segPitch.frequencyHz = segmentHz;
-                segPitch.confidence = conf;
-                classifyPitch (hit.analysis, segPitch);
+                pitch.frequencyHz = segment->frequencyHz;
+                pitch.confidence = segment->confidence;
+                pitch.octaveCorrected = segment->octaveCorrected;
             }
             else
             {
-                const auto pitch = OfflineFundamentalEstimator::estimate (
+                pitch = OfflineFundamentalEstimator::estimate (
                     hit.bass.data(), n, config.sampleRate,
                     NoteMap::kFundamentalMinHz, NoteMap::kFundamentalMaxHz);
                 if (cancelled (shouldCancel))
                     return fail (result, "Learn cancelled.");
                 hit.analysis.offlineFundamentalHz = pitch.frequencyHz;
                 hit.analysis.offlinePitchConfidence = pitch.confidence;
-                classifyPitch (hit.analysis, pitch);
             }
+            // Offline segmentation is the authoritative non-causal Learn
+            // source. In no-loop fixtures the local worker estimate takes the
+            // same role. The raw live value remains a separate cross-check.
+            hit.analysis.trackedFundamentalHz = segment != nullptr
+                ? pitch.frequencyHz
+                : (pitch.octaveCorrected ? pitch.frequencyHz
+                                         : hit.analysis.liveTrackedFundamentalHz);
+            classifyPitch (hit.analysis, pitch, segment != nullptr);
 
             if (hit.analysis.timingUsable)
             {
@@ -324,15 +354,6 @@ public:
             eligibleHits.push_back (i);
         }
 
-        // Note-eligible hits: the timing-eligible subset that also carries a
-        // trustworthy pitch, since per-note bucketing must know WHICH note a
-        // hit belongs to. This is strictly narrower than eligibleHits.
-        std::vector<int> noteEligibleHits;
-        noteEligibleHits.reserve (eligibleHits.size());
-        for (const int index : eligibleHits)
-            if (hits[(size_t) index].analysis.pitchAccepted)
-                noteEligibleHits.push_back (index);
-
         if (! strongGlobal && eligibleHits.empty())
         {
             // Distinguish true out-of-budget timing from empty consensus.
@@ -422,112 +443,130 @@ public:
         }
         // Weak global: rotator may fail across mixed-pitch hits; per-note path still runs.
 
-        // Per-note delay medians (within-note consensus) for rotator search.
-        std::array<std::vector<int>, (size_t) NotePhaseMapSnapshot::size> noteHitIndexes;
-        for (const int index : noteEligibleHits)
+        // Layer B state axis: every timing-eligible hit participates. Pitch is
+        // used only for the informational majority noteLabel.
+        std::vector<ConflictStateSample> stateSamples;
+        stateSamples.reserve (eligibleHits.size());
+        for (const int index : eligibleHits)
         {
-            const auto& hit = hits[(size_t) index];
-            const int note = NotePhaseMapSnapshot::indexForMidi (
-                NoteQuantizer::hzToMidi (hit.analysis.trackedFundamentalHz));
-            if (note >= 0)
-                noteHitIndexes[(size_t) note].push_back (index);
-        }
-
-        std::array<float, (size_t) NotePhaseMapSnapshot::size> noteDelayMs {};
-        std::array<bool, (size_t) NotePhaseMapSnapshot::size> notePolarity {};
-        std::array<bool, (size_t) NotePhaseMapSnapshot::size> noteTimingReady {};
-        for (int n = 0; n < NotePhaseMapSnapshot::size; ++n)
-        {
-            const auto& indexes = noteHitIndexes[(size_t) n];
-            if ((int) indexes.size() < NoteMap::kMinHitsPerNote)
-                continue;
-            std::vector<float> delays;
-            delays.reserve (indexes.size());
-            int inverted = 0;
-            for (const int index : indexes)
-            {
-                delays.push_back (hits[(size_t) index].timing.bassDelayMs);
-                inverted += hits[(size_t) index].timing.bassPolarityInvert ? 1 : 0;
-            }
-            std::sort (delays.begin(), delays.end());
-            const size_t dn = delays.size();
-            const float medianDelay = dn % 2 ? delays[dn / 2]
-                                             : 0.5f * (delays[dn / 2 - 1] + delays[dn / 2]);
-            // Within-note agreement: MAD-style spread must stay tight.
-            double spreadSum = 0.0;
-            for (const float d : delays)
-            {
-                const double diff = (double) d - (double) medianDelay;
-                spreadSum += diff * diff;
-            }
-            const float spread = (float) std::sqrt (spreadSum / (double) delays.size());
-            if (! std::isfinite (medianDelay) || ! std::isfinite (spread)
-                || std::abs (medianDelay) > config.maxDelayMs + 1.0e-4f
-                || spread > 1.0f) // ponytail: 1 ms within-note ceiling; raise if real gear needs it
-                continue;
-            noteDelayMs[(size_t) n] = medianDelay;
-            notePolarity[(size_t) n] = inverted * 2 > (int) indexes.size();
-            noteTimingReady[(size_t) n] = true;
-        }
-
-        std::array<NoteLearnAccumulator, (size_t) NotePhaseMapSnapshot::size> buckets;
-        for (int n = 0; n < NotePhaseMapSnapshot::size; ++n)
-        {
-            if (! noteTimingReady[(size_t) n])
-                continue;
-            const float noteDelay = noteDelayMs[(size_t) n];
-            const bool notePol = notePolarity[(size_t) n];
-            const auto& indexes = noteHitIndexes[(size_t) n];
-
-            // Choose this note's own best stage count from its own hits.
-            // Reusing globalStages (picked from the mixed/global hit set) can
-            // silently discard a note whose ideal stage differs from the
-            // global pick, even though its own combined search would clear
-            // the gain threshold.
-            std::vector<FixedTimingRotatorInput> noteInputs;
-            noteInputs.reserve (indexes.size());
-            for (const int index : indexes)
-            {
-                const auto& hit = hits[(size_t) index];
-                noteInputs.push_back ({ hit.bass.data(), hit.kick.data(), (int) hit.bass.size(), hit.analysis.lowBandEnergy });
-            }
-            const auto noteSearch = FixedTimingRotatorSearch::searchCombined (
-                noteInputs, config.sampleRate, noteDelay, notePol, config.delayInterpolation,
-                config.stages(), config.freqs(), config.qs(), 0, shouldCancel);
             if (cancelled (shouldCancel))
                 return fail (result, "Learn cancelled.");
-            const int noteStages = noteSearch.valid ? chooseStage (noteSearch) : globalStages;
+            auto& hit = hits[(size_t) index];
+            // Seed the state signature from the measured timing and the
+            // already-computed global joint-search centre. The definitive
+            // per-state search below refines F/Q once, keeping Learn's worker
+            // cost bounded while still clustering on measured correction axes.
+            const float freq = globalHelps ? globalAllpassFreq : fallbackFreq;
+            const float q = globalHelps ? globalAllpassQ : fallbackQ;
+            // fractionalLagMs is the pre-rotator timing observation. Do not
+            // use timing.bassDelayMs here after a previous candidate may have
+            // folded allpass group delay into its local residual.
+            const float observedDelay = hit.analysis.fractionalLagMs;
+            const float measuredDelay = observedDelay;
+            const bool measuredPolarity = hit.timing.bassPolarityInvert;
+            stateSamples.push_back ({ index, measuredDelay, measuredPolarity,
+                                      freq, q, globalStages, hit.analysis.regionType,
+                                      std::clamp (hit.analysis.timingConfidence, 0.0f, 1.0f),
+                                      0.0f, 0.0f,
+                                      NoteQuantizer::hzToMidi (hit.analysis.trackedFundamentalHz) });
+        }
 
-            for (const int index : indexes)
+        auto stateClusters = ConflictStateClusterer::cluster (stateSamples, NotePhaseMapSnapshot::kMaxStates);
+        std::vector<ConflictStateEntry> learnedStates;
+        learnedStates.reserve (stateClusters.size());
+        auto medianFloat = [] (std::vector<float> v)
+        {
+            if (v.empty()) return 0.0f;
+            std::sort (v.begin(), v.end());
+            return v.size() % 2 ? v[v.size() / 2] : 0.5f * (v[v.size() / 2 - 1] + v[v.size() / 2]);
+        };
+        for (auto& cluster : stateClusters)
+        {
+            if (cancelled (shouldCancel))
+                return fail (result, "Learn cancelled.");
+            if (cluster.samples.empty()) continue;
+            std::vector<float> delays, freqs, qs;
+            int inverted = 0;
+            for (const auto& s : cluster.samples)
             {
-                if (cancelled (shouldCancel))
-                    return fail (result, "Learn cancelled.");
-                auto& hit = hits[(size_t) index];
-                const auto perHit = FixedTimingRotatorSearch::search (
-                    hit.bass.data(), hit.kick.data(), (int) hit.bass.size(),
-                    config.sampleRate, noteDelay, notePol, config.delayInterpolation,
-                    config.stages(), config.freqs(), config.qs(), noteStages, shouldCancel);
-                if (cancelled (shouldCancel))
-                    return fail (result, "Learn cancelled.");
-                const auto candidate = FixedTimingRotatorSearch::candidateForStage (perHit, noteStages);
-                hit.analysis.rotatorHelps = candidate.helps;
-                hit.analysis.allpassFreqHz = candidate.allpassFreqHz;
-                hit.analysis.allpassQ = candidate.allpassQ;
-                hit.analysis.rotatorGainPoints = candidate.gainPoints;
-                hit.analysis.rotatorConfidence = candidate.confidence;
-                if (candidate.helps)
-                {
-                    // Persist the same candidate-local alignment that earned
-                    // this allpass gain.  The original timing estimate may
-                    // include this allpass's group delay.
-                    hit.timing.bassDelayMs = candidate.delayMs;
-                    hit.analysis.fractionalLagMs = candidate.delayMs;
-                }
-                buckets[(size_t) n].add ({ hit.analysis.trackedFundamentalHz, candidate.allpassFreqHz,
-                    candidate.allpassQ, hit.timing.bassDelayMs, hit.timing.bassPolarityInvert,
-                    hit.analysis.timingConfidence,
-                    std::min (hit.analysis.offlinePitchConfidence, candidate.confidence), candidate.helps });
+                delays.push_back (s.delayMs); freqs.push_back (s.allpassFreqHz); qs.push_back (s.allpassQ);
+                inverted += s.polarityInvert ? 1 : 0;
             }
+            const float delay = medianFloat (delays);
+            const bool polarity = inverted * 2 > (int) cluster.samples.size();
+            std::vector<FixedTimingRotatorInput> inputs;
+            inputs.reserve (cluster.samples.size());
+            for (const auto& s : cluster.samples)
+            {
+                const auto& h = hits[(size_t) s.hitIndex];
+                inputs.push_back ({ h.bass.data(), h.kick.data(), (int) h.bass.size(), h.analysis.lowBandEnergy });
+            }
+            const auto search = FixedTimingRotatorSearch::searchCombined (
+                inputs, config.sampleRate, delay, polarity, config.delayInterpolation,
+                config.stages(), config.freqs(), config.qs(), 0, shouldCancel);
+            const int stages = search.valid ? chooseStage (search) : globalStages;
+            const auto combined = search.valid ? FixedTimingRotatorSearch::candidateForStage (search, stages)
+                                               : RotatorCandidate {};
+            float confidenceSum = 0.0f, matchSum = 0.0f, gainSum = 0.0f;
+            std::vector<float> finalDelays;
+            finalDelays.reserve (cluster.samples.size());
+            std::array<std::vector<float>, ConflictFingerprint::kFeatureCount> fingerprintFeatures;
+            std::array<int, NotePhaseMapSnapshot::size> noteCounts {};
+            ConflictRegion region = cluster.samples.front().regionType;
+            for (const auto& s : cluster.samples)
+            {
+                auto& h = hits[(size_t) s.hitIndex];
+                const auto perHit = FixedTimingRotatorSearch::search (
+                    h.bass.data(), h.kick.data(), (int) h.bass.size(), config.sampleRate,
+                    delay, polarity, config.delayInterpolation, config.stages(), config.freqs(), config.qs(), stages, shouldCancel);
+                const auto c = FixedTimingRotatorSearch::candidateForStage (perHit, stages);
+                h.analysis.rotatorHelps = c.helps;
+                h.analysis.allpassFreqHz = c.allpassFreqHz;
+                h.analysis.allpassQ = c.allpassQ;
+                h.analysis.rotatorGainPoints = c.gainPoints;
+                h.analysis.rotatorConfidence = c.confidence;
+                if (c.helps) { h.timing.bassDelayMs = c.delayMs; h.analysis.fractionalLagMs = c.delayMs; }
+                if (c.valid && std::isfinite (c.delayMs)) finalDelays.push_back (c.delayMs);
+                confidenceSum += std::clamp (c.valid ? c.confidence : h.analysis.timingConfidence, 0.0f, 1.0f);
+                matchSum += c.valid ? c.matchPercent : 0.0f;
+                gainSum += c.valid ? c.gainPoints : 0.0f;
+                if (h.fingerprint.valid)
+                    for (int feature = 0; feature < ConflictFingerprint::kFeatureCount; ++feature)
+                        fingerprintFeatures[(size_t) feature].push_back (h.fingerprint.values[(size_t) feature]);
+                const int midi = NotePhaseMapSnapshot::containsMidi (s.noteLabel) ? s.noteLabel : -1;
+                if (midi >= NotePhaseMapSnapshot::minMidi && midi <= NotePhaseMapSnapshot::maxMidi)
+                    ++noteCounts[(size_t) NotePhaseMapSnapshot::indexForMidi (midi)];
+            }
+            ConflictStateEntry e;
+            // Store the measured timing axis, not the allpass candidate's
+            // internal group-delay residual. The latter is an implementation
+            // detail of the joint search and would create a false timing shift
+            // in the compatibility mirror and future state selector.
+            e.delayMs = finalDelays.empty() ? delay : medianFloat (finalDelays);
+            e.polarityInvert = polarity;
+            e.allpassFreqHz = combined.valid ? combined.allpassFreqHz : medianFloat (freqs);
+            e.allpassQ = combined.valid ? combined.allpassQ : medianFloat (qs);
+            e.stages = stages; e.regionType = region;
+            ConflictFingerprint fingerprint;
+            fingerprint.valid = fingerprintFeatures[0].size() == cluster.samples.size();
+            if (fingerprint.valid)
+                for (int feature = 0; feature < ConflictFingerprint::kFeatureCount; ++feature)
+                    fingerprint.values[(size_t) feature] = medianFloat (fingerprintFeatures[(size_t) feature]);
+            e.fingerprint = fingerprint.pack();
+            e.hitCount = (int) cluster.samples.size();
+            e.confidence = confidenceSum / (float) std::max (1, e.hitCount);
+            e.matchPercent = matchSum / (float) std::max (1, e.hitCount);
+            e.improvementPoints = gainSum / (float) std::max (1, e.hitCount);
+            e.applied = e.hitCount >= NoteMap::kMinHitsPerNote
+                     && e.confidence >= NoteMap::kMinRuntimeConfidence
+                     && e.regionType != ConflictRegion::none
+                     && e.fingerprint != 0;
+            int bestNote = -1, bestCount = 0;
+            for (int n = 0; n < NotePhaseMapSnapshot::size; ++n)
+                if (noteCounts[(size_t) n] > bestCount) { bestCount = noteCounts[(size_t) n]; bestNote = NotePhaseMapSnapshot::midiForIndex (n); }
+            e.noteLabel = bestNote;
+            if (e.applied)
+                learnedStates.push_back (e);
         }
 
         NotePhaseMapSnapshot map = NoteMap::makeEmptyNoteMap();
@@ -541,32 +580,59 @@ public:
         map.base.learnedSampleRate = config.sampleRate;
 
         int learnedNotes = 0;
-        std::vector<float> learnedDelays;
-        int learnedInverted = 0;
-        for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
+        for (size_t i = 0; i < learnedStates.size() && i < (size_t) NotePhaseMapSnapshot::kMaxStates; ++i)
         {
             if (cancelled (shouldCancel))
                 return fail (result, "Learn cancelled.");
-            const auto entry = buckets[(size_t) i].finalizeEntry();
-            if (entry.learned)
+            map.states[i] = learnedStates[i];
+            ++learnedNotes;
+            const int note = map.states[i].noteLabel;
+            if (NotePhaseMapSnapshot::containsMidi (note))
             {
-                map.notes[(size_t) i] = entry;
-                ++learnedNotes;
-                learnedDelays.push_back (entry.delayMs);
-                learnedInverted += entry.polarityInvert ? 1 : 0;
+                const int ni = NotePhaseMapSnapshot::indexForMidi (note);
+                NoteEntry mirror;
+                mirror.learned = true;
+                mirror.fundamentalHz = NoteQuantizer::midiToHz (note);
+                mirror.allpassFreqHz = map.states[i].allpassFreqHz;
+                mirror.allpassQ = map.states[i].allpassQ;
+                mirror.delayMs = map.states[i].delayMs;
+                mirror.polarityInvert = map.states[i].polarityInvert;
+                mirror.timingConfidence = map.states[i].confidence;
+                mirror.confidence = map.states[i].confidence;
+                mirror.hitCount = map.states[i].hitCount;
+                mirror.rotatorHelps = map.states[i].improvementPoints >= FixedTimingRotatorSearch::kMinGainPoints;
+                if (! map.notes[(size_t) ni].learned || mirror.confidence > map.notes[(size_t) ni].confidence)
+                    map.notes[(size_t) ni] = mirror;
             }
         }
 
-        // Prefer robust median of learned per-note delays when global cluster was weak.
-        if (! strongGlobal && ! learnedDelays.empty())
+        // Populate the legacy/UI mirror for every observed pitch that belongs
+        // to a learned state. This is informational compatibility only; state
+        // clustering above never used MIDI as a gate or key.
+        for (const int index : eligibleHits)
         {
-            std::sort (learnedDelays.begin(), learnedDelays.end());
-            const size_t ln = learnedDelays.size();
-            globalDelay = ln % 2 ? learnedDelays[ln / 2]
-                                 : 0.5f * (learnedDelays[ln / 2 - 1] + learnedDelays[ln / 2]);
-            globalPolarity = learnedInverted * 2 > learnedNotes;
-            map.base.delayMs = globalDelay;
-            map.base.polarityInvert = globalPolarity;
+            const auto& hit = hits[(size_t) index];
+            const int midi = NoteQuantizer::hzToMidi (hit.analysis.trackedFundamentalHz);
+            const int ni = NotePhaseMapSnapshot::indexForMidi (midi);
+            if (ni < 0 || ! hit.analysis.pitchAccepted || learnedStates.empty()) continue;
+            const ConflictStateEntry* state = nullptr;
+            for (const auto& candidate : learnedStates)
+                if (candidate.regionType == hit.analysis.regionType
+                    && candidate.polarityInvert == hit.timing.bassPolarityInvert)
+                { state = &candidate; break; }
+            if (state == nullptr) state = &learnedStates.front();
+            NoteEntry mirror;
+            mirror.learned = true;
+            mirror.fundamentalHz = NoteQuantizer::midiToHz (midi);
+            mirror.allpassFreqHz = state->allpassFreqHz;
+            mirror.allpassQ = state->allpassQ;
+            mirror.delayMs = state->delayMs;
+            mirror.polarityInvert = state->polarityInvert;
+            mirror.timingConfidence = state->confidence;
+            mirror.confidence = state->confidence;
+            mirror.hitCount = state->hitCount;
+            mirror.rotatorHelps = state->improvementPoints >= FixedTimingRotatorSearch::kMinGainPoints;
+            map.notes[(size_t) ni] = mirror;
         }
 
         map.global = makeGlobalEntry (hits, globalSourceHits, globalAllpassFreq, globalAllpassQ, globalHelps,
@@ -581,7 +647,7 @@ public:
         {
             const auto& hit = hits[i];
             if (! hit.analysis.timingUsable) continue;
-            if (! hit.analysis.pitchAccepted) { ++diag.globalOnlyHits; continue; }
+            if (! hit.analysis.timingUsable) continue;
             const int note = NotePhaseMapSnapshot::indexForMidi (NoteQuantizer::hzToMidi (hit.analysis.trackedFundamentalHz));
             if (note < 0 || ! map.notes[(size_t) note].learned) ++diag.globalOnlyHits;
         }
@@ -621,7 +687,7 @@ public:
     }
 
 private:
-    struct AnalyzedHit { std::vector<float> bass, kick; LearnHitAnalysis analysis; PhaseFixResult timing; };
+    struct AnalyzedHit { std::vector<float> bass, kick; ConflictFingerprint fingerprint; LearnHitAnalysis analysis; PhaseFixResult timing; };
 
     // Runtime-only per-note outcomes for UI. Deterministic from hit analyses + map.
     // noteSegments (optional): full-loop offline map used to flag notes that exist
@@ -649,6 +715,8 @@ private:
 
             auto& r = reports[(size_t) note];
             ++r.recognizedHits;
+            if (hit.analysis.octaveAmbiguous)
+                ++r.ambiguousPitchHits;
 
             const bool timingOk = hit.analysis.timingUsable
                 && std::isfinite (hit.timing.bassDelayMs)
@@ -701,6 +769,11 @@ private:
                 r.outcome = LearnNoteOutcome::NotEnoughOverlap;
                 continue;
             }
+            if (r.ambiguousPitchHits > 0 && r.acceptedHits == 0)
+            {
+                r.outcome = LearnNoteOutcome::PitchAmbiguous;
+                continue;
+            }
             if (r.outOfWindowHits > 0 && r.acceptedHits == 0)
             {
                 r.outcome = LearnNoteOutcome::OutOfCorrectionWindow;
@@ -717,24 +790,6 @@ private:
             else
                 r.outcome = LearnNoteOutcome::None;
         }
-    }
-
-    // Prefer offline full-loop segment pitch when available; fall back to the
-    // live trigger snapshot only when no full loop was supplied (unit fixtures).
-    static float resolveTrackedPitch (const LearnHitWindow& window,
-                                      const std::vector<OfflineNoteSegment>& segments,
-                                      bool useOfflineSegments,
-                                      int segmentForwardSearch) noexcept
-    {
-        if (useOfflineSegments && window.absoluteSampleAtTrigger >= 0)
-        {
-            const float offlineHz = OfflineNoteSegmenter::frequencyAt (
-                segments, window.absoluteSampleAtTrigger, segmentForwardSearch);
-            if (offlineHz > 0.0f && std::isfinite (offlineHz))
-                return offlineHz;
-            return 0.0f;
-        }
-        return window.trackedHzAtTrigger;
     }
 
     static bool cancelled (const std::function<bool()>& shouldCancel)
@@ -770,19 +825,79 @@ private:
         { strongest = multi.bands[(size_t)i].kickEnergy; obs.dominantFrequencyHz = 0.5f * (PhaseBands::table[(size_t)i].lowHz + PhaseBands::table[(size_t)i].highHz); }
         return obs;
     }
-    static void classifyPitch (LearnHitAnalysis& analysis, const FundamentalEstimate& offline)
+    static void classifyPitch (LearnHitAnalysis& analysis, const FundamentalEstimate& offline,
+                               bool offlineSegmentIsAuthoritative)
     {
-        const float tracked = analysis.trackedFundamentalHz;
-        if (! (tracked > 0.0f) || ! std::isfinite (tracked) || ! offline.valid || ! std::isfinite (offline.frequencyHz)
-            || offline.confidence < NoteMap::kMinOfflinePitchConfidence) { analysis.pitchInvalid = true; return; }
-        const float cents = std::abs (1200.0f * std::log2 (tracked / offline.frequencyHz));
-        analysis.pitchCentsDifference = cents;
-        if (std::abs (cents - 1200.0f) <= NoteMap::kPitchAgreementCents) { analysis.octaveAmbiguous = true; return; }
-        if (cents > NoteMap::kPitchAgreementCents) { analysis.pitchDisagrees = true; return; }
+        const float selected = analysis.trackedFundamentalHz;
+        if (! (selected > 0.0f) || ! std::isfinite (selected) || ! offline.valid
+            || ! std::isfinite (offline.frequencyHz)
+            || offline.confidence < NoteMap::kMinOfflinePitchConfidence)
+        {
+            analysis.pitchInvalid = true;
+            return;
+        }
+
+        // The live tracker is a genuine independent cross-check only when it
+        // published a value. Full-loop segmentation must not overwrite this
+        // raw evidence before the comparison.
+        const float live = analysis.liveTrackedFundamentalHz;
+        if (live > 0.0f && std::isfinite (live))
+        {
+            const float cents = std::abs (1200.0f * std::log2 (live / offline.frequencyHz));
+            analysis.pitchCentsDifference = cents;
+            // Segment selection is non-causal and intentionally sees a note
+            // change before the audio-thread tracker settles. Keep this value
+            // as diagnostic evidence, but do not reject the authoritative
+            // segment because a causal tracker is still reporting the prior
+            // note at the kick trigger.
+            if (offlineSegmentIsAuthoritative)
+            {
+                analysis.octaveCorrected = offline.octaveCorrected;
+                analysis.pitchAccepted = true;
+                return;
+            }
+            // A completely unrelated live pitch is a stronger, separate
+            // safety signal than an octave decision inside the worker window.
+            // Preserve the established global-only route for that case.
+            if (std::abs (cents - 1200.0f) > NoteMap::kPitchAgreementCents
+                && cents > NoteMap::kPitchAgreementCents)
+            {
+                analysis.pitchDisagrees = true;
+                return;
+            }
+            if (offline.octaveAmbiguous)
+            {
+                analysis.octaveAmbiguous = true;
+                return;
+            }
+            if (std::abs (cents - 1200.0f) <= NoteMap::kPitchAgreementCents)
+            {
+                // The worker estimator has independently demonstrated the
+                // higher octave; retain that correction rather than rejecting
+                // a live F/2 lock as if it were unresolved.
+                if (! offline.octaveCorrected)
+                {
+                    analysis.octaveAmbiguous = true;
+                    return;
+                }
+            }
+        }
+        else if (offline.octaveAmbiguous)
+        {
+            analysis.octaveAmbiguous = true;
+            return;
+        }
+        analysis.octaveCorrected = offline.octaveCorrected;
         analysis.pitchAccepted = true;
     }
     static void countPitchDiagnostic (LearnDiagnostics& d, const LearnHitAnalysis& a)
-    { if (a.pitchInvalid) ++d.pitchInvalidHits; if (a.pitchDisagrees) ++d.pitchDisagreementHits; if (a.octaveAmbiguous) ++d.octaveAmbiguousHits; d.rejectedPitchHits = d.pitchInvalidHits + d.pitchDisagreementHits + d.octaveAmbiguousHits; }
+    {
+        if (a.pitchInvalid) ++d.pitchInvalidHits;
+        if (a.pitchDisagrees) ++d.pitchDisagreementHits;
+        if (a.octaveAmbiguous) ++d.octaveAmbiguousHits;
+        if (a.octaveCorrected) ++d.octaveCorrectedHits;
+        d.rejectedPitchHits = d.pitchInvalidHits + d.pitchDisagreementHits + d.octaveAmbiguousHits;
+    }
     static int chooseStage (const FixedTimingRotatorResult& search)
     { int chosen = 2; float gain = -std::numeric_limits<float>::infinity(); for (const auto& c : search.perStage) if (c.helps && (c.gainPoints > gain + 1.0e-4f || (std::abs (c.gainPoints-gain)<=1.0e-4f && c.stages < chosen))) { gain = c.gainPoints; chosen = c.stages; } return chosen; }
     static NoteEntry makeGlobalEntry (const std::vector<AnalyzedHit>& hits, const std::vector<int>& indexes,

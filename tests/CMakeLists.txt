@@ -4,12 +4,17 @@ add_executable(KickLockDspTests
     DynamicModeTests.cpp
     DynamicRuntimeTests.cpp
     LearnCoreTests.cpp
+    ConflictLocalizationTests.cpp
+    ConflictStateTests.cpp
+    RuntimeFingerprintTests.cpp
     LearnDiagnosticRootCauseTests.cpp
     LearnOrchestrationTests.cpp
     LearnPipelineTests.cpp
     OfflineReliabilityTests.cpp
+    PitchOctaveRegressionTests.cpp
     P10Tests.cpp
     ProcessorTests.cpp
+    RealAudioPluginIntegrationTests.cpp
     RuntimeTrustTests.cpp
     SyntheticMaterialValidationTests.cpp
     TransportQueueTests.cpp

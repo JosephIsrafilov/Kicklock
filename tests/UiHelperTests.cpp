@@ -1242,6 +1242,13 @@ public:
             expectEquals (formatLearnNoteOutcomeLine (enoughButRejected),
                           juce::String ("A1: recognized, but no confident correction (6 hits)"));
 
+            LearnNoteReport octaveRejected;
+            octaveRejected.outcome = LearnNoteOutcome::PitchAmbiguous;
+            octaveRejected.midi = 33;
+            octaveRejected.ambiguousPitchHits = 2;
+            expectEquals (formatLearnNoteOutcomeLine (octaveRejected),
+                          juce::String ("A1: pitch octave ambiguous; no correction applied (2 hits)"));
+
             NoteLearnAccumulator lowConfidence;
             for (int i = 0; i < NoteMap::kMinHitsPerNote; ++i)
                 lowConfidence.add ({ 55.0f, 60.0f, 0.5f, 0.0f, false, 0.9f,

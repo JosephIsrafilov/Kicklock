@@ -687,30 +687,18 @@ public:
             expect (! parsed.notes[(size_t) NotePhaseMapSnapshot::indexForMidi (33)].learned);
         }
 
-        beginTest ("Schema v2 maps load with their global timing as each note fallback");
+        beginTest ("Pre-v4 Dynamic maps force a fresh state-axis Learn");
         {
             auto original = makePopulatedMap();
-            original.base.delayMs = -2.5f;
-            original.base.polarityInvert = true;
             auto tree = noteMapToValueTree (original);
             tree.setProperty (juce::Identifier (NoteMapKeys::schemaVersion),
                               (int) NoteMap::kPreviousSchemaVersion, nullptr);
-            for (int c = 0; c < tree.getNumChildren(); ++c)
-            {
-                auto child = tree.getChild (c);
-                child.removeProperty (juce::Identifier (NoteMapKeys::noteDelayMs), nullptr);
-                child.removeProperty (juce::Identifier (NoteMapKeys::notePolarity), nullptr);
-                child.removeProperty (juce::Identifier (NoteMapKeys::noteTimingConfidence), nullptr);
-                child.removeProperty (juce::Identifier (NoteMapKeys::noteTimingSpreadMs), nullptr);
-            }
-
             const auto parsed = noteMapFromValueTree (tree);
             const int idx = NotePhaseMapSnapshot::indexForMidi (33);
-            expect (parsed.valid);
+            expect (! parsed.valid);
             expectEquals ((int) parsed.schemaVersion, (int) NoteMap::kSchemaVersion);
-            expectWithinAbsoluteError (parsed.notes[(size_t) idx].delayMs, -2.5f, 1.0e-6f);
-            expect (parsed.notes[(size_t) idx].polarityInvert);
-            expectWithinAbsoluteError (parsed.notes[(size_t) idx].timingConfidence, 1.0f, 1.0e-6f);
+            expect (! parsed.notes[(size_t) idx].learned);
+            expect (! parsed.states[0].applied);
         }
 
         beginTest ("Corrupted float values cannot produce NaN/Inf and reject the note");

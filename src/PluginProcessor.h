@@ -442,6 +442,7 @@ private:
     // correction in this phase.
     LearnHitQueue learnHitQueue;
     TransientDetector learnTransientDetector;
+    RuntimeConflictFingerprintCapture runtimeFingerprintCapture;
     NoteMapUpdateQueue noteMapUpdateQueue;
     NotePhaseMapSnapshot activeNoteMap;
     std::atomic<bool> learnActive { false };

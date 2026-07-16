@@ -355,6 +355,9 @@ inline juce::String formatLearnNoteOutcomeLine (const LearnNoteReport& report)
         case LearnNoteOutcome::CorrectionNotConfident:
             return name + ": recognized, but no confident correction ("
                  + juce::String (juce::jmax (0, report.acceptedHits)) + " hits)";
+        case LearnNoteOutcome::PitchAmbiguous:
+            return name + ": pitch octave ambiguous; no correction applied ("
+                 + juce::String (juce::jmax (0, report.ambiguousPitchHits)) + " hits)";
         default:
             return {};
     }

@@ -1150,6 +1150,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   learnTransientDetector.setAttackReleaseMs(2.0f, 60.0f);
   learnTransientDetector.setTriggerRatio(1.35f);
   learnTransientDetector.setHoldoffMs(90.0f);
+  runtimeFingerprintCapture.prepare(sampleRate);
    learnActive.store (false, std::memory_order_release);
     learnAudioCaptureAcknowledged.store (false, std::memory_order_release);
     learnQueueReady.store (false, std::memory_order_release);
@@ -1325,6 +1326,7 @@ void KickLockAudioProcessor::processObservationCapture(
 
       rawCapture.push(rawBassLow, kickLow);
       pitchTracker.pushSample(bassLow);
+      runtimeFingerprintCapture.pushSample(rawBassLow, kickLow);
 
       // Learn capture (Phase 2 plumbing only; inert until a later phase sets
       // learnActive). Uses the dedicated Learn transient detector and feeds the
@@ -1723,7 +1725,7 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   float allpassFreq = manualAllpassFreq;
   float allpassQ =
       rotatorQParam != nullptr ? rotatorQParam->load() : 0.70710678f;
-  const int allpassStages =
+  int allpassStages =
       2 +
       (rotatorStagesParam != nullptr
            ? juce::jlimit(0, 2, (int)std::lround(rotatorStagesParam->load()))
@@ -1762,14 +1764,18 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   } else {
     const auto base = readCurrentRuntimeBaseSettings(delayMs, polarityInvert, crossoverEnable,
                                                       crossoverHz, allpassStages, delayInterpolationIndex);
+    ConflictFingerprint freshFingerprint;
+    const auto* fingerprint = runtimeFingerprintCapture.takeCompleted (freshFingerprint)
+                                ? &freshFingerprint : nullptr;
     const auto selected = selectDynamicRuntime(
         activeNoteMap, base, manualAllpassFreq, allpassQ, trackedHz,
         dynamicStrengthParam != nullptr ? dynamicStrengthParam->load() : 1.0f,
-        numSamples, dynamicSilenceResetSamples, dynamicNoteState);
+        numSamples, dynamicSilenceResetSamples, dynamicNoteState, fingerprint);
     allpassFreq = selected.targetFreqHz;
     allpassQ = selected.targetQ;
     runtimeDelayMs = selected.targetDelayMs;
     runtimePolarityInvert = selected.targetPolarityInvert;
+    allpassStages = selected.targetStages;
     allpassSmoothingSeconds = 0.070f;
     dynamicFallbackActive.store(selected.fallbackActive, std::memory_order_release);
     dynamicMapStale.store(selected.mapStale, std::memory_order_release);

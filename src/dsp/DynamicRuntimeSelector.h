@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
+#include "ConflictFingerprint.h"
 #include "NotePhaseMap.h"
 #include "NoteQuantizer.h"
 
@@ -30,6 +32,10 @@ struct DynamicNoteState
     bool hasStableEntry = false;
     float stableFreqHz = 50.0f;
     float stableQ = 0.7f;
+    float stableDelayMs = 0.0f;
+    bool stablePolarityInvert = false;
+    int stableStages = 2;
+    int stableMidiLabel = -1;
 
     void reset() noexcept
     {
@@ -46,7 +52,10 @@ struct DynamicRuntimeSelection
     float targetQ = 0.7f;
     float targetDelayMs = 0.0f;
     bool targetPolarityInvert = false;
+    int targetStages = 2;
     int selectedMidi = -1;
+    int selectedState = -1;
+    float fingerprintDistance = std::numeric_limits<float>::infinity();
     bool mapUsable = false;
     bool usingLearnedNote = false;
     bool fallbackActive = false;
@@ -85,7 +94,8 @@ inline DynamicRuntimeSelection selectDynamicRuntime (
     float dynamicStrength,
     int blockSamples,
     int silenceResetSamples,
-    DynamicNoteState& noteState) noexcept
+    DynamicNoteState& noteState,
+    const ConflictFingerprint* freshFingerprint = nullptr) noexcept
 {
     DynamicRuntimeSelection selection;
     selection.targetFreqHz = std::clamp (std::isfinite (manualFreqHz) ? manualFreqHz : 50.0f,
@@ -94,6 +104,7 @@ inline DynamicRuntimeSelection selectDynamicRuntime (
                                     NoteMap::kAllpassQMin, NoteMap::kAllpassQMax);
     selection.targetDelayMs = current.delayMs;
     selection.targetPolarityInvert = current.polarityInvert;
+    selection.targetStages = current.allpassStages;
 
     if (! isStructurallyValidRuntimeMap (map))
     {
@@ -117,6 +128,97 @@ inline DynamicRuntimeSelection selectDynamicRuntime (
                                       NoteMap::kAllpassQMin, NoteMap::kAllpassQMax);
     selection.targetFreqHz = globalF;
     selection.targetQ = globalQ;
+
+    bool hasStateEntries = false;
+    for (const auto& state : map.states)
+        hasStateEntries = hasStateEntries || state.applied;
+
+    // Layer C is deliberately state-keyed, never pitch-keyed.  MIDI remains
+    // only an informational label for the UI/legacy mirror, not an input to
+    // selection.  Maps without Layer-B states retain the old note path below.
+    if (hasStateEntries)
+    {
+        const float strength = std::clamp (std::isfinite (dynamicStrength) ? dynamicStrength : 1.0f,
+                                           0.0f, 1.0f);
+        auto applyStable = [&]
+        {
+            selection.targetFreqHz = noteState.stableFreqHz;
+            selection.targetQ = noteState.stableQ;
+            selection.targetDelayMs = noteState.stableDelayMs;
+            selection.targetPolarityInvert = noteState.stablePolarityInvert;
+            selection.targetStages = noteState.stableStages;
+            selection.selectedMidi = noteState.stableMidiLabel;
+            selection.usingLearnedNote = true;
+        };
+
+        if (freshFingerprint != nullptr && freshFingerprint->valid)
+        {
+            int nearest = -1;
+            float nearestDistance = std::numeric_limits<float>::infinity();
+            const uint64_t packed = freshFingerprint->pack();
+            for (int i = 0; i < NotePhaseMapSnapshot::kMaxStates; ++i)
+            {
+                const auto& state = map.states[(size_t) i];
+                if (! NoteMap::isValidConflictStateEntry (state) || state.fingerprint == 0)
+                    continue;
+                const float distance = ConflictFingerprint::distance (packed, state.fingerprint);
+                if (distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = i;
+                }
+            }
+
+            // Four independently quantized features have at most 1/255
+            // rounding error each.  0.18 leaves room for normal performance
+            // variation while still requiring the onset descriptor to agree.
+            constexpr float kMaxFingerprintDistance = 0.18f;
+            selection.fingerprintDistance = nearestDistance;
+            if (nearest >= 0 && nearestDistance <= kMaxFingerprintDistance)
+            {
+                const auto& state = map.states[(size_t) nearest];
+                selection.targetFreqHz = std::exp (std::log (globalF)
+                    + (std::log (state.allpassFreqHz) - std::log (globalF)) * strength);
+                selection.targetQ = globalQ + (state.allpassQ - globalQ) * strength;
+                selection.targetDelayMs = current.delayMs + (state.delayMs - current.delayMs) * strength;
+                selection.targetPolarityInvert = strength > 0.0f ? state.polarityInvert : current.polarityInvert;
+                selection.targetStages = strength > 0.0f ? state.stages : current.allpassStages;
+                selection.selectedMidi = state.noteLabel;
+                selection.selectedState = nearest;
+                selection.usingLearnedNote = true;
+                noteState.hasStableEntry = true;
+                noteState.fallbackSamples = 0;
+                noteState.silentSamples = 0;
+                noteState.stableFreqHz = selection.targetFreqHz;
+                noteState.stableQ = selection.targetQ;
+                noteState.stableDelayMs = selection.targetDelayMs;
+                noteState.stablePolarityInvert = selection.targetPolarityInvert;
+                noteState.stableStages = selection.targetStages;
+                noteState.stableMidiLabel = selection.selectedMidi;
+                return selection;
+            }
+
+            selection.fallbackActive = true;
+            const int fallbackHoldSamples = std::max (1, silenceResetSamples / 3);
+            if (noteState.hasStableEntry && noteState.fallbackSamples < fallbackHoldSamples)
+            {
+                applyStable();
+                noteState.fallbackSamples += std::max (0, blockSamples);
+            }
+            return selection;
+        }
+
+        noteState.silentSamples += std::max (0, blockSamples);
+        if (noteState.hasStableEntry && noteState.silentSamples < std::max (1, silenceResetSamples))
+        {
+            applyStable();
+            return selection;
+        }
+
+        noteState.reset();
+        selection.fallbackActive = true;
+        return selection;
+    }
 
     if (! std::isfinite (trackedHz) || trackedHz <= 0.0f)
     {

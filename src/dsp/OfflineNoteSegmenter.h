@@ -23,6 +23,7 @@ struct OfflineNoteSegment
     int endSample = 0;          // exclusive
     float frequencyHz = 0.0f;
     float confidence = 0.0f;
+    bool octaveCorrected = false;
 };
 
 class OfflineNoteSegmenter
@@ -60,6 +61,7 @@ public:
             float hz = 0.0f;
             float conf = 0.0f;
             int midi = -1;
+            bool octaveCorrected = false;
         };
 
         std::vector<Frame> frames;
@@ -77,7 +79,8 @@ public:
             const auto est = OfflineFundamentalEstimator::estimate (
                 bass + start, window, sampleRate,
                 NoteMap::kFundamentalMinHz, NoteMap::kFundamentalMaxHz);
-            if (! est.valid || est.confidence < NoteMap::kMinOfflinePitchConfidence)
+            if (! est.valid || est.octaveAmbiguous
+                || est.confidence < NoteMap::kMinOfflinePitchConfidence)
                 continue;
 
             Frame f;
@@ -85,6 +88,7 @@ public:
             f.hz = est.frequencyHz;
             f.conf = est.confidence;
             f.midi = NoteQuantizer::hzToMidi (est.frequencyHz);
+            f.octaveCorrected = est.octaveCorrected;
             if (f.midi < 0)
                 continue;
             frames.push_back (f);
@@ -100,6 +104,7 @@ public:
         cur.endSample = juce::jmin (numSamples, frames[0].center + hop);
         cur.frequencyHz = frames[0].hz;
         cur.confidence = frames[0].conf;
+        cur.octaveCorrected = frames[0].octaveCorrected;
         int curMidi = frames[0].midi;
         int count = 1;
         double hzSum = (double) frames[0].hz;
@@ -123,6 +128,7 @@ public:
                 cur.endSample = juce::jmin (numSamples, f.center + hop);
                 hzSum += (double) f.hz;
                 confSum += (double) f.conf;
+                cur.octaveCorrected = cur.octaveCorrected || f.octaveCorrected;
                 ++count;
             }
             else
@@ -132,6 +138,7 @@ public:
                 cur.endSample = juce::jmin (numSamples, f.center + hop);
                 cur.frequencyHz = f.hz;
                 cur.confidence = f.conf;
+                cur.octaveCorrected = f.octaveCorrected;
                 curMidi = f.midi;
                 count = 1;
                 hzSum = (double) f.hz;
@@ -154,6 +161,38 @@ public:
                 return s.frequencyHz;
         }
         return 0.0f;
+    }
+
+    static const OfflineNoteSegment* segmentAt (const std::vector<OfflineNoteSegment>& segments,
+                                                int sampleIndex,
+                                                int searchForwardSamples = 0) noexcept
+    {
+        if (segments.empty() || sampleIndex < 0)
+            return nullptr;
+
+        auto covering = [&segments] (int index) -> const OfflineNoteSegment*
+        {
+            for (const auto& segment : segments)
+                if (index >= segment.startSample && index < segment.endSample
+                    && segment.frequencyHz > 0.0f && std::isfinite (segment.frequencyHz))
+                    return &segment;
+            return nullptr;
+        };
+
+        if (searchForwardSamples <= 0)
+            return covering (sampleIndex);
+
+        const int offsets[] = {
+            searchForwardSamples / 2,
+            searchForwardSamples / 4,
+            (3 * searchForwardSamples) / 4,
+            juce::jmax (1, searchForwardSamples / 8),
+            0
+        };
+        for (const int offset : offsets)
+            if (const auto* segment = covering (sampleIndex + offset))
+                return segment;
+        return nullptr;
     }
 
     // Pitch for a kick at sampleIndex. Samples the segment map at probes inside

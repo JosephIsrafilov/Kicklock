@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-16
+
+### Added
+- **Conflict-aware Dynamic Learn.** Learn can localize different conflict
+  regions, cluster conflict states, and select the learned state at runtime
+  from a bounded fingerprint matcher instead of live MIDI pitch.
+- **Pitch octave safety coverage.** Worker-side octave resolution promotes a
+  higher octave only with periodicity and harmonic evidence; unresolved cases
+  remain global-only. Recorded CC0 A1 and C2 bass fixtures supplement the
+  deterministic C1/B1/A1/C2 regression cases.
+
+### Changed
+- **Dynamic state transitions remain smooth under dense triggers.** Runtime
+  state selection and the live processor path are covered by regression tests.
+
+### Notes
+- Original-project real kick/bass stems are still required for final end-to-end
+  validation of the reported DAW session; the gated integration test skips
+  until `tests/assets/real_kick.wav` and `real_bass.wav` are supplied.
+
 ## [0.2.5] - 2026-07-15
 
 ### Added

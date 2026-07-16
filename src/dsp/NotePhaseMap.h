@@ -10,6 +10,7 @@
 
 #include "HitConsensus.h"    // HitObservation (Pass A container in LearnHitAnalysis)
 #include "PhaseFixEngine.h"  // PhaseFixResult  (global fix in LearnFinalizeResult)
+#include "ConflictRegion.h"
 
 // =============================================================================
 // Phase 1 pure data models for the Static/Dynamic note-phase map (plan v1.2).
@@ -51,6 +52,26 @@ struct NoteEntry
     bool  rotatorHelps = false;
 };
 
+// Dynamic Learn's correction-state axis. This is deliberately a fixed-size,
+// trivially-copyable entry so a future runtime selector can read it without
+// allocation on the audio thread. fingerprint is reserved for Layer C.
+struct ConflictStateEntry
+{
+    float delayMs = 0.0f;
+    bool polarityInvert = false;
+    float allpassFreqHz = 0.0f;
+    float allpassQ = 0.7f;
+    int stages = 2;
+    ConflictRegion regionType = ConflictRegion::none;
+    uint64_t fingerprint = 0;
+    int hitCount = 0;
+    float confidence = 0.0f;
+    float matchPercent = 0.0f;
+    float improvementPoints = 0.0f;
+    bool applied = false;
+    int noteLabel = -1;
+};
+
 // Base correction context the map was learned against. Changing any of these at
 // runtime makes the map stale (guarded in a later phase).
 struct NoteMapBaseContext
@@ -74,11 +95,16 @@ struct NotePhaseMapSnapshot
     static constexpr int size = maxMidi - minMidi + 1;
 
     bool valid = false;
-    uint32_t schemaVersion = 3;
+    uint32_t schemaVersion = 4;
 
     NoteMapBaseContext base;
     NoteEntry global;
 
+    static constexpr int kMaxStates = 16;
+    std::array<ConflictStateEntry, kMaxStates> states {};
+
+    // Compatibility mirror for the pre-Layer-B UI and Static-path helpers.
+    // Dynamic state learning never clusters or serializes this array.
     std::array<NoteEntry, size> notes {};
 
     // Fixed-size storage; index helpers never allocate or go out of bounds.
@@ -122,8 +148,8 @@ namespace NoteMap
     inline constexpr float kAllpassQMin = 0.1f;
     inline constexpr float kAllpassQMax = 10.0f;
 
-    inline constexpr uint32_t kSchemaVersion = 3;
-    inline constexpr uint32_t kPreviousSchemaVersion = 2;
+    inline constexpr uint32_t kSchemaVersion = 4;
+    inline constexpr uint32_t kPreviousSchemaVersion = 3;
     inline constexpr float kMaxSupportedDelayMs = 20.0f;
 
     inline bool allFieldsFinite (const NoteEntry& e) noexcept
@@ -148,6 +174,49 @@ namespace NoteMap
             && std::abs (e.delayMs) <= kMaxSupportedDelayMs
             && e.timingConfidence >= 0.0f && e.timingConfidence <= 1.0f
             && e.timingSpreadMs >= 0.0f;
+    }
+
+    inline bool allFieldsFinite (const ConflictStateEntry& e) noexcept
+    {
+        return std::isfinite (e.delayMs) && std::isfinite (e.allpassFreqHz)
+            && std::isfinite (e.allpassQ) && std::isfinite (e.confidence)
+            && std::isfinite (e.matchPercent) && std::isfinite (e.improvementPoints);
+    }
+
+    inline bool isValidConflictStateEntry (const ConflictStateEntry& e) noexcept
+    {
+        return e.applied
+            && allFieldsFinite (e)
+            && std::abs (e.delayMs) <= kMaxSupportedDelayMs
+            && e.allpassFreqHz >= kAllpassFreqMinHz && e.allpassFreqHz <= kAllpassFreqMaxHz
+            && e.allpassQ >= kAllpassQMin && e.allpassQ <= kAllpassQMax
+            && e.stages >= 2 && e.stages <= 4
+            && e.regionType != ConflictRegion::none
+            && e.hitCount >= kMinHitsPerNote
+            && e.confidence >= kMinRuntimeConfidence && e.confidence <= 1.0f
+            && e.matchPercent >= 0.0f && e.matchPercent <= 100.0f;
+    }
+
+    inline ConflictStateEntry sanitizeConflictStateEntry (const ConflictStateEntry& in) noexcept
+    {
+        auto finite = [] (float v, float fallback) noexcept
+        {
+            return std::isfinite (v) ? v : fallback;
+        };
+
+        ConflictStateEntry e = in;
+        e.delayMs = std::clamp (finite (e.delayMs, 0.0f), -kMaxSupportedDelayMs, kMaxSupportedDelayMs);
+        e.allpassFreqHz = finite (e.allpassFreqHz, 0.0f);
+        e.allpassQ = std::clamp (finite (e.allpassQ, 0.7f), kAllpassQMin, kAllpassQMax);
+        e.stages = std::clamp (e.stages, 2, 4);
+        e.hitCount = std::max (0, e.hitCount);
+        e.confidence = std::clamp (finite (e.confidence, 0.0f), 0.0f, 1.0f);
+        e.matchPercent = std::clamp (finite (e.matchPercent, 0.0f), 0.0f, 100.0f);
+        e.improvementPoints = finite (e.improvementPoints, 0.0f);
+        if (e.regionType != ConflictRegion::attack && e.regionType != ConflictRegion::body
+            && e.regionType != ConflictRegion::tail)
+            e.regionType = ConflictRegion::none;
+        return e;
     }
 
     // Global fallback validity (section 4.3): finite, positive F/Q. learned and
@@ -248,6 +317,21 @@ namespace NoteMapKeys
     inline constexpr const char* noteSpread = "spread";
     inline constexpr const char* noteHits = "hits";
     inline constexpr const char* noteHelps = "helps";
+
+    inline constexpr const char* state = "ConflictState";
+    inline constexpr const char* stateDelayMs = "stateDelayMs";
+    inline constexpr const char* statePolarity = "statePolarity";
+    inline constexpr const char* stateFreqHz = "stateFreqHz";
+    inline constexpr const char* stateQ = "stateQ";
+    inline constexpr const char* stateStages = "stateStages";
+    inline constexpr const char* stateRegion = "stateRegion";
+    inline constexpr const char* stateFingerprint = "stateFingerprint";
+    inline constexpr const char* stateHits = "stateHits";
+    inline constexpr const char* stateConfidence = "stateConfidence";
+    inline constexpr const char* stateMatchPercent = "stateMatchPercent";
+    inline constexpr const char* stateImprovementPoints = "stateImprovementPoints";
+    inline constexpr const char* stateApplied = "stateApplied";
+    inline constexpr const char* stateNoteLabel = "stateNoteLabel";
 }
 
 // Pure map -> ValueTree. Only learned notes are written; a note child's presence
@@ -278,12 +362,35 @@ inline juce::ValueTree noteMapToValueTree (const NotePhaseMapSnapshot& map)
     tree.setProperty (NoteMapKeys::globalLearned, map.global.learned, nullptr);
     tree.setProperty (NoteMapKeys::globalSpread, map.global.fundamentalSpreadRatio, nullptr);
 
+    for (int i = 0; i < NotePhaseMapSnapshot::kMaxStates; ++i)
+    {
+        const ConflictStateEntry& e = map.states[(size_t) i];
+        if (! e.applied)
+            continue;
+
+        juce::ValueTree s { juce::Identifier (NoteMapKeys::state) };
+        s.setProperty (NoteMapKeys::stateDelayMs, e.delayMs, nullptr);
+        s.setProperty (NoteMapKeys::statePolarity, e.polarityInvert, nullptr);
+        s.setProperty (NoteMapKeys::stateFreqHz, e.allpassFreqHz, nullptr);
+        s.setProperty (NoteMapKeys::stateQ, e.allpassQ, nullptr);
+        s.setProperty (NoteMapKeys::stateStages, e.stages, nullptr);
+        s.setProperty (NoteMapKeys::stateRegion, (int) e.regionType, nullptr);
+        s.setProperty (NoteMapKeys::stateFingerprint, juce::String ((juce::int64) e.fingerprint), nullptr);
+        s.setProperty (NoteMapKeys::stateHits, e.hitCount, nullptr);
+        s.setProperty (NoteMapKeys::stateConfidence, e.confidence, nullptr);
+        s.setProperty (NoteMapKeys::stateMatchPercent, e.matchPercent, nullptr);
+        s.setProperty (NoteMapKeys::stateImprovementPoints, e.improvementPoints, nullptr);
+        s.setProperty (NoteMapKeys::stateApplied, e.applied, nullptr);
+        s.setProperty (NoteMapKeys::stateNoteLabel, e.noteLabel, nullptr);
+        tree.appendChild (s, nullptr);
+    }
+
+    // Keep the non-serialized DynamicRuntimeSelector/UI mirror available to
+    // older helpers. These children are ignored as a source of state learning.
     for (int i = 0; i < NotePhaseMapSnapshot::size; ++i)
     {
         const NoteEntry& e = map.notes[(size_t) i];
-        if (! e.learned)
-            continue;
-
+        if (! e.learned) continue;
         juce::ValueTree n { juce::Identifier (NoteMapKeys::note) };
         n.setProperty (NoteMapKeys::noteMidi, NotePhaseMapSnapshot::midiForIndex (i), nullptr);
         n.setProperty (NoteMapKeys::noteFundamentalHz, e.fundamentalHz, nullptr);
@@ -320,12 +427,12 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
         return map;
 
     const int schema = (int) tree.getProperty (juce::Identifier (NoteMapKeys::schemaVersion), -1);
-    if (schema != (int) NoteMap::kSchemaVersion
-        && schema != (int) NoteMap::kPreviousSchemaVersion)
+    // Layer B is an explicit cutover: note-indexed Dynamic data is never
+    // converted into state-indexed data. Any pre-v4 map must learn again.
+    if (schema != (int) NoteMap::kSchemaVersion)
         return map;
 
     map.schemaVersion = NoteMap::kSchemaVersion;
-    const bool legacySchema = schema == (int) NoteMap::kPreviousSchemaVersion;
 
     auto readFinite = [] (const juce::ValueTree& t, const char* key, float fallback) noexcept
     {
@@ -359,36 +466,58 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
     for (int c = 0; c < tree.getNumChildren(); ++c)
     {
         const juce::ValueTree child = tree.getChild (c);
-        if (! child.hasType (juce::Identifier (NoteMapKeys::note)))
+        if (! child.hasType (juce::Identifier (NoteMapKeys::state)))
+        {
+            if (! child.hasType (juce::Identifier (NoteMapKeys::note))) continue;
+            const int midi = (int) child.getProperty (juce::Identifier (NoteMapKeys::noteMidi), -1000);
+            const int noteIndex = NotePhaseMapSnapshot::indexForMidi (midi);
+            if (noteIndex < 0) continue;
+            NoteEntry e;
+            e.learned = true;
+            e.fundamentalHz = readFinite (child, NoteMapKeys::noteFundamentalHz, 0.0f);
+            e.allpassFreqHz = readFinite (child, NoteMapKeys::noteAllpassFreqHz, 0.0f);
+            e.allpassQ = readFinite (child, NoteMapKeys::noteQ, 0.7f);
+            e.delayMs = readFinite (child, NoteMapKeys::noteDelayMs, map.base.delayMs);
+            e.polarityInvert = (bool) child.getProperty (juce::Identifier (NoteMapKeys::notePolarity), map.base.polarityInvert);
+            e.timingConfidence = readFinite (child, NoteMapKeys::noteTimingConfidence, 0.0f);
+            e.timingSpreadMs = readFinite (child, NoteMapKeys::noteTimingSpreadMs, 0.0f);
+            e.confidence = readFinite (child, NoteMapKeys::noteConfidence, 0.0f);
+            e.fundamentalSpreadRatio = readFinite (child, NoteMapKeys::noteSpread, 0.0f);
+            e.hitCount = std::max (0, (int) child.getProperty (juce::Identifier (NoteMapKeys::noteHits), 0));
+            e.rotatorHelps = (bool) child.getProperty (juce::Identifier (NoteMapKeys::noteHelps), false);
+            e = NoteMap::sanitizeNoteEntry (e);
+            e.learned = true;
+            if (NoteMap::isValidNoteEntry (e)) map.notes[(size_t) noteIndex] = e;
             continue;
+        }
 
-        const int midi = (int) child.getProperty (juce::Identifier (NoteMapKeys::noteMidi), -1000);
-        const int index = NotePhaseMapSnapshot::indexForMidi (midi);
+        const int index = [&]
+        {
+            for (int i = 0; i < NotePhaseMapSnapshot::kMaxStates; ++i)
+                if (! map.states[(size_t) i].applied)
+                    return i;
+            return -1;
+        }();
         if (index < 0)
             continue;
 
-        NoteEntry e;
-        e.learned = true;
-        e.fundamentalHz = readFinite (child, NoteMapKeys::noteFundamentalHz, 0.0f);
-        e.allpassFreqHz = readFinite (child, NoteMapKeys::noteAllpassFreqHz, 0.0f);
-        e.allpassQ = readFinite (child, NoteMapKeys::noteQ, 0.7f);
-        e.delayMs = readFinite (child, NoteMapKeys::noteDelayMs, map.base.delayMs);
-        e.polarityInvert = (bool) child.getProperty (juce::Identifier (NoteMapKeys::notePolarity), map.base.polarityInvert);
-        e.timingConfidence = readFinite (child, NoteMapKeys::noteTimingConfidence,
-                                         legacySchema ? 1.0f : 0.0f);
-        e.timingSpreadMs = readFinite (child, NoteMapKeys::noteTimingSpreadMs, 0.0f);
-        e.confidence = readFinite (child, NoteMapKeys::noteConfidence, 0.0f);
-        // Optional field: a note missing only spread still loads (spread 0 is in
-        // range); the serializer always writes it, so round-trips stay exact.
-        e.fundamentalSpreadRatio = readFinite (child, NoteMapKeys::noteSpread, 0.0f);
-        e.hitCount = std::max (0, (int) child.getProperty (juce::Identifier (NoteMapKeys::noteHits), 0));
-        e.rotatorHelps = (bool) child.getProperty (juce::Identifier (NoteMapKeys::noteHelps), false);
-
-        e = NoteMap::sanitizeNoteEntry (e);
-        e.learned = true;
-
-        if (NoteMap::isValidNoteEntry (e))
-            map.notes[(size_t) index] = e;   // last valid child for this MIDI wins
+        ConflictStateEntry e;
+        e.delayMs = readFinite (child, NoteMapKeys::stateDelayMs, map.base.delayMs);
+        e.polarityInvert = (bool) child.getProperty (juce::Identifier (NoteMapKeys::statePolarity), map.base.polarityInvert);
+        e.allpassFreqHz = readFinite (child, NoteMapKeys::stateFreqHz, 0.0f);
+        e.allpassQ = readFinite (child, NoteMapKeys::stateQ, 0.7f);
+        e.stages = (int) child.getProperty (juce::Identifier (NoteMapKeys::stateStages), 2);
+        e.regionType = (ConflictRegion) std::clamp ((int) child.getProperty (juce::Identifier (NoteMapKeys::stateRegion), 0), 0, 3);
+        e.fingerprint = (uint64_t) child.getProperty (juce::Identifier (NoteMapKeys::stateFingerprint), "0").toString().getLargeIntValue();
+        e.hitCount = std::max (0, (int) child.getProperty (juce::Identifier (NoteMapKeys::stateHits), 0));
+        e.confidence = readFinite (child, NoteMapKeys::stateConfidence, 0.0f);
+        e.matchPercent = readFinite (child, NoteMapKeys::stateMatchPercent, 0.0f);
+        e.improvementPoints = readFinite (child, NoteMapKeys::stateImprovementPoints, 0.0f);
+        e.applied = (bool) child.getProperty (juce::Identifier (NoteMapKeys::stateApplied), false);
+        e.noteLabel = (int) child.getProperty (juce::Identifier (NoteMapKeys::stateNoteLabel), -1);
+        e = NoteMap::sanitizeConflictStateEntry (e);
+        if (NoteMap::isValidConflictStateEntry (e))
+            map.states[(size_t) index] = e;
     }
 
     const bool treeValid = (bool) tree.getProperty (juce::Identifier (NoteMapKeys::valid), false);
@@ -411,6 +540,10 @@ struct LearnHitAnalysis
 {
     int sequence = -1;
 
+    // The raw audio-thread tracker value is kept separately from the worker
+    // resolver's selected pitch. The latter remains in trackedFundamentalHz
+    // for existing map/UI consumers.
+    float liveTrackedFundamentalHz = 0.0f;
     float trackedFundamentalHz = 0.0f;
     float offlineFundamentalHz = 0.0f;
     float offlinePitchConfidence = 0.0f;
@@ -428,6 +561,7 @@ struct LearnHitAnalysis
     bool pitchInvalid = false;
     bool pitchDisagrees = false;
     bool octaveAmbiguous = false;
+    bool octaveCorrected = false;
     float pitchCentsDifference = 0.0f;
 
     // Pass A: timing/polarity observation for HitConsensus.
@@ -439,6 +573,10 @@ struct LearnHitAnalysis
     float allpassQ = 0.7f;
     float rotatorGainPoints = 0.0f;
     float rotatorConfidence = 0.0f;
+
+    // Layer A localization carried into Layer B state clustering.
+    ConflictRegion regionType = ConflictRegion::none;
+    float conflictSeverity = 0.0f;
 };
 
 struct LearnDiagnostics
@@ -451,6 +589,7 @@ struct LearnDiagnostics
     int pitchInvalidHits = 0;
     int pitchDisagreementHits = 0;
     int octaveAmbiguousHits = 0;
+    int octaveCorrectedHits = 0;
     int timingOutlierHits = 0;
     int dominantClusterHitCount = 0;
     int droppedQueueHits = 0;
@@ -469,7 +608,8 @@ enum class LearnNoteOutcome : uint8_t
     Learned,                  // entered the map
     NotEnoughOverlap,         // recognized but < kMinHitsPerNote usable overlaps
     OutOfCorrectionWindow,    // note in loop, but energy vs kick outside correction window
-    CorrectionNotConfident    // enough overlaps, but aggregator/rotator rejected the note
+    CorrectionNotConfident,   // enough overlaps, but aggregator/rotator rejected the note
+    PitchAmbiguous            // octave evidence was unresolved; no state was learned
 };
 
 struct LearnNoteReport
@@ -479,11 +619,13 @@ struct LearnNoteReport
     int acceptedHits = 0;     // pitch-accepted, timing-usable overlaps counted toward the note
     int outOfWindowHits = 0;  // recognized near kick but outside correction / late
     int recognizedHits = 0;   // any kick-associated recognition for this note
+    int ambiguousPitchHits = 0;
 
     bool operator== (const LearnNoteReport& o) const noexcept
     {
         return outcome == o.outcome && midi == o.midi && acceptedHits == o.acceptedHits
-            && outOfWindowHits == o.outOfWindowHits && recognizedHits == o.recognizedHits;
+            && outOfWindowHits == o.outOfWindowHits && recognizedHits == o.recognizedHits
+            && ambiguousPitchHits == o.ambiguousPitchHits;
     }
     bool operator!= (const LearnNoteReport& o) const noexcept { return ! (*this == o); }
 };

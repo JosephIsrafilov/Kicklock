@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <numbers>
 #include <vector>
 
 // Independent pitch estimate used only to cross-check the live PitchTracker
@@ -14,6 +15,26 @@ struct FundamentalEstimate
     bool  valid = false;
     float frequencyHz = 0.0f;
     float confidence = 0.0f;
+
+    // Worker-only evidence retained for Learn diagnostics. These values are
+    // never serialized or read by the audio thread.
+    int selectedLag = 0;
+    int halfLag = 0;
+    int doubleLag = 0;
+    float selectedCmndf = 1.0f;
+    float halfLagCmndf = 1.0f;
+    float doubleLagCmndf = 1.0f;
+    float selectedHarmonicScore = 0.0f;
+    float higherOctaveHarmonicScore = 0.0f;
+    bool octaveCorrected = false;
+    bool octaveAmbiguous = false;
+};
+
+enum class OctaveEvidenceResolution
+{
+    keepSelected,
+    promoteHigher,
+    ambiguous
 };
 
 // OfflineFundamentalEstimator
@@ -30,10 +51,10 @@ struct FundamentalEstimate
 //   the CMNDF at P/2 stays above threshold whenever the fundamental carries
 //   "sufficient evidence", so P (the true fundamental) is chosen even when the
 //   second harmonic is stronger. Only when the fundamental is essentially
-//   absent does the scan fall through to a higher harmonic. The estimator never
-//   silently reinterprets a detected octave as the live tracked fundamental;
-//   it simply reports the period it found and its confidence, and leaves any
-//   octave policy to the Learn acceptance logic.
+//   absent does the scan fall through to a higher harmonic. When a selected
+//   subharmonic has a credible half-lag periodic minimum, the estimator compares
+//   normalized harmonic evidence for both hypotheses: it promotes only a
+//   stronger higher octave and otherwise reports an explicit ambiguity to Learn.
 //
 // Confidence semantics:
 //   confidence = clamp(1 - CMNDF_at_selected_lag, 0, 1). 1.0 means a perfectly
@@ -59,6 +80,20 @@ public:
     // CMNDF absolute threshold: the first lag below this (refined to a local
     // minimum) is taken as the period.
     static constexpr float kCmndfThreshold = 0.15f;
+
+    static OctaveEvidenceResolution resolveOctaveEvidence (float selectedCmndf,
+                                                            bool higherIsPeriodic,
+                                                            float selectedHarmonicScore,
+                                                            float higherHarmonicScore) noexcept
+    {
+        // A clear first YIN dip is positive evidence for the lower hypothesis.
+        // This protects genuine low fundamentals with loud second harmonics.
+        if (selectedCmndf <= kCmndfThreshold || ! higherIsPeriodic)
+            return OctaveEvidenceResolution::keepSelected;
+        return higherHarmonicScore > selectedHarmonicScore + 1.0e-6f
+            ? OctaveEvidenceResolution::promoteHigher
+            : OctaveEvidenceResolution::ambiguous;
+    }
 
     static FundamentalEstimate estimate (const float* bass,
                                          int numSamples,
@@ -159,7 +194,67 @@ public:
             }
         }
 
-        // Parabolic interpolation around the chosen lag.
+        result.selectedLag = tauBest;
+        result.selectedCmndf = cmndf[(size_t) tauBest];
+
+        // A YIN first-dip can lock to a subharmonic when a bass waveform
+        // alternates subtly from cycle to cycle. Evaluate the corresponding
+        // higher-octave lag with a second, normalized harmonic-energy view.
+        // We only promote it when it is itself a credible periodic minimum and
+        // the harmonic view prefers it. If the periodicity evidence exists but
+        // the harmonic view cannot decide, keep the hit explicitly ambiguous
+        // rather than silently teaching Dynamic an octave-low state.
+        if (tauBest >= 2 * minLag)
+        {
+            const int nominalHalfLag = tauBest / 2;
+            const int halfSearchRadius = std::max (2, nominalHalfLag / 32);
+            int halfLag = nominalHalfLag;
+            float halfBest = cmndf[(size_t) nominalHalfLag];
+            for (int lag = std::max (minLag, nominalHalfLag - halfSearchRadius);
+                 lag <= std::min (maxLag - 1, nominalHalfLag + halfSearchRadius); ++lag)
+            {
+                if (cmndf[(size_t) lag] < halfBest)
+                {
+                    halfBest = cmndf[(size_t) lag];
+                    halfLag = lag;
+                }
+            }
+            if (halfLag >= minLag && halfLag < maxLag)
+            {
+                result.halfLag = halfLag;
+                result.halfLagCmndf = cmndf[(size_t) halfLag];
+                const bool halfIsLocalMinimum = cmndf[(size_t) halfLag] <= cmndf[(size_t) (halfLag - 1)]
+                                             && cmndf[(size_t) halfLag] <= cmndf[(size_t) (halfLag + 1)];
+                const bool halfIsPeriodic = halfIsLocalMinimum
+                                         && 1.0f - result.halfLagCmndf >= kMinConfidence;
+                if (halfIsPeriodic)
+                {
+                    const float lowHz = (float) (sampleRate / (double) tauBest);
+                    const float highHz = (float) (sampleRate / (double) halfLag);
+                    result.selectedHarmonicScore = harmonicScore (x, window, sampleRate, lowHz);
+                    result.higherOctaveHarmonicScore = harmonicScore (x, window, sampleRate, highHz);
+                    const auto resolution = resolveOctaveEvidence (
+                        result.selectedCmndf, halfIsPeriodic,
+                        result.selectedHarmonicScore, result.higherOctaveHarmonicScore);
+                    if (resolution == OctaveEvidenceResolution::promoteHigher)
+                    {
+                        tauBest = halfLag;
+                        result.octaveCorrected = true;
+                    }
+                    else if (resolution == OctaveEvidenceResolution::ambiguous)
+                    {
+                        result.octaveAmbiguous = true;
+                    }
+                }
+            }
+        }
+        if (tauBest * 2 <= maxLag)
+        {
+            result.doubleLag = tauBest * 2;
+            result.doubleLagCmndf = cmndf[(size_t) result.doubleLag];
+        }
+
+        // Parabolic interpolation around the final, possibly octave-corrected lag.
         float refinedTau = (float) tauBest;
         if (tauBest > minLag && tauBest < maxLag)
         {
@@ -185,6 +280,47 @@ public:
         result.valid = true;
         result.frequencyHz = frequencyHz;
         result.confidence = confidence;
+        result.selectedLag = tauBest;
+        result.selectedCmndf = cmndf[(size_t) tauBest];
         return result;
+    }
+
+private:
+    static float harmonicScore (const std::vector<float>& x, int n, double sampleRate, float fundamentalHz)
+    {
+        if (n <= 1 || ! (fundamentalHz > 0.0f) || ! std::isfinite (fundamentalHz))
+            return 0.0f;
+
+        double totalEnergy = 0.0;
+        for (int i = 0; i < n; ++i)
+            totalEnergy += (double) x[(size_t) i] * (double) x[(size_t) i];
+        if (! (totalEnergy > 1.0e-20) || ! std::isfinite (totalEnergy))
+            return 0.0f;
+
+        // The fundamental receives the greatest weight. A low-octave
+        // hypothesis can explain a strong 2F component only as its second
+        // harmonic, whereas the correct higher hypothesis explains it as F.
+        static constexpr float weights[] = { 1.0f, 0.5f, 1.0f / 3.0f, 0.25f };
+        double weightedEnergy = 0.0;
+        for (int harmonic = 1; harmonic <= 4; ++harmonic)
+        {
+            const double frequency = (double) fundamentalHz * (double) harmonic;
+            if (frequency >= sampleRate * 0.45)
+                break;
+
+            const double omega = 2.0 * std::numbers::pi_v<double> * frequency / sampleRate;
+            const double coefficient = 2.0 * std::cos (omega);
+            double q1 = 0.0, q2 = 0.0;
+            for (int i = 0; i < n; ++i)
+            {
+                const double q0 = (double) x[(size_t) i] + coefficient * q1 - q2;
+                q2 = q1;
+                q1 = q0;
+            }
+            const double power = q1 * q1 + q2 * q2 - coefficient * q1 * q2;
+            weightedEnergy += (double) weights[harmonic - 1] * std::max (0.0, power);
+        }
+
+        return (float) std::clamp (weightedEnergy / ((double) n * totalEnergy), 0.0, 1.0);
     }
 };
