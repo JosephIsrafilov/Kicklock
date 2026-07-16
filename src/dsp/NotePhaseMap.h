@@ -150,6 +150,7 @@ namespace NoteMap
 
     inline constexpr uint32_t kSchemaVersion = 4;
     inline constexpr uint32_t kPreviousSchemaVersion = 3;
+    inline constexpr uint32_t kOldestSupportedSchemaVersion = 2;
     inline constexpr float kMaxSupportedDelayMs = 20.0f;
 
     inline bool allFieldsFinite (const NoteEntry& e) noexcept
@@ -418,6 +419,7 @@ inline juce::ValueTree noteMapToValueTree (const NotePhaseMapSnapshot& map)
 //   - duplicate MIDI children: the LAST valid child in document order wins, and
 //     an invalid duplicate never clobbers an earlier valid entry;
 //   - a malformed global fallback invalidates the whole map;
+//   - schemas 2 and 3 are published KLNoteMap note-path compatibility data;
 //   - old projects without a KLNoteMap tree parse to an invalid empty map.
 inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
 {
@@ -427,12 +429,13 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
         return map;
 
     const int schema = (int) tree.getProperty (juce::Identifier (NoteMapKeys::schemaVersion), -1);
-    // Layer B is an explicit cutover: note-indexed Dynamic data is never
-    // converted into state-indexed data. Any pre-v4 map must learn again.
-    if (schema != (int) NoteMap::kSchemaVersion)
+    if (schema != (int) NoteMap::kSchemaVersion
+        && schema != (int) NoteMap::kPreviousSchemaVersion
+        && schema != (int) NoteMap::kOldestSupportedSchemaVersion)
         return map;
 
     map.schemaVersion = NoteMap::kSchemaVersion;
+    const bool schema2Compatibility = schema == (int) NoteMap::kOldestSupportedSchemaVersion;
 
     auto readFinite = [] (const juce::ValueTree& t, const char* key, float fallback) noexcept
     {
@@ -466,7 +469,8 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
     for (int c = 0; c < tree.getNumChildren(); ++c)
     {
         const juce::ValueTree child = tree.getChild (c);
-        if (! child.hasType (juce::Identifier (NoteMapKeys::state)))
+        if (schema != (int) NoteMap::kSchemaVersion
+            || ! child.hasType (juce::Identifier (NoteMapKeys::state)))
         {
             if (! child.hasType (juce::Identifier (NoteMapKeys::note))) continue;
             const int midi = (int) child.getProperty (juce::Identifier (NoteMapKeys::noteMidi), -1000);
@@ -479,7 +483,8 @@ inline NotePhaseMapSnapshot noteMapFromValueTree (const juce::ValueTree& tree)
             e.allpassQ = readFinite (child, NoteMapKeys::noteQ, 0.7f);
             e.delayMs = readFinite (child, NoteMapKeys::noteDelayMs, map.base.delayMs);
             e.polarityInvert = (bool) child.getProperty (juce::Identifier (NoteMapKeys::notePolarity), map.base.polarityInvert);
-            e.timingConfidence = readFinite (child, NoteMapKeys::noteTimingConfidence, 0.0f);
+            e.timingConfidence = readFinite (child, NoteMapKeys::noteTimingConfidence,
+                                              schema2Compatibility ? 1.0f : 0.0f);
             e.timingSpreadMs = readFinite (child, NoteMapKeys::noteTimingSpreadMs, 0.0f);
             e.confidence = readFinite (child, NoteMapKeys::noteConfidence, 0.0f);
             e.fundamentalSpreadRatio = readFinite (child, NoteMapKeys::noteSpread, 0.0f);

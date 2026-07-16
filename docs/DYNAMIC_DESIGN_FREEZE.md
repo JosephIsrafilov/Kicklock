@@ -24,7 +24,13 @@ a MIDI note or DAW timeline section. MIDI and pitch are optional metadata.
 - Auto States use a learned package or remain recognized with no confident
   automatic fix; Manual States use a Manual base package. Learned package,
   Manual base package, and Manual trim remain separate.
-- Priority: DynamicStateMap, legacy Dynamic compatibility map, No Map.
+- DynamicStateMap is the new production contract. KLNoteMap is frozen
+  compatibility data, with intentionally preserved legacy selector behavior.
+- Legacy per-state Polarity, Stages, and Delay are not precedents for the new
+  runtime. There is no KLNoteMap-to-DynamicStateMap conversion.
+- Source priority is DynamicStateMap, KLNoteMap compatibility, then no map.
+- This phase does not activate the new runtime. Legacy compatibility may be
+  removed only in a future major project-format break.
 
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,

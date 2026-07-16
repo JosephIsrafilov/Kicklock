@@ -48,7 +48,7 @@ public:
             expectEquals (total, 10);
         }
 
-        beginTest ("Schema v3 explicitly forces relearn; v4 states round-trip");
+        beginTest ("Schema v3 remains a note-path compatibility map; v4 states round-trip");
         {
             auto map = NoteMap::makeEmptyNoteMap();
             map.valid = true;
@@ -66,7 +66,7 @@ public:
             expectWithinAbsoluteError (parsed.states[0].delayMs, 1.5f, 1.0e-6f);
             tree.setProperty (juce::Identifier (NoteMapKeys::schemaVersion), 3, nullptr);
             parsed = noteMapFromValueTree (tree);
-            expect (! parsed.valid);
+            expect (parsed.valid);
             expect (! parsed.states[0].applied);
         }
 
