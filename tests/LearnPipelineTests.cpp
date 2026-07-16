@@ -687,7 +687,7 @@ public:
             expect (! parsed.notes[(size_t) NotePhaseMapSnapshot::indexForMidi (33)].learned);
         }
 
-        beginTest ("Pre-v4 Dynamic maps force a fresh state-axis Learn");
+        beginTest ("Pre-v4 KLNoteMap schemas remain note-path compatibility data");
         {
             auto original = makePopulatedMap();
             auto tree = noteMapToValueTree (original);
@@ -695,9 +695,9 @@ public:
                               (int) NoteMap::kPreviousSchemaVersion, nullptr);
             const auto parsed = noteMapFromValueTree (tree);
             const int idx = NotePhaseMapSnapshot::indexForMidi (33);
-            expect (! parsed.valid);
+            expect (parsed.valid);
             expectEquals ((int) parsed.schemaVersion, (int) NoteMap::kSchemaVersion);
-            expect (! parsed.notes[(size_t) idx].learned);
+            expect (parsed.notes[(size_t) idx].learned);
             expect (! parsed.states[0].applied);
         }
 

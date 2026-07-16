@@ -77,6 +77,11 @@ namespace
         return note;
     }
 
+    float legacyInterpolatedFrequency (float globalHz, float selectedHz, float strength) noexcept
+    {
+        return std::exp (std::log (globalHz) + (std::log (selectedHz) - std::log (globalHz)) * strength);
+    }
+
     NotePhaseMapSnapshot legacyMap (bool withConflictState)
     {
         auto map = NoteMap::makeEmptyNoteMap();
@@ -156,7 +161,7 @@ public:
             expect (full.mapUsable && full.usingLearnedNote && ! full.fallbackActive);
             expectEquals (full.selectedState, 0);
             expectEquals (full.selectedMidi, 42);
-            expectWithinAbsoluteError (full.targetFreqHz, 200.0f, 1.0e-6f);
+            expectWithinAbsoluteError (full.targetFreqHz, legacyInterpolatedFrequency (50.0f, 200.0f, 1.0f), 1.0e-6f);
             expectWithinAbsoluteError (full.targetQ, 2.3f, 1.0e-6f);
             expectWithinAbsoluteError (full.targetDelayMs, 3.0f, 1.0e-6f);
             expect (! full.targetPolarityInvert);
@@ -165,7 +170,7 @@ public:
             DynamicNoteState zeroState;
             const auto zero = selectDynamicRuntime (map, base, 73.0f, 1.1f, 0.0f, 0.0f,
                                                     100, 300, zeroState, &fingerprint);
-            expectWithinAbsoluteError (zero.targetFreqHz, 50.0f, 1.0e-6f);
+            expectWithinAbsoluteError (zero.targetFreqHz, legacyInterpolatedFrequency (50.0f, 200.0f, 0.0f), 1.0e-6f);
             expectWithinAbsoluteError (zero.targetQ, 0.7f, 1.0e-6f);
             expectWithinAbsoluteError (zero.targetDelayMs, 1.0f, 1.0e-6f);
             expect (zero.targetPolarityInvert);
@@ -174,7 +179,8 @@ public:
             DynamicNoteState midpointState;
             const auto midpoint = selectDynamicRuntime (map, base, 73.0f, 1.1f, 0.0f, 0.5f,
                                                         100, 300, midpointState, &fingerprint);
-            expectWithinAbsoluteError (midpoint.targetFreqHz, 100.0f, 1.0e-5f);
+            expectWithinAbsoluteError (midpoint.targetFreqHz,
+                                       legacyInterpolatedFrequency (50.0f, 200.0f, 0.5f), 1.0e-6f);
             expectWithinAbsoluteError (midpoint.targetQ, 1.5f, 1.0e-6f);
             expectWithinAbsoluteError (midpoint.targetDelayMs, 2.0f, 1.0e-6f);
             expect (! midpoint.targetPolarityInvert);
@@ -196,7 +202,8 @@ public:
                                                     100, 300, state, &unlike);
             expect (held.fallbackActive && held.usingLearnedNote);
             expectGreaterThan (held.fingerprintDistance, 0.18f);
-            expectWithinAbsoluteError (held.targetFreqHz, 200.0f, 1.0e-6f);
+            expectWithinAbsoluteError (held.targetFreqHz,
+                                       legacyInterpolatedFrequency (50.0f, 200.0f, 1.0f), 1.0e-6f);
             expectWithinAbsoluteError (held.targetDelayMs, 3.0f, 1.0e-6f);
             expect (! held.targetPolarityInvert);
             expectEquals (held.targetStages, 4);
@@ -223,7 +230,7 @@ public:
                                                     100, 300, state);
             expect (full.usingLearnedNote && ! full.fallbackActive);
             expectEquals (full.selectedMidi, 33);
-            expectWithinAbsoluteError (full.targetFreqHz, 100.0f, 1.0e-6f);
+            expectWithinAbsoluteError (full.targetFreqHz, legacyInterpolatedFrequency (50.0f, 100.0f, 1.0f), 1.0e-6f);
             expectWithinAbsoluteError (full.targetQ, 1.7f, 1.0e-6f);
             expectWithinAbsoluteError (full.targetDelayMs, 1.0f, 1.0e-6f);
             expect (full.targetPolarityInvert);
@@ -232,7 +239,8 @@ public:
             DynamicNoteState midpointState;
             const auto midpoint = selectDynamicRuntime (map, base, 73.0f, 1.1f, noteHz, 0.5f,
                                                         100, 300, midpointState);
-            expectWithinAbsoluteError (midpoint.targetFreqHz, std::sqrt (5000.0f), 1.0e-5f);
+            expectWithinAbsoluteError (midpoint.targetFreqHz,
+                                       legacyInterpolatedFrequency (50.0f, 100.0f, 0.5f), 1.0e-6f);
             expectWithinAbsoluteError (midpoint.targetQ, 1.2f, 1.0e-6f);
 
             const auto dropout = selectDynamicRuntime (map, base, 73.0f, 1.1f, 0.0f, 1.0f,
