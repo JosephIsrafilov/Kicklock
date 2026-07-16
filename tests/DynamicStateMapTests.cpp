@@ -4,6 +4,7 @@
 #include "NotePhaseMap.h"
 
 #include <limits>
+#include <memory>
 #include <utility>
 
 namespace
@@ -50,6 +51,47 @@ namespace
         for (int i = 0; i < stateCount; ++i)
             map.states[(size_t) i] = validAutoState ((uint64_t) i + 1u);
         map.nextStateId = (uint64_t) stateCount + 1u;
+        return map;
+    }
+
+    struct DynamicStateMapStateCodec : juce::AudioProcessor
+    {
+        using juce::AudioProcessor::copyXmlToBinary;
+        using juce::AudioProcessor::getXmlFromBinary;
+    };
+
+    DynamicStateMap completePersistentMap()
+    {
+        auto map = validMap (3);
+        map.globalBase.globalBaseDelayMs = 7.0f;
+        map.globalBase.polarityInvert = true;
+        map.globalBase.crossoverEnabled = false;
+        map.globalBase.crossoverHz = 220.0f;
+        map.globalBase.allpassEnabled = false;
+        map.globalBase.globalAllpassFreqHz = 160.0f;
+        map.globalBase.globalAllpassQ = 1.4f;
+        map.globalBase.allpassStages = 4;
+        map.globalBase.delayInterpolationIndex = 1;
+        map.globalBase.learnedSampleRate = 96000.0;
+        map.diagnostics = { DynamicMapDiagnostic::NoConfidentAutoFix, 12, 3, 2, 3 };
+        map.states[0].stableStateId = std::numeric_limits<uint64_t>::max() - 3u;
+        map.states[1].stableStateId = std::numeric_limits<uint64_t>::max() - 2u;
+        map.states[2].stableStateId = std::numeric_limits<uint64_t>::max() - 1u;
+        map.nextStateId = std::numeric_limits<uint64_t>::max();
+
+        map.states[1].hasLearnedPackage = false;
+        map.states[1].bypassed = true;
+
+        map.states[2].enabled = false;
+        map.states[2].hasLikelyMidi = true;
+        map.states[2].likelyMidi = 36;
+        map.states[2].hasLikelyPitchHz = true;
+        map.states[2].likelyPitchHz = 65.4064f;
+        map.states[2].origin = DynamicStateOrigin::Manual;
+        map.states[2].hasLearnedPackage = false;
+        map.states[2].hasManualBasePackage = true;
+        map.states[2].manualBasePackage = { 1.5f, 175.0f, 1.2f };
+        map.states[2].manualTrim = { -0.5f, 3.0f, -0.25f };
         return map;
     }
 
@@ -212,6 +254,73 @@ public:
             expect (! isValidDynamicState (invalid));
         }
 
+        beginTest ("Effective stored delay delta is bounded after manual trim");
+        {
+            auto state = validAutoState (10, 3);
+            float effectiveDelayDeltaMs = 0.0f;
+
+            state.learnedPackage.delayDeltaMs = -3.0f;
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, -3.0f, 1.0e-6f);
+            expect (isValidDynamicState (state));
+
+            state.learnedPackage.delayDeltaMs = 3.0f;
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, 3.0f, 1.0e-6f);
+
+            state.learnedPackage.delayDeltaMs = -2.0f;
+            state.manualTrim.delayTrimMs = -1.0f;
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, -3.0f, 1.0e-6f);
+
+            state.learnedPackage.delayDeltaMs = 2.0f;
+            state.manualTrim.delayTrimMs = 1.0f;
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, 3.0f, 1.0e-6f);
+
+            state.learnedPackage.delayDeltaMs = -3.0f;
+            state.manualTrim.delayTrimMs = -0.001f;
+            expect (! getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expect (! isValidDynamicState (state));
+
+            state.learnedPackage.delayDeltaMs = 3.0f;
+            state.manualTrim.delayTrimMs = 0.001f;
+            expect (! getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expect (! isValidDynamicState (state));
+
+            state.learnedPackage.delayDeltaMs = 0.0f;
+            state.manualTrim.delayTrimMs = -3.0f;
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, -3.0f, 1.0e-6f);
+            state.manualTrim.delayTrimMs = 3.0f;
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, 3.0f, 1.0e-6f);
+
+            state.hasLearnedPackage = false;
+            state.manualTrim = makeZeroDynamicManualTrim();
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, 0.0f, 1.0e-6f);
+            expect (isValidDynamicState (state));
+            state.manualTrim.delayTrimMs = 0.1f;
+            expect (! getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
+            expect (! isValidDynamicState (state));
+
+            auto manual = validAutoState (11, 3);
+            manual.origin = DynamicStateOrigin::Manual;
+            manual.hasLearnedPackage = false;
+            manual.hasManualBasePackage = true;
+            manual.manualBasePackage = { -2.0f, 100.0f, 0.7f };
+            manual.manualTrim.delayTrimMs = -1.0f;
+            expect (getEffectiveStoredDynamicStateDelayDeltaMs (manual, effectiveDelayDeltaMs));
+            expectWithinAbsoluteError (effectiveDelayDeltaMs, -3.0f, 1.0e-6f);
+
+            auto map = validMap (1);
+            map.states[0].learnedPackage.delayDeltaMs = -2.0f;
+            map.states[0].manualTrim.delayTrimMs = -1.0f;
+            expect (isStructurallyValidDynamicStateMap (map));
+            expect (isRuntimeEligibleDynamicStateMap (map));
+        }
+
         beginTest ("Map validation enforces identity, calibration, capacity and eligibility");
         {
             const auto empty = makeEmptyDynamicStateMap();
@@ -248,33 +357,7 @@ public:
 
         beginTest ("Persistent map round-trips candidates, no-fix, bypass and disabled states");
         {
-            auto map = validMap (3);
-            map.globalBase.globalBaseDelayMs = 7.0f;
-            map.globalBase.polarityInvert = true;
-            map.globalBase.crossoverEnabled = false;
-            map.globalBase.crossoverHz = 220.0f;
-            map.globalBase.allpassEnabled = false;
-            map.globalBase.globalAllpassFreqHz = 160.0f;
-            map.globalBase.globalAllpassQ = 1.4f;
-            map.globalBase.allpassStages = 4;
-            map.globalBase.delayInterpolationIndex = 1;
-            map.globalBase.learnedSampleRate = 96000.0;
-            map.diagnostics = { DynamicMapDiagnostic::NoConfidentAutoFix, 12, 3, 2, 3 };
-
-            map.states[1].hasLearnedPackage = false;
-            map.states[1].manualTrim = makeZeroDynamicManualTrim();
-            map.states[1].bypassed = true;
-            map.states[2].enabled = false;
-            map.states[2].bypassed = false;
-            map.states[2].hasLikelyMidi = true;
-            map.states[2].likelyMidi = 36;
-            map.states[2].hasLikelyPitchHz = true;
-            map.states[2].likelyPitchHz = 65.4064f;
-            map.states[2].origin = DynamicStateOrigin::Manual;
-            map.states[2].hasLearnedPackage = false;
-            map.states[2].hasManualBasePackage = true;
-            map.states[2].manualBasePackage = { 1.5f, 175.0f, 1.2f };
-            map.states[2].manualTrim = { -0.5f, 3.0f, -0.25f };
+            const auto map = completePersistentMap();
 
             const auto tree = dynamicStateMapToValueTree (map);
             const auto parsed = dynamicStateMapFromValueTree (tree);
@@ -286,6 +369,110 @@ public:
             expect (! child.hasProperty ("colour"));
             expect (! child.hasProperty ("effectivePackage"));
             expect (! child.hasProperty ("fadePosition"));
+        }
+
+        beginTest ("ValueTree XML round-trip restores canonical string properties");
+        {
+            const auto map = completePersistentMap();
+            const auto tree = dynamicStateMapToValueTree (map);
+            const std::unique_ptr<juce::XmlElement> xml (tree.createXml());
+            expect (xml != nullptr);
+            if (xml != nullptr)
+            {
+                const auto restored = juce::ValueTree::fromXml (*xml);
+                const auto state = onlyStateChild (restored);
+                expect (restored.getProperty (DynamicStateMapKeys::schemaVersion).isString());
+                expect (restored.getProperty (DynamicStateMapKeys::extractorVersion).isString());
+                expect (restored.getProperty (DynamicStateMapKeys::valid).isString());
+                expect (restored.getProperty (DynamicStateMapKeys::globalBaseDelayMs).isString());
+                expect (restored.getProperty (DynamicStateMapKeys::learnedSampleRate).isString());
+                expect (restored.getProperty (DynamicStateMapKeys::analyzedHitCount).isString());
+                expect (state.getProperty (DynamicStateMapKeys::stateId).isString());
+                expect (state.getProperty (DynamicStateMapKeys::origin).isString());
+                expect (state.getProperty (DynamicStateMapKeys::hitCount).isString());
+                expect (mapsEqual (map, dynamicStateMapFromValueTree (restored)));
+            }
+        }
+
+        beginTest ("AudioProcessor XML binary round-trip restores DynamicStateMap");
+        {
+            const auto map = completePersistentMap();
+            const auto tree = dynamicStateMapToValueTree (map);
+            const std::unique_ptr<juce::XmlElement> sourceXml (tree.createXml());
+            juce::MemoryBlock binary;
+            expect (sourceXml != nullptr);
+            if (sourceXml != nullptr)
+            {
+                DynamicStateMapStateCodec::copyXmlToBinary (*sourceXml, binary);
+                const std::unique_ptr<juce::XmlElement> restoredXml (
+                    DynamicStateMapStateCodec::getXmlFromBinary (binary.getData(), (int) binary.getSize()));
+                expect (restoredXml != nullptr);
+                if (restoredXml != nullptr)
+                    expect (mapsEqual (map, dynamicStateMapFromValueTree (
+                        juce::ValueTree::fromXml (*restoredXml))));
+            }
+        }
+
+        beginTest ("Parser accepts strict XML strings and rejects malformed required strings");
+        {
+            auto map = validMap (1);
+            map.globalBase.learnedSampleRate = 48000.0;
+            const auto makeTree = [&map] { return dynamicStateMapToValueTree (map); };
+
+            auto strings = makeTree();
+            strings.setProperty (DynamicStateMapKeys::schemaVersion, "1", nullptr);
+            strings.setProperty (DynamicStateMapKeys::extractorVersion, "1", nullptr);
+            strings.setProperty (DynamicStateMapKeys::valid, "1", nullptr);
+            strings.setProperty (DynamicStateMapKeys::polarityInvert, "0", nullptr);
+            strings.setProperty (DynamicStateMapKeys::globalBaseDelayMs, "-4.0", nullptr);
+            strings.setProperty (DynamicStateMapKeys::learnedSampleRate, "4.8e4", nullptr);
+            strings.setProperty (DynamicStateMapKeys::analyzedHitCount, "0", nullptr);
+            auto state = onlyStateChild (strings);
+            state.setProperty (DynamicStateMapKeys::fingerprintValid, "1", nullptr);
+            state.setProperty (DynamicStateMapKeys::origin, "0", nullptr);
+            state.setProperty (DynamicStateMapKeys::hitCount, "3", nullptr);
+            expect (dynamicStateMapFromValueTree (strings).valid);
+
+            strings = makeTree();
+            strings.setProperty (DynamicStateMapKeys::polarityInvert, "false", nullptr);
+            expect (dynamicStateMapFromValueTree (strings).valid);
+
+            for (const char* malformed : { "yes", " 1", "2" })
+            {
+                strings = makeTree();
+                strings.setProperty (DynamicStateMapKeys::valid, malformed, nullptr);
+                expect (! dynamicStateMapFromValueTree (strings).valid);
+            }
+
+            strings = makeTree();
+            strings.setProperty (DynamicStateMapKeys::schemaVersion, "2", nullptr);
+            expect (! dynamicStateMapFromValueTree (strings).valid);
+            strings = makeTree();
+            strings.setProperty (DynamicStateMapKeys::schemaVersion, " 1", nullptr);
+            expect (! dynamicStateMapFromValueTree (strings).valid);
+            strings = makeTree();
+            onlyStateChild (strings).setProperty (DynamicStateMapKeys::origin, "9", nullptr);
+            expect (! dynamicStateMapFromValueTree (strings).valid);
+
+            for (const char* malformed : { "-1", "3.0", "3x", "4294967296", " 3" })
+            {
+                strings = makeTree();
+                onlyStateChild (strings).setProperty (DynamicStateMapKeys::hitCount, malformed, nullptr);
+                expect (! dynamicStateMapFromValueTree (strings).valid);
+            }
+
+            strings = makeTree();
+            strings.setProperty (DynamicStateMapKeys::globalBaseDelayMs, "1e0", nullptr);
+            expect (dynamicStateMapFromValueTree (strings).valid);
+            for (const char* malformed : { "NaN", "Inf", "1.25x", " 1.25", "", "1e999" })
+            {
+                strings = makeTree();
+                strings.setProperty (DynamicStateMapKeys::globalBaseDelayMs, malformed, nullptr);
+                expect (! dynamicStateMapFromValueTree (strings).valid);
+            }
+            strings = makeTree();
+            strings.setProperty (DynamicStateMapKeys::learnedSampleRate, "1e999", nullptr);
+            expect (! dynamicStateMapFromValueTree (strings).valid);
         }
 
         beginTest ("State IDs serialize losslessly and malformed IDs reject map");

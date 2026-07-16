@@ -1,7 +1,10 @@
 #pragma once
 
 #include <array>
+#include <charconv>
+#include <cmath>
 #include <limits>
+#include <system_error>
 
 #include <juce_core/juce_core.h>
 
@@ -77,16 +80,150 @@ namespace DynamicStateSerializationDetail
         return juce::String (DynamicStateMapKeys::fingerprintFeaturePrefix) + juce::String (feature);
     }
 
+    inline bool isAsciiDigit (char character) noexcept
+    {
+        return character >= '0' && character <= '9';
+    }
+
+    inline bool getUtf8Range (const juce::String& text, const char*& begin, const char*& end) noexcept
+    {
+        begin = text.toRawUTF8();
+        const auto byteCount = text.getNumBytesAsUTF8();
+        end = begin + byteCount;
+        return byteCount > 0;
+    }
+
+    inline bool hasStrictUnsignedDecimalSyntax (const char* begin, const char* end) noexcept
+    {
+        if (begin == end)
+            return false;
+
+        for (auto position = begin; position != end; ++position)
+            if (! isAsciiDigit (*position))
+                return false;
+
+        return true;
+    }
+
+    inline bool hasStrictSignedDecimalSyntax (const char* begin, const char* end) noexcept
+    {
+        if (begin == end)
+            return false;
+
+        if (*begin == '-')
+            ++begin;
+        else if (*begin == '+')
+            return false;
+
+        return hasStrictUnsignedDecimalSyntax (begin, end);
+    }
+
+    inline bool hasStrictFiniteDecimalSyntax (const char* begin, const char* end) noexcept
+    {
+        if (begin == end)
+            return false;
+
+        if (*begin == '-' || *begin == '+')
+            ++begin;
+        if (begin == end)
+            return false;
+
+        bool hasDigits = false;
+        while (begin != end && isAsciiDigit (*begin))
+        {
+            hasDigits = true;
+            ++begin;
+        }
+
+        if (begin != end && *begin == '.')
+        {
+            ++begin;
+            while (begin != end && isAsciiDigit (*begin))
+            {
+                hasDigits = true;
+                ++begin;
+            }
+        }
+
+        if (! hasDigits)
+            return false;
+
+        if (begin != end && (*begin == 'e' || *begin == 'E'))
+        {
+            ++begin;
+            if (begin != end && (*begin == '-' || *begin == '+'))
+                ++begin;
+
+            const auto exponentBegin = begin;
+            while (begin != end && isAsciiDigit (*begin))
+                ++begin;
+            if (begin == exponentBegin)
+                return false;
+        }
+
+        return begin == end;
+    }
+
+    inline bool parseIntDecimal (const juce::String& text, int& value) noexcept
+    {
+        const char* begin = nullptr;
+        const char* end = nullptr;
+        if (! getUtf8Range (text, begin, end) || ! hasStrictSignedDecimalSyntax (begin, end))
+            return false;
+
+        const auto result = std::from_chars (begin, end, value, 10);
+        return result.ec == std::errc {} && result.ptr == end;
+    }
+
+    inline bool parseUint32Decimal (const juce::String& text, uint32_t& value) noexcept
+    {
+        const char* begin = nullptr;
+        const char* end = nullptr;
+        if (! getUtf8Range (text, begin, end) || ! hasStrictUnsignedDecimalSyntax (begin, end))
+            return false;
+
+        const auto result = std::from_chars (begin, end, value, 10);
+        return result.ec == std::errc {} && result.ptr == end;
+    }
+
+    template <typename Float>
+    inline bool parseFiniteDecimal (const juce::String& text, Float& value) noexcept
+    {
+        const char* begin = nullptr;
+        const char* end = nullptr;
+        if (! getUtf8Range (text, begin, end) || ! hasStrictFiniteDecimalSyntax (begin, end))
+            return false;
+
+        const auto result = std::from_chars (begin, end, value, std::chars_format::general);
+        return result.ec == std::errc {} && result.ptr == end && std::isfinite (value);
+    }
+
     inline bool readBool (const juce::ValueTree& tree, const char* key, bool& value)
     {
         const auto property = id (key);
         if (! tree.hasProperty (property))
             return false;
         const auto raw = tree.getProperty (property);
-        if (! raw.isBool())
+        if (raw.isBool())
+        {
+            value = (bool) raw;
+            return true;
+        }
+        if (! raw.isString())
             return false;
-        value = (bool) raw;
-        return true;
+
+        const auto text = raw.toString();
+        if (text == "1" || text == "true")
+        {
+            value = true;
+            return true;
+        }
+        if (text == "0" || text == "false")
+        {
+            value = false;
+            return true;
+        }
+        return false;
     }
 
     inline bool readFiniteFloat (const juce::ValueTree& tree, const char* key, float& value)
@@ -95,15 +232,17 @@ namespace DynamicStateSerializationDetail
         if (! tree.hasProperty (property))
             return false;
         const auto raw = tree.getProperty (property);
-        if (! raw.isInt() && ! raw.isInt64() && ! raw.isDouble())
-            return false;
-        const double number = (double) raw;
-        if (! std::isfinite (number)
-            || number < -(double) std::numeric_limits<float>::max()
-            || number > (double) std::numeric_limits<float>::max())
-            return false;
-        value = (float) number;
-        return std::isfinite (value);
+        if (raw.isInt() || raw.isInt64() || raw.isDouble())
+        {
+            const double number = (double) raw;
+            if (! std::isfinite (number)
+                || number < -(double) std::numeric_limits<float>::max()
+                || number > (double) std::numeric_limits<float>::max())
+                return false;
+            value = (float) number;
+            return std::isfinite (value);
+        }
+        return raw.isString() && parseFiniteDecimal (raw.toString(), value);
     }
 
     inline bool readFiniteDouble (const juce::ValueTree& tree, const char* key, double& value)
@@ -112,10 +251,12 @@ namespace DynamicStateSerializationDetail
         if (! tree.hasProperty (property))
             return false;
         const auto raw = tree.getProperty (property);
-        if (! raw.isInt() && ! raw.isInt64() && ! raw.isDouble())
-            return false;
-        value = (double) raw;
-        return std::isfinite (value);
+        if (raw.isInt() || raw.isInt64() || raw.isDouble())
+        {
+            value = (double) raw;
+            return std::isfinite (value);
+        }
+        return raw.isString() && parseFiniteDecimal (raw.toString(), value);
     }
 
     inline bool readInt (const juce::ValueTree& tree, const char* key, int& value)
@@ -124,14 +265,16 @@ namespace DynamicStateSerializationDetail
         if (! tree.hasProperty (property))
             return false;
         const auto raw = tree.getProperty (property);
-        if (! raw.isInt() && ! raw.isInt64())
-            return false;
-        const int64_t number = (int64_t) raw;
-        if (number < (int64_t) std::numeric_limits<int>::min()
-            || number > (int64_t) std::numeric_limits<int>::max())
-            return false;
-        value = (int) number;
-        return true;
+        if (raw.isInt() || raw.isInt64())
+        {
+            const int64_t number = (int64_t) raw;
+            if (number < (int64_t) std::numeric_limits<int>::min()
+                || number > (int64_t) std::numeric_limits<int>::max())
+                return false;
+            value = (int) number;
+            return true;
+        }
+        return raw.isString() && parseIntDecimal (raw.toString(), value);
     }
 
     inline bool readUint32 (const juce::ValueTree& tree, const char* key, uint32_t& value)
@@ -140,13 +283,15 @@ namespace DynamicStateSerializationDetail
         if (! tree.hasProperty (property))
             return false;
         const auto raw = tree.getProperty (property);
-        if (! raw.isInt() && ! raw.isInt64())
-            return false;
-        const int64_t number = (int64_t) raw;
-        if (number < 0 || (uint64_t) number > (uint64_t) std::numeric_limits<uint32_t>::max())
-            return false;
-        value = (uint32_t) number;
-        return true;
+        if (raw.isInt() || raw.isInt64())
+        {
+            const int64_t number = (int64_t) raw;
+            if (number < 0 || (uint64_t) number > (uint64_t) std::numeric_limits<uint32_t>::max())
+                return false;
+            value = (uint32_t) number;
+            return true;
+        }
+        return raw.isString() && parseUint32Decimal (raw.toString(), value);
     }
 
     inline bool parseUint64Decimal (const juce::String& text, uint64_t& value) noexcept

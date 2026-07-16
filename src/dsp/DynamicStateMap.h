@@ -245,6 +245,48 @@ struct DynamicState
     float likelyPitchHz = 0.0f;
 };
 
+inline bool getEffectiveStoredDynamicStateDelayDeltaMs (const DynamicState& state,
+                                                        float& effectiveDelayDeltaMs) noexcept
+{
+    using namespace DynamicStateMapContract;
+    const DynamicZonePackage* sourcePackage = nullptr;
+
+    if (state.origin == DynamicStateOrigin::Auto)
+    {
+        if (! state.hasLearnedPackage)
+        {
+            if (! isZeroDynamicManualTrim (state.manualTrim))
+                return false;
+            effectiveDelayDeltaMs = 0.0f;
+            return true;
+        }
+
+        sourcePackage = &state.learnedPackage;
+    }
+    else if (state.origin == DynamicStateOrigin::Manual)
+    {
+        if (! state.hasManualBasePackage)
+            return false;
+
+        sourcePackage = &state.manualBasePackage;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (! isInRange (sourcePackage->delayDeltaMs, kStateDelayDeltaMinMs, kStateDelayDeltaMaxMs)
+        || ! isFinite (state.manualTrim.delayTrimMs))
+        return false;
+
+    const float effective = sourcePackage->delayDeltaMs + state.manualTrim.delayTrimMs;
+    if (! isInRange (effective, kStateDelayDeltaMinMs, kStateDelayDeltaMaxMs))
+        return false;
+
+    effectiveDelayDeltaMs = effective;
+    return true;
+}
+
 inline bool isValidDynamicState (const DynamicState& state) noexcept
 {
     using namespace DynamicStateMapContract;
@@ -290,8 +332,8 @@ inline bool isValidDynamicState (const DynamicState& state) noexcept
             return false;
     }
 
-    const bool hasSourcePackage = state.hasLearnedPackage || state.hasManualBasePackage;
-    return hasSourcePackage || isZeroDynamicManualTrim (state.manualTrim);
+    float effectiveDelayDeltaMs = 0.0f;
+    return getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs);
 }
 
 // This remains pure so map validation and future runtime scheduling share one
@@ -386,8 +428,9 @@ inline bool isRuntimeEligibleDynamicStateMap (const DynamicStateMap& map) noexce
     {
         if (! state.occupied)
             continue;
-        const float delayDelta = state.hasLearnedPackage ? state.learnedPackage.delayDeltaMs
-            : state.hasManualBasePackage ? state.manualBasePackage.delayDeltaMs : 0.0f;
+        float delayDelta = 0.0f;
+        if (! getEffectiveStoredDynamicStateDelayDeltaMs (state, delayDelta))
+            return false;
         if (! hasDynamicLookAheadBudget (kReportedLatencyMs,
                                          map.globalBase.globalBaseDelayMs,
                                          delayDelta,

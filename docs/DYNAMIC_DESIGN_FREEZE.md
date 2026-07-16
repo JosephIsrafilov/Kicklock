@@ -9,6 +9,8 @@ a MIDI note or DAW timeline section. MIDI and pitch are optional metadata.
 - Global crossover uses the existing safe `40.0` to `500.0 Hz` core range.
 - Dynamic Global Base Delay: `-4.0` to `+17.0 ms`.
 - State delay delta: `-3.0` to `+3.0 ms`.
+- A source package's delay delta plus its additive Manual delay trim must remain
+  within the same `-3.0` to `+3.0 ms` state range.
 - Look-ahead invariant: `20 ms + base delay + state delta >= 4 ms fingerprint + 8 ms fade + 1 ms margin`.
 - Production design: shared crossover and delay history; Global, eight State,
   and optional Service hot branches. Reset-and-replay is not primary runtime
