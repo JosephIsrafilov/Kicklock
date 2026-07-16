@@ -80,6 +80,7 @@ namespace
         map.nextStateId = std::numeric_limits<uint64_t>::max();
 
         map.states[1].hasLearnedPackage = false;
+        map.states[1].learnedPackage = {};
         map.states[1].bypassed = true;
 
         map.states[2].enabled = false;
@@ -89,6 +90,7 @@ namespace
         map.states[2].likelyPitchHz = 65.4064f;
         map.states[2].origin = DynamicStateOrigin::Manual;
         map.states[2].hasLearnedPackage = false;
+        map.states[2].learnedPackage = {};
         map.states[2].hasManualBasePackage = true;
         map.states[2].manualBasePackage = { 1.5f, 175.0f, 1.2f };
         map.states[2].manualTrim = { -0.5f, 3.0f, -0.25f };
@@ -120,33 +122,52 @@ namespace
             || left.diagnostics.repeatableClusterCount != right.diagnostics.repeatableClusterCount)
             return false;
 
-        for (size_t i = 0; i < left.states.size(); ++i)
+        if (getOccupiedDynamicStateCount (left) != getOccupiedDynamicStateCount (right))
+            return false;
+
+        for (const auto& a : left.states)
         {
-            const auto& a = left.states[i];
-            const auto& b = right.states[i];
-            if (a.occupied != b.occupied)
-                return false;
             if (! a.occupied)
                 continue;
-            if (a.stableStateId != b.stableStateId || a.fingerprint.valid != b.fingerprint.valid
-                || a.fingerprint.featureCount != b.fingerprint.featureCount
-                || a.fingerprint.features != b.fingerprint.features
-                || a.hasLearnedPackage != b.hasLearnedPackage
-                || a.learnedPackage.delayDeltaMs != b.learnedPackage.delayDeltaMs
-                || a.learnedPackage.allpassFreqHz != b.learnedPackage.allpassFreqHz
-                || a.learnedPackage.allpassQ != b.learnedPackage.allpassQ
-                || a.hasManualBasePackage != b.hasManualBasePackage
-                || a.manualBasePackage.delayDeltaMs != b.manualBasePackage.delayDeltaMs
-                || a.manualBasePackage.allpassFreqHz != b.manualBasePackage.allpassFreqHz
-                || a.manualBasePackage.allpassQ != b.manualBasePackage.allpassQ
-                || a.manualTrim.delayTrimMs != b.manualTrim.delayTrimMs
-                || a.manualTrim.frequencyTrimSemitones != b.manualTrim.frequencyTrimSemitones
-                || a.manualTrim.logPoleDampingTrim != b.manualTrim.logPoleDampingTrim
-                || a.origin != b.origin || a.evidence != b.evidence || a.enabled != b.enabled
-                || a.bypassed != b.bypassed || a.hitCount != b.hitCount
-                || a.repeatability != b.repeatability || a.ambiguity != b.ambiguity
-                || a.hasLikelyMidi != b.hasLikelyMidi || a.likelyMidi != b.likelyMidi
-                || a.hasLikelyPitchHz != b.hasLikelyPitchHz || a.likelyPitchHz != b.likelyPitchHz)
+
+            const DynamicState* b = nullptr;
+            for (const auto& candidate : right.states)
+                if (candidate.occupied && candidate.stableStateId == a.stableStateId)
+                {
+                    b = &candidate;
+                    break;
+                }
+            if (b == nullptr)
+                return false;
+
+            if (a.stableStateId != b->stableStateId || a.fingerprint.valid != b->fingerprint.valid
+                || a.fingerprint.featureCount != b->fingerprint.featureCount
+                || a.fingerprint.features != b->fingerprint.features
+                || a.hasLearnedPackage != b->hasLearnedPackage
+                || a.hasManualBasePackage != b->hasManualBasePackage
+                || a.manualTrim.delayTrimMs != b->manualTrim.delayTrimMs
+                || a.manualTrim.frequencyTrimSemitones != b->manualTrim.frequencyTrimSemitones
+                || a.manualTrim.logPoleDampingTrim != b->manualTrim.logPoleDampingTrim
+                || a.origin != b->origin || a.evidence != b->evidence || a.enabled != b->enabled
+                || a.bypassed != b->bypassed || a.hitCount != b->hitCount
+                || a.repeatability != b->repeatability || a.ambiguity != b->ambiguity
+                || a.hasLikelyMidi != b->hasLikelyMidi
+                || a.hasLikelyPitchHz != b->hasLikelyPitchHz)
+                return false;
+
+            if (a.hasLearnedPackage
+                && (a.learnedPackage.delayDeltaMs != b->learnedPackage.delayDeltaMs
+                    || a.learnedPackage.allpassFreqHz != b->learnedPackage.allpassFreqHz
+                    || a.learnedPackage.allpassQ != b->learnedPackage.allpassQ))
+                return false;
+            if (a.hasManualBasePackage
+                && (a.manualBasePackage.delayDeltaMs != b->manualBasePackage.delayDeltaMs
+                    || a.manualBasePackage.allpassFreqHz != b->manualBasePackage.allpassFreqHz
+                    || a.manualBasePackage.allpassQ != b->manualBasePackage.allpassQ))
+                return false;
+            if (a.hasLikelyMidi && a.likelyMidi != b->likelyMidi)
+                return false;
+            if (a.hasLikelyPitchHz && a.likelyPitchHz != b->likelyPitchHz)
                 return false;
         }
         return true;
@@ -207,6 +228,7 @@ public:
             DynamicState manual = validAutoState (2, 3);
             manual.origin = DynamicStateOrigin::Manual;
             manual.hasLearnedPackage = false;
+            manual.learnedPackage = {};
             manual.hasManualBasePackage = true;
             manual.manualBasePackage = validPackage();
             expect (isValidDynamicState (manual));
@@ -217,6 +239,7 @@ public:
 
             DynamicState recognized = validAutoState (3, 3);
             recognized.hasLearnedPackage = false;
+            recognized.learnedPackage = {};
             expect (isValidDynamicState (recognized));
             recognized.manualTrim.delayTrimMs = 0.1f;
             expect (! isValidDynamicState (recognized));
@@ -227,6 +250,7 @@ public:
             expect (! isValidDynamicState (invalid));
             invalid = manual;
             invalid.hasManualBasePackage = false;
+            invalid.manualBasePackage = {};
             expect (! isValidDynamicState (invalid));
             invalid = manual;
             invalid.hasLearnedPackage = true;
@@ -297,6 +321,7 @@ public:
             expectWithinAbsoluteError (effectiveDelayDeltaMs, 3.0f, 1.0e-6f);
 
             state.hasLearnedPackage = false;
+            state.learnedPackage = {};
             state.manualTrim = makeZeroDynamicManualTrim();
             expect (getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelayDeltaMs));
             expectWithinAbsoluteError (effectiveDelayDeltaMs, 0.0f, 1.0e-6f);
@@ -308,6 +333,7 @@ public:
             auto manual = validAutoState (11, 3);
             manual.origin = DynamicStateOrigin::Manual;
             manual.hasLearnedPackage = false;
+            manual.learnedPackage = {};
             manual.hasManualBasePackage = true;
             manual.manualBasePackage = { -2.0f, 100.0f, 0.7f };
             manual.manualTrim.delayTrimMs = -1.0f;
@@ -369,6 +395,69 @@ public:
             expect (! child.hasProperty ("colour"));
             expect (! child.hasProperty ("effectivePackage"));
             expect (! child.hasProperty ("fadePosition"));
+        }
+
+        beginTest ("Inactive optional payloads are omitted and semantically ignored");
+        {
+            auto map = validMap (1);
+            auto& sourceState = map.states[0];
+            sourceState.hasLearnedPackage = false;
+            sourceState.learnedPackage = { -2.0f, 175.0f, 1.2f };
+            sourceState.hasManualBasePackage = false;
+            sourceState.manualBasePackage = { 2.0f, 120.0f, 1.1f };
+            sourceState.hasLikelyMidi = false;
+            sourceState.likelyMidi = 72;
+            sourceState.hasLikelyPitchHz = false;
+            sourceState.likelyPitchHz = 220.0f;
+
+            expect (isStructurallyValidDynamicStateMap (map));
+            const auto tree = dynamicStateMapToValueTree (map);
+            const auto child = onlyStateChild (tree);
+            expect (! child.hasProperty (DynamicStateMapKeys::learnedDelayDeltaMs));
+            expect (! child.hasProperty (DynamicStateMapKeys::learnedAllpassFreqHz));
+            expect (! child.hasProperty (DynamicStateMapKeys::learnedAllpassQ));
+            expect (! child.hasProperty (DynamicStateMapKeys::manualBaseDelayDeltaMs));
+            expect (! child.hasProperty (DynamicStateMapKeys::manualBaseAllpassFreqHz));
+            expect (! child.hasProperty (DynamicStateMapKeys::manualBaseAllpassQ));
+            expect (! child.hasProperty (DynamicStateMapKeys::likelyMidi));
+            expect (! child.hasProperty (DynamicStateMapKeys::likelyPitchHz));
+
+            const auto parsed = dynamicStateMapFromValueTree (tree);
+            const auto& parsedState = parsed.states[0];
+            expect (mapsEqual (map, parsed));
+            expect (! parsedState.hasLearnedPackage && parsedState.learnedPackage.delayDeltaMs == 0.0f
+                    && parsedState.learnedPackage.allpassFreqHz == 0.0f
+                    && parsedState.learnedPackage.allpassQ == 0.0f);
+            expect (! parsedState.hasManualBasePackage && parsedState.manualBasePackage.delayDeltaMs == 0.0f
+                    && parsedState.manualBasePackage.allpassFreqHz == 0.0f
+                    && parsedState.manualBasePackage.allpassQ == 0.0f);
+            expect (! parsedState.hasLikelyMidi && parsedState.likelyMidi == 0);
+            expect (! parsedState.hasLikelyPitchHz && parsedState.likelyPitchHz == 0.0f);
+
+            auto persistedStaleTree = tree.createCopy();
+            auto persistedStaleChild = onlyStateChild (persistedStaleTree);
+            persistedStaleChild.setProperty (DynamicStateMapKeys::learnedDelayDeltaMs, "malformed", nullptr);
+            persistedStaleChild.setProperty (DynamicStateMapKeys::manualBaseDelayDeltaMs, "malformed", nullptr);
+            persistedStaleChild.setProperty (DynamicStateMapKeys::likelyMidi, "malformed", nullptr);
+            persistedStaleChild.setProperty (DynamicStateMapKeys::likelyPitchHz, "malformed", nullptr);
+            expect (mapsEqual (map, dynamicStateMapFromValueTree (persistedStaleTree)));
+
+            const std::unique_ptr<juce::XmlElement> persistedStaleXml (persistedStaleTree.createXml());
+            expect (persistedStaleXml != nullptr);
+            if (persistedStaleXml != nullptr)
+            {
+                const auto xmlParsed = dynamicStateMapFromValueTree (
+                    juce::ValueTree::fromXml (*persistedStaleXml));
+                expect (mapsEqual (map, xmlParsed));
+                expect (xmlParsed.states[0].learnedPackage.delayDeltaMs == 0.0f
+                        && xmlParsed.states[0].manualBasePackage.delayDeltaMs == 0.0f
+                        && xmlParsed.states[0].likelyMidi == 0
+                        && xmlParsed.states[0].likelyPitchHz == 0.0f);
+            }
+
+            const auto activeMap = completePersistentMap();
+            expect (mapsEqual (activeMap, dynamicStateMapFromValueTree (
+                dynamicStateMapToValueTree (activeMap))));
         }
 
         beginTest ("ValueTree XML round-trip restores canonical string properties");
@@ -524,6 +613,7 @@ public:
             expect (first.isEquivalentTo (sorted));
             expect (sorted.getChild (0).getProperty (DynamicStateMapKeys::stateId).toString() == "1");
             expect (sorted.getChild (1).getProperty (DynamicStateMapKeys::stateId).toString() == "2");
+            expect (mapsEqual (reordered, dynamicStateMapFromValueTree (sorted)));
 
             auto malformed = first.createCopy();
             malformed.removeProperty (DynamicStateMapKeys::schemaVersion, nullptr);
