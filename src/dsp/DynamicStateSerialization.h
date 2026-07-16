@@ -75,6 +75,11 @@ namespace DynamicStateSerializationDetail
         return juce::Identifier (name);
     }
 
+    inline juce::Identifier id (const juce::String& name)
+    {
+        return juce::Identifier (name);
+    }
+
     inline juce::String fingerprintFeatureKey (int feature)
     {
         return juce::String (DynamicStateMapKeys::fingerprintFeaturePrefix) + juce::String (feature);
@@ -155,8 +160,15 @@ namespace DynamicStateSerializationDetail
                 ++begin;
 
             const auto exponentBegin = begin;
+            int exponentMagnitude = 0;
             while (begin != end && isAsciiDigit (*begin))
+            {
+                const int digit = *begin - '0';
+                if (exponentMagnitude > (999 - digit) / 10)
+                    return false;
+                exponentMagnitude = exponentMagnitude * 10 + digit;
                 ++begin;
+            }
             if (begin == exponentBegin)
                 return false;
         }
@@ -194,8 +206,14 @@ namespace DynamicStateSerializationDetail
         if (! getUtf8Range (text, begin, end) || ! hasStrictFiniteDecimalSyntax (begin, end))
             return false;
 
-        const auto result = std::from_chars (begin, end, value, std::chars_format::general);
-        return result.ec == std::errc {} && result.ptr == end && std::isfinite (value);
+        const double parsed = text.getDoubleValue();
+        if (! std::isfinite (parsed)
+            || parsed < -(double) std::numeric_limits<Float>::max()
+            || parsed > (double) std::numeric_limits<Float>::max())
+            return false;
+
+        value = (Float) parsed;
+        return std::isfinite (value);
     }
 
     inline bool readBool (const juce::ValueTree& tree, const char* key, bool& value)
@@ -267,9 +285,9 @@ namespace DynamicStateSerializationDetail
         const auto raw = tree.getProperty (property);
         if (raw.isInt() || raw.isInt64())
         {
-            const int64_t number = (int64_t) raw;
-            if (number < (int64_t) std::numeric_limits<int>::min()
-                || number > (int64_t) std::numeric_limits<int>::max())
+            const juce::int64 number = (juce::int64) raw;
+            if (number < (juce::int64) std::numeric_limits<int>::min()
+                || number > (juce::int64) std::numeric_limits<int>::max())
                 return false;
             value = (int) number;
             return true;
@@ -285,7 +303,7 @@ namespace DynamicStateSerializationDetail
         const auto raw = tree.getProperty (property);
         if (raw.isInt() || raw.isInt64())
         {
-            const int64_t number = (int64_t) raw;
+            const juce::int64 number = (juce::int64) raw;
             if (number < 0 || (uint64_t) number > (uint64_t) std::numeric_limits<uint32_t>::max())
                 return false;
             value = (uint32_t) number;
