@@ -28,8 +28,8 @@ namespace DynamicHotBranchContract
     inline constexpr float kReportedLatencyMs = DynamicStateMapContract::kReportedLatencyMs;
     inline constexpr float kMinimumPhysicalTapMs = 13.0f; // 20 + (-4) + (-3)
     inline constexpr float kMaximumPhysicalTapMs = 40.0f; // 20 + 17 + 3
-    inline constexpr float kServiceWarmupMs = 300.0f;
-    inline constexpr float kSharedHistoryMs = 340.0f; // 300 warmup + 40 max tap
+    inline constexpr double kServiceWarmupMs = 300.0;
+    inline constexpr double kSharedHistoryMs = 340.0; // 300 warmup + 40 max tap
     inline constexpr int kInterpolationGuardSamples = 8;
     inline constexpr double kDenormalThreshold = 1.0e-20;
 }
@@ -259,7 +259,8 @@ public:
             return false;
 
         const double latencySamplesD = std::ceil (newSampleRate * (double) kReportedLatencyMs / 1000.0);
-        const double historySamplesD = std::ceil (newSampleRate * (double) kSharedHistoryMs / 1000.0)
+        // Match ceil(sr * 0.340) + guard exactly; avoid float intermediate drift.
+        const double historySamplesD = std::ceil (newSampleRate * kSharedHistoryMs / 1000.0)
             + (double) kInterpolationGuardSamples;
         if (! DynamicHotBranchDetail::isFinite (latencySamplesD)
             || ! DynamicHotBranchDetail::isFinite (historySamplesD)
@@ -530,6 +531,8 @@ public:
         return result;
     }
 
+    // Processes up to prepared maxBlock samples. Larger requests must be split
+    // by the caller; this never allocates or resizes.
     DynamicHotBranchProcessResult process (const juce::AudioBuffer<float>& input, int numSamples) noexcept
     {
         DynamicHotBranchProcessResult result;

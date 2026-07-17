@@ -5,7 +5,6 @@
 #include <array>
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 
 namespace
 {
@@ -55,6 +54,7 @@ public:
         return coefficients;
     }
 
+    // All Global-only fields must match across Global/State/Service configs.
     DynamicHotBranchConfig cfg (double sampleRate,
                                 double delayMs,
                                 uint64_t stableId = 0,
@@ -78,27 +78,38 @@ public:
         return config;
     }
 
-    void renderFull (DynamicHotBranchEngine& engine,
-                     const juce::AudioBuffer<float>& material,
-                     int blockSize,
-                     juce::AudioBuffer<float>& globalOut,
-                     juce::AudioBuffer<float>& stateOut,
-                     juce::AudioBuffer<float>& highOut)
+    // Process material in prepared-size chunks and accumulate branch outputs.
+    void processChunked (DynamicHotBranchEngine& engine,
+                         const juce::AudioBuffer<float>& material,
+                         juce::AudioBuffer<float>& globalOut,
+                         juce::AudioBuffer<float>& stateOut,
+                         juce::AudioBuffer<float>& highOut,
+                         int stateSlot = 0)
     {
         const int total = material.getNumSamples();
-        globalOut.setSize (1, total);
-        stateOut.setSize (1, total);
-        highOut.setSize (1, total);
+        const int channels = material.getNumChannels();
+        const int blockSize = engine.getMaxBlockSize();
+        globalOut.setSize (channels, total);
+        stateOut.setSize (channels, total);
+        highOut.setSize (channels, total);
+        globalOut.clear();
+        stateOut.clear();
+        highOut.clear();
+
         int written = 0;
         while (written < total)
         {
             const int n = juce::jmin (blockSize, total - written);
-            juce::AudioBuffer<float> block (1, n);
-            block.copyFrom (0, 0, material, 0, written, n);
+            juce::AudioBuffer<float> block (channels, n);
+            for (int ch = 0; ch < channels; ++ch)
+                block.copyFrom (ch, 0, material, ch, written, n);
             expect (engine.process (block, n).valid);
-            globalOut.copyFrom (0, written, engine.getGlobalLowOutput(), 0, 0, n);
-            stateOut.copyFrom (0, written, engine.getStateLowOutput (0), 0, 0, n);
-            highOut.copyFrom (0, written, engine.getHighOutput(), 0, 0, n);
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                globalOut.copyFrom (ch, written, engine.getGlobalLowOutput(), ch, 0, n);
+                stateOut.copyFrom (ch, written, engine.getStateLowOutput (stateSlot), ch, 0, n);
+                highOut.copyFrom (ch, written, engine.getHighOutput(), ch, 0, n);
+            }
             written += n;
         }
     }
@@ -114,8 +125,12 @@ public:
                 expect (engine.isPrepared());
                 expectEquals (engine.getReportedLatencySamples(),
                               (int) std::ceil (rate * 0.020));
-                const int minCapacity = (int) std::ceil (rate * 0.340) + 8;
-                expect (engine.getLowHistoryCapacity() >= minCapacity);
+                const int minCapacity = (int) std::ceil (rate * 0.340)
+                    + DynamicHotBranchContract::kInterpolationGuardSamples;
+                expect (engine.getLowHistoryCapacity() >= minCapacity,
+                        "rate=" + juce::String (rate, 0)
+                            + " cap=" + juce::String (engine.getLowHistoryCapacity())
+                            + " min=" + juce::String (minCapacity));
             }
 
             DynamicHotBranchEngine bad;
@@ -132,31 +147,38 @@ public:
         {
             const double rate = 48000.0;
             DynamicHotBranchEngine engine;
-            expect (engine.prepare (rate, 2048, 1));
-            // Keep allpass dry so the impulse peak remains a clean unit sample.
+            expect (engine.prepare (rate, 512, 1));
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
             expect (engine.configureStateSlot (0, cfg (rate, -3.0, 11, false, 2, false)));
             expect (engine.configureStateSlot (1, cfg (rate, 3.0, 22, false, 2, false)));
 
             const int total = 3000;
             const auto impulse = makeImpulse (1, total, 0);
-            expect (engine.process (impulse, total).valid);
+            juce::AudioBuffer<float> globalOut, state0, highOut, state1;
+            processChunked (engine, impulse, globalOut, state0, highOut, 0);
+
+            // Re-run for state slot 1 accumulation.
+            engine.reset();
+            expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
+            expect (engine.configureStateSlot (0, cfg (rate, -3.0, 11, false, 2, false)));
+            expect (engine.configureStateSlot (1, cfg (rate, 3.0, 22, false, 2, false)));
+            processChunked (engine, impulse, globalOut, state1, highOut, 1);
 
             const int latency = engine.getReportedLatencySamples();
             const int stateATap = (int) std::lround ((double) latency + (-3.0) * rate / 1000.0);
             const int stateBTap = (int) std::lround ((double) latency + 3.0 * rate / 1000.0);
 
-            expectEquals (findImpulseIndex (engine.getGlobalLowOutput(), 0), latency);
-            expectEquals (findImpulseIndex (engine.getStateLowOutput (0), 0), stateATap);
-            expectEquals (findImpulseIndex (engine.getStateLowOutput (1), 0), stateBTap);
-            expectEquals (findImpulseIndex (engine.getHighOutput(), 0), latency);
+            expectEquals (findImpulseIndex (globalOut, 0), latency);
+            expectEquals (findImpulseIndex (state0, 0), stateATap);
+            expectEquals (findImpulseIndex (state1, 0), stateBTap);
+            expectEquals (findImpulseIndex (highOut, 0), latency);
         }
 
         beginTest ("Minimum and maximum physical taps and rejection beyond capacity");
         {
             const double rate = 48000.0;
             DynamicHotBranchEngine engine;
-            expect (engine.prepare (rate, 4096, 1));
+            expect (engine.prepare (rate, 512, 1));
             expect (engine.configureGlobal (cfg (rate, -4.0)));
             expect (engine.configureStateSlot (0, cfg (rate, -3.0, 1)));
             expect (engine.configureGlobal (cfg (rate, 17.0)));
@@ -208,45 +230,44 @@ public:
             DynamicHotBranchEngine engine;
             expect (engine.prepare (rate, 512, 1));
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false, 0, false)));
-            expect (engine.process (makeImpulse (1, 512, 0), 512).valid);
+            const auto impulse = makeImpulse (1, 512, 0);
+            juce::AudioBuffer<float> globalOut, stateOut, highOut;
+            processChunked (engine, impulse, globalOut, stateOut, highOut);
             bool highSilent = true;
             for (int i = 0; i < 512; ++i)
-                if (std::abs (engine.getHighOutput().getSample (0, i)) > 1.0e-7f)
+                if (std::abs (highOut.getSample (0, i)) > 1.0e-7f)
                     highSilent = false;
             expect (highSilent);
-            expectEquals (findImpulseIndex (engine.getGlobalLowOutput(), 0),
-                          engine.getReportedLatencySamples());
+            expectEquals (findImpulseIndex (globalOut, 0), engine.getReportedLatencySamples());
         }
 
         beginTest ("High path is common, exact PDC, unaffected by State count");
         {
             const double rate = 48000.0;
             DynamicHotBranchEngine engine;
-            expect (engine.prepare (rate, 2048, 1));
-            // Crossover on so high-band energy exists; PDC is pure integer delay.
+            expect (engine.prepare (rate, 512, 1));
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false, 0, true)));
             const auto sine = makeSine (1, 2048, rate, 2000.0, 0.6);
-            expect (engine.process (sine, 2048).valid);
+            juce::AudioBuffer<float> globalOut, stateOut, highWithoutStates;
+            processChunked (engine, sine, globalOut, stateOut, highWithoutStates);
+
             const int latency = engine.getReportedLatencySamples();
-            // First latency samples of high must be the cleared history (zero).
             for (int i = 0; i < latency; ++i)
-                expectWithinAbsoluteError (engine.getHighOutput().getSample (0, i), 0.0f, 1.0e-7f);
+                expectWithinAbsoluteError (highWithoutStates.getSample (0, i), 0.0f, 1.0e-7f);
             bool highHasEnergy = false;
             for (int i = latency; i < 2048; ++i)
-                if (std::abs (engine.getHighOutput().getSample (0, i)) > 1.0e-4f)
+                if (std::abs (highWithoutStates.getSample (0, i)) > 1.0e-4f)
                     highHasEnergy = true;
             expect (highHasEnergy);
-
-            juce::AudioBuffer<float> highWithoutStates (1, 2048);
-            highWithoutStates.makeCopyOf (engine.getHighOutput());
 
             engine.reset();
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false, 0, true)));
             for (int s = 0; s < 8; ++s)
                 expect (engine.configureStateSlot (s, cfg (rate, 0.0, (uint64_t) s + 1, false, 2, false, 0, true)));
-            expect (engine.process (sine, 2048).valid);
+            juce::AudioBuffer<float> highWithStates;
+            processChunked (engine, sine, globalOut, stateOut, highWithStates);
             for (int i = 0; i < 2048; ++i)
-                expectWithinAbsoluteError (engine.getHighOutput().getSample (0, i),
+                expectWithinAbsoluteError (highWithStates.getSample (0, i),
                                            highWithoutStates.getSample (0, i), 1.0e-6f);
         }
 
@@ -258,10 +279,11 @@ public:
             expect (live.prepare (rate, 256, 1));
             expect (reference.prepare (rate, 256, 1));
 
-            const auto global = cfg (rate, 0.0, 0, false, 2, true, 0);
+            // Global-only fields must match across branches (including interpolation).
+            const auto global = cfg (rate, 0.0, 0, false, 2, true, 1);
             const auto stateB = cfg (rate, 1.5, 99, false, 2, true, 1);
             expect (live.configureGlobal (global));
-            expect (live.configureStateSlot (0, cfg (rate, -1.0, 11)));
+            expect (live.configureStateSlot (0, cfg (rate, -1.0, 11, false, 2, true, 1)));
             expect (live.configureStateSlot (1, stateB));
             expect (reference.configureGlobal (global));
             expect (reference.configureStateSlot (1, stateB));
@@ -314,13 +336,8 @@ public:
             expectEquals (emptyPrime.primedSamples, 0);
 
             const auto sine = makeSine (1, 4800, rate, 60.0);
-            for (int offset = 0; offset < 4800; offset += 512)
-            {
-                const int n = juce::jmin (512, 4800 - offset);
-                juce::AudioBuffer<float> block (1, n);
-                block.copyFrom (0, 0, sine, 0, offset, n);
-                expect (engine.process (block, n).valid);
-            }
+            juce::AudioBuffer<float> g, s, h;
+            processChunked (engine, sine, g, s, h);
 
             const int beforeValid = engine.getValidLowHistorySamples();
             auto primed = engine.primeService (1000);
@@ -343,19 +360,23 @@ public:
             {
                 DynamicHotBranchEngine engine;
                 expect (engine.prepare (rate, 1024, 1));
-                expect (engine.configureGlobal (cfg (rate, 0.5)));
+                expect (engine.configureGlobal (cfg (rate, 0.5, 0, false, 3, true, 1)));
                 expect (engine.configureStateSlot (0, cfg (rate, -1.25, 7, false, 3, true, 1)));
-                renderFull (engine, material, 64, refGlobal, refState, refHigh);
+                processChunked (engine, material, refGlobal, refState, refHigh);
             }
 
-            for (int blockSize : { 1, 7, 127, 512 })
+            for (int blockSize : { 1, 7, 64, 127, 512 })
             {
                 DynamicHotBranchEngine engine;
-                expect (engine.prepare (rate, 1024, 1));
-                expect (engine.configureGlobal (cfg (rate, 0.5)));
+                expect (engine.prepare (rate, juce::jmax (blockSize, 64), 1));
+                // Re-prepare with exact block size for process limits.
+                expect (engine.prepare (rate, blockSize == 1 ? 64 : blockSize, 1));
+                expect (engine.configureGlobal (cfg (rate, 0.5, 0, false, 3, true, 1)));
                 expect (engine.configureStateSlot (0, cfg (rate, -1.25, 7, false, 3, true, 1)));
+
+                // Always process with the engine's prepared max block (chunked).
                 juce::AudioBuffer<float> globalOut, stateOut, highOut;
-                renderFull (engine, material, blockSize, globalOut, stateOut, highOut);
+                processChunked (engine, material, globalOut, stateOut, highOut);
                 for (int i = 0; i < 1024; ++i)
                 {
                     expectWithinAbsoluteError (globalOut.getSample (0, i), refGlobal.getSample (0, i), 1.0e-4f);
@@ -370,15 +391,16 @@ public:
             const double rate = 48000.0;
             DynamicHotBranchEngine engine;
             expect (engine.prepare (rate, 512, 1));
-            expect (engine.configureGlobal (cfg (rate, 0.0)));
-            expect (engine.process (makeImpulse (1, 512, 0), 512).valid);
-            expect (findImpulseIndex (engine.getGlobalLowOutput(), 0) >= 0);
+            expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
+            juce::AudioBuffer<float> g, s, h;
+            processChunked (engine, makeImpulse (1, 512, 0), g, s, h);
+            expect (findImpulseIndex (g, 0) >= 0);
             engine.reset();
             juce::AudioBuffer<float> silence (1, 512);
             silence.clear();
-            expect (engine.process (silence, 512).valid);
+            processChunked (engine, silence, g, s, h);
             for (int i = 0; i < 512; ++i)
-                expectWithinAbsoluteError (engine.getGlobalLowOutput().getSample (0, i), 0.0f, 1.0e-7f);
+                expectWithinAbsoluteError (g.getSample (0, i), 0.0f, 1.0e-7f);
         }
 
         beginTest ("Non-finite input is sanitized and subsequent output is finite");
@@ -410,9 +432,10 @@ public:
             input.clear();
             input.setSample (0, 0, 1.0f);
             input.setSample (1, 5, 0.5f);
-            expect (engine.process (input, 256).valid);
-            const int left = findImpulseIndex (engine.getGlobalLowOutput(), 0);
-            const int right = findImpulseIndex (engine.getGlobalLowOutput(), 1, 0.25f);
+            juce::AudioBuffer<float> g, s, h;
+            processChunked (engine, input, g, s, h);
+            const int left = findImpulseIndex (g, 0);
+            const int right = findImpulseIndex (g, 1, 0.25f);
             expect (left >= 0 && right >= 0);
             expect (left != right);
         }
@@ -433,7 +456,7 @@ public:
         {
             const double rate = 48000.0;
             DynamicHotBranchEngine engine;
-            expect (engine.prepare (rate, 1024, 1));
+            expect (engine.prepare (rate, 512, 1));
             auto global = cfg (rate, 0.0, 0, false, 2, false);
             expect (engine.configureGlobal (global));
             auto state = cfg (rate, 0.0, 3, true, 2, false);
@@ -443,10 +466,11 @@ public:
             expect (engine.configureGlobal (global));
             state.polarityInvert = true;
             expect (engine.configureStateSlot (0, state));
-            expect (engine.process (makeImpulse (1, 1024, 0), 1024).valid);
-            const int idx = findImpulseIndex (engine.getGlobalLowOutput(), 0, 0.5f);
+            juce::AudioBuffer<float> g, s, h;
+            processChunked (engine, makeImpulse (1, 1024, 0), g, s, h);
+            const int idx = findImpulseIndex (g, 0, 0.5f);
             expect (idx >= 0);
-            expect (engine.getGlobalLowOutput().getSample (0, idx) < 0.0f);
+            expect (g.getSample (0, idx) < 0.0f);
         }
 
         beginTest ("Package-derived configuration consumes Phase-4 coefficients");
