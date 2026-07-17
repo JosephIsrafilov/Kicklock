@@ -141,11 +141,17 @@ struct DynamicMatchCalibration
 
 inline bool isValidDynamicMatchCalibration (const DynamicMatchCalibration& calibration) noexcept
 {
+    // The v1 fingerprint distance is normalized to [0, 1], so both calibration
+    // bounds are constrained to that same range in addition to the ordering
+    // rule. A threshold or margin above 1 can never be reached by a real match
+    // and is rejected at validation (and therefore at XML/binary activation).
     return calibration.valid
         && std::isfinite (calibration.absoluteDistanceThreshold)
         && std::isfinite (calibration.ambiguityMargin)
         && calibration.absoluteDistanceThreshold > 0.0f
+        && calibration.absoluteDistanceThreshold <= 1.0f
         && calibration.ambiguityMargin > 0.0f
+        && calibration.ambiguityMargin <= 1.0f
         && calibration.ambiguityMargin <= calibration.absoluteDistanceThreshold;
 }
 

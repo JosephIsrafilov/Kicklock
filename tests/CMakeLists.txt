@@ -3,6 +3,7 @@ add_executable(KickLockDspTests
     DspTestMain.cpp
     DynamicModeTests.cpp
     DynamicStateMapTests.cpp
+    DynamicFingerprintTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     DynamicRuntimeTests.cpp
     LearnCoreTests.cpp
