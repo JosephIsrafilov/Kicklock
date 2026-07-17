@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   windows-pr:
-    name: Windows Release (build, tests, pluginval)
+    name: ${{ github.event_name == 'pull_request' && 'Windows Release (build, tests, pluginval)' || 'Windows PR Fast Internal' }}
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 25
@@ -39,7 +39,7 @@ jobs:
           @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase8 Phase7 Processor", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
 
   windows-full:
-    name: Windows Release (build, tests, pluginval)
+    name: ${{ github.event_name != 'pull_request' && 'Windows Release (build, tests, pluginval)' || 'Windows Full Internal' }}
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
@@ -73,7 +73,7 @@ jobs:
           path: KickLock-Windows-VST3.zip
 
   macos-pr:
-    name: macOS Release (universal build, tests, pluginval)
+    name: ${{ github.event_name == 'pull_request' && 'macOS Release (universal build, tests, pluginval)' || 'macOS PR Fast Internal' }}
     if: github.event_name == 'pull_request'
     runs-on: macos-14
     timeout-minutes: 25
@@ -98,7 +98,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   macos-full:
-    name: macOS Release (universal build, tests, pluginval)
+    name: ${{ github.event_name != 'pull_request' && 'macOS Release (universal build, tests, pluginval)' || 'macOS Full Internal' }}
     if: github.event_name != 'pull_request'
     runs-on: macos-14
     steps:
@@ -134,7 +134,7 @@ jobs:
             KickLock-Mac-AU.zip
 
   linux-pr:
-    name: Linux Debug (ASan + UBSan, tests only)
+    name: ${{ github.event_name == 'pull_request' && 'Linux Debug (ASan + UBSan, tests only)' || 'Linux PR Fast Internal' }}
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -165,7 +165,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   linux-full:
-    name: Linux Debug (ASan + UBSan, tests only)
+    name: ${{ github.event_name != 'pull_request' && 'Linux Debug (ASan + UBSan, tests only)' || 'Linux Full Internal' }}
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
