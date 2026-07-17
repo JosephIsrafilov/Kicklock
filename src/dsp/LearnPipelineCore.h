@@ -21,6 +21,9 @@
 #include "OfflineFundamentalEstimator.h"
 #include "OfflineNoteSegmenter.h"
 #include "PhaseBands.h"
+#include "DynamicLearnFingerprintExtraction.h"
+#include "DynamicLearnFormation.h"
+#include "DynamicFingerprintTrigger.h"
 
 struct LearnPipelineConfig
 {
@@ -39,6 +42,8 @@ struct LearnPipelineConfig
     // are never read from a live processor parameter.
     float preLearnAllpassFreqHz = 200.0f;
     float preLearnAllpassQ = 0.7f;
+    bool preLearnAllpassEnabled = false;
+    int preLearnAllpassStages = 2;
     std::vector<float> rotatorFreqs;
     std::vector<float> rotatorQs;
     std::vector<int> rotatorStages;
@@ -50,6 +55,158 @@ struct LearnPipelineConfig
 class LearnPipelineCore
 {
 public:
+    static LearnFinalizeResult finalizeDynamic (const std::vector<LearnHitWindow>& windows,
+                                                const LearnPipelineConfig& config,
+                                                const DynamicStateMap& previousMap,
+                                                const float* rawLoopBass,
+                                                const float* rawLoopKick,
+                                                int rawLoopSamples,
+                                                const LearnDiagnostics& transportDiagnostics = {},
+                                                const std::function<bool()>& shouldCancel = {})
+    {
+        LearnFinalizeResult result;
+        result.map = NoteMap::makeEmptyNoteMap();
+        result.diagnostics.capturedHits = (int) windows.size();
+        result.diagnostics.droppedQueueHits = transportDiagnostics.droppedQueueHits;
+        result.diagnostics.ignoredOverlappingTriggers = transportDiagnostics.ignoredOverlappingTriggers;
+        if (windows.empty() || rawLoopBass == nullptr || rawLoopKick == nullptr || rawLoopSamples <= 0
+            || ! std::isfinite (config.sampleRate) || config.sampleRate <= 0.0)
+        {
+            result.message = "No usable Dynamic Learn material.";
+            return result;
+        }
+
+        // The timing queue intentionally serializes long analysis windows, but
+        // its overlap rule must not change the fingerprint trigger contract.
+        // Re-run the shared raw detector offline and create timing-free hits for
+        // dense valid triggers that did not have a queue window.
+        std::vector<LearnHitWindow> capturedWindows = windows;
+        int nextSyntheticSequence = 0;
+        for (const auto& window : capturedWindows)
+            nextSyntheticSequence = std::max (nextSyntheticSequence, window.sequence + 1);
+        TransientDetector triggerDetector;
+        configureDynamicFingerprintTrigger (triggerDetector, config.sampleRate);
+        for (int sample = 0; sample < rawLoopSamples; ++sample)
+        {
+            if ((sample & 1023) == 0 && cancelled (shouldCancel))
+            {
+                result.message = "Learn cancelled.";
+                return result;
+            }
+            if (! triggerDetector.processSample (rawLoopKick[sample]))
+                continue;
+            const auto existing = std::find_if (capturedWindows.begin(), capturedWindows.end(), [sample] (const auto& window)
+            {
+                return window.absoluteSampleAtTrigger == sample;
+            });
+            if (existing == capturedWindows.end())
+            {
+                LearnHitWindow timingFree;
+                timingFree.sequence = nextSyntheticSequence++;
+                timingFree.absoluteSampleAtTrigger = sample;
+                capturedWindows.push_back (std::move (timingFree));
+            }
+        }
+        std::vector<std::pair<int, int64_t>> triggers;
+        triggers.reserve (capturedWindows.size());
+        for (const auto& window : capturedWindows)
+            if (window.absoluteSampleAtTrigger >= 0 && window.absoluteSampleAtTrigger < rawLoopSamples)
+                triggers.emplace_back (window.sequence, window.absoluteSampleAtTrigger);
+        const auto fingerprints = extractDynamicLearnFingerprints (rawLoopBass, rawLoopKick, rawLoopSamples,
+                                                                    config.sampleRate, triggers);
+        if (cancelled (shouldCancel))
+        {
+            result.message = "Learn cancelled.";
+            return result;
+        }
+
+        std::vector<DynamicLearnHit> hits;
+        hits.reserve (capturedWindows.size());
+        for (const auto& window : capturedWindows)
+        {
+            if (cancelled (shouldCancel))
+            {
+                result.message = "Learn cancelled.";
+                return result;
+            }
+            DynamicLearnHit hit;
+            hit.sequence = window.sequence;
+            hit.triggerSample = window.absoluteSampleAtTrigger;
+            const auto fingerprint = std::find_if (fingerprints.begin(), fingerprints.end(), [&] (const auto& sample)
+            {
+                return sample.sequence == window.sequence && sample.triggerSample == window.absoluteSampleAtTrigger;
+            });
+            if (fingerprint != fingerprints.end())
+            {
+                hit.fingerprintValidity = fingerprint->fingerprint.validity;
+                hit.fingerprint = fingerprint->fingerprint.toPrototype();
+            }
+
+            const int n = (int) std::min (window.bass.size(), window.kick.size());
+            if (n > 32 && finiteSignal (window.bass, n, shouldCancel) && finiteSignal (window.kick, n, shouldCancel))
+            {
+                const auto timing = PhaseFixEngine::analyze (window.bass.data(), window.kick.data(), n,
+                                                              config.sampleRate, config.maxDelayMs,
+                                                              config.delayInterpolation, false);
+                hit.timingEligible = timing.valid && timing.enoughSignal
+                    && std::isfinite (timing.bassDelayMs) && std::isfinite (timing.confidence);
+                hit.absoluteDelayMs = timing.bassDelayMs;
+                hit.polarityInvert = timing.bassPolarityInvert;
+                hit.timingConfidence = std::clamp (timing.confidence, 0.0f, 1.0f);
+                const auto multi = MultiBandCorrelation::analyze (window.bass.data(), window.kick.data(), n,
+                                                                   config.sampleRate);
+                hit.lowBandEnergy = weightedEnergy (multi);
+                if (hit.timingEligible && ! timing.largeTimingOffset && ! timing.requiresTimelineMove)
+                {
+                    const int frozenStages = std::clamp (config.preLearnAllpassStages, 2, 4);
+                    const auto search = FixedTimingRotatorSearch::search (
+                        window.bass.data(), window.kick.data(), n, config.sampleRate, timing.bassDelayMs,
+                        timing.bassPolarityInvert, config.delayInterpolation, config.stages(), config.freqs(),
+                        config.qs(), frozenStages, shouldCancel);
+                    const auto candidate = FixedTimingRotatorSearch::candidateForStage (search, frozenStages);
+                    hit.correctionBeneficial = candidate.valid && candidate.helps;
+                    hit.allpassFreqHz = candidate.allpassFreqHz;
+                    hit.allpassQ = candidate.allpassQ;
+                }
+                const auto pitch = OfflineFundamentalEstimator::estimate (window.bass.data(), n, config.sampleRate,
+                                                                            NoteMap::kFundamentalMinHz,
+                                                                            NoteMap::kFundamentalMaxHz);
+                if (pitch.valid && std::isfinite (pitch.frequencyHz) && pitch.frequencyHz > 0.0f)
+                {
+                    hit.hasLikelyPitchHz = true;
+                    hit.likelyPitchHz = pitch.frequencyHz;
+                    const int midi = NoteQuantizer::hzToMidi (pitch.frequencyHz);
+                    hit.hasLikelyMidi = midi >= 0;
+                    hit.likelyMidi = midi;
+                }
+            }
+            hits.push_back (hit);
+        }
+
+        DynamicLearnFormationContext context;
+        context.sampleRate = config.sampleRate;
+        context.crossoverEnabled = config.crossoverEnabled;
+        context.crossoverHz = config.crossoverHz;
+        context.allpassEnabled = config.preLearnAllpassEnabled;
+        context.fallbackAllpassFreqHz = config.preLearnAllpassFreqHz;
+        context.fallbackAllpassQ = config.preLearnAllpassQ;
+        context.allpassStages = config.preLearnAllpassStages;
+        context.delayInterpolationIndex = config.delayInterpolation == InterpolationType::Linear ? 0 : 1;
+        context.previousMap = previousMap;
+        const auto formation = formDynamicStateMap (hits, context, shouldCancel);
+        if (formation.diagnostics.cancelled)
+        {
+            result.message = "Learn cancelled.";
+            return result;
+        }
+        result.dynamicMap = formation.map;
+        result.hasDynamicStateMap = formation.valid;
+        result.valid = formation.valid;
+        result.message = formation.valid ? "Dynamic Learn formed State clusters."
+                                         : "Dynamic Learn found no repeatable State clusters.";
+        return result;
+    }
+
     // fullLoopBass: optional full Learn-session bass (same timeline as
     // LearnHitWindow::absoluteSampleAtTrigger). When present, note bucketing
     // uses offline non-causal segmentation over the whole loop instead of the

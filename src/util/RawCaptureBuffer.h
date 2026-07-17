@@ -20,9 +20,10 @@
 class RawCaptureBuffer
 {
 public:
-    void prepare (int capacitySamples)
+    void prepare (int capacitySamples, bool shouldWrap = true)
     {
         capacity = juce::jmax (1, capacitySamples);
+        circular = shouldWrap;
         captureBass.assign ((size_t) capacity, 0.0f);
         captureKick.assign ((size_t) capacity, 0.0f);
         writePos.store (0, std::memory_order_relaxed);
@@ -42,6 +43,9 @@ public:
     {
         const int cap = capacity;
         if (cap <= 0)
+            return;
+
+        if (! circular && filledSamples.load (std::memory_order_relaxed) >= cap)
             return;
 
         int w = writePos.load (std::memory_order_relaxed);
@@ -102,6 +106,7 @@ public:
 
 private:
     int capacity = 0;
+    bool circular = true;
     std::vector<float> captureBass, captureKick;
     std::atomic<int> writePos { 0 };
     std::atomic<int> filledSamples { 0 };

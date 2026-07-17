@@ -8,6 +8,7 @@ add_executable(KickLockDspTests
     DynamicHotBranchEngineTests.cpp
     DynamicSelectorSchedulerTests.cpp
     DynamicProductionRuntimeTests.cpp
+    DynamicLearnFormationTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     DynamicRuntimeTests.cpp
     LearnCoreTests.cpp
@@ -74,6 +75,7 @@ add_executable(KickLockFastTests
     DynamicHotBranchEngineTests.cpp
     DynamicSelectorSchedulerTests.cpp
     DynamicProductionRuntimeTests.cpp
+    DynamicLearnFormationTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     ProcessorTests.cpp
 )

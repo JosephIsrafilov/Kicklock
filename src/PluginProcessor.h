@@ -383,6 +383,7 @@ private:
     {
         ParameterSnapshot parameters;
         NotePhaseMapSnapshot noteMap;
+        DynamicStateMap dynamicStateMap;
     };
 
     std::atomic<float>* delayMsParam = nullptr;
@@ -549,6 +550,8 @@ private:
     std::mutex mapPublicationMutex;
     NotePhaseMapSnapshot pendingMapPublication = NoteMap::makeEmptyNoteMap();
     bool hasPendingMapPublication = false;
+    DynamicStateMap pendingDynamicMapPublication = makeEmptyDynamicStateMap();
+    bool hasPendingDynamicMapPublication = false;
     std::shared_ptr<std::atomic<int>> mapPublicationRetryObserver;
     std::shared_ptr<CallbackPauseControlForTesting> mapTimerCallbackPauseControlForTesting =
         std::make_shared<CallbackPauseControlForTesting>();
@@ -644,6 +647,8 @@ private:
     void endLearnQueueMutation() noexcept;
     void requestMapPublication (const NotePhaseMapSnapshot& map);
     bool retryMapPublication();
+    void requestDynamicMapPublication (const DynamicStateMap& map);
+    bool retryDynamicMapPublication();
     bool pauseLearnWorkerForTesting (LearnState state, uint64_t sessionId);
     void clearPendingLearnCandidate();
     void cancelLearnLocked();

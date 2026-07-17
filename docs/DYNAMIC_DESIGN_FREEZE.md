@@ -173,6 +173,35 @@ components); `PluginProcessor` stays a thin integration layer.
   measurements, DynamicWorkspace UI, an APVTS redesign, or any KLNoteMap
   conversion.
 
+## Phase 8 Dynamic Learn Formation
+
+- Learn forms Dynamic States from repeatable signed Phase-3 conflict
+  fingerprints, never MIDI notes, pitch buckets, or timeline regions. Pitch and
+  MIDI remain optional metadata only.
+- The worker replays the complete canonical raw mono bass/kick Learn timeline
+  through one continuous `DynamicFingerprintFrontEnd` from the Learn reset
+  boundary. It uses the same raw kick detector configuration as Phase 7 and
+  includes the trigger sample in every exact 4 ms capture window.
+- Three repeatable members form an Auto Candidate; five form an Auto Stable
+  State. Candidates are recognizable but route to Global until Stable evidence
+  makes correction eligible.
+- A recognizable cluster may have no confident package. It remains matchable,
+  has zero trim, and resolves as `GlobalRecognizedNoCorrection`.
+- Formation uses deterministic normalized-L1 clustering, robust component-wise
+  median prototypes, cohesion/correction repeatability, overlap ambiguity, and
+  matcher calibration. The map retains at most eight total States.
+- Global Base delay is selected from bounded candidate targets to maximize
+  weighted representable State coverage. Polarity and stage count remain Global;
+  State packages contain only delay delta, F, and Q and are never silently
+  clamped into the State range.
+- Existing Manual States and IDs/packages/trims are retained. New Auto clusters
+  reconcile one-to-one by confident fingerprint identity; otherwise IDs advance
+  monotonically from `nextStateId` and are not recycled.
+- Apply validates and publishes the New map through the Phase-7 SPSC queue at
+  the next audio boundary. Revert restores both DynamicStateMap and legacy
+  compatibility map exactly.
+- Phase 8 adds no Phase-9 measurements and no DynamicWorkspace UI.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.

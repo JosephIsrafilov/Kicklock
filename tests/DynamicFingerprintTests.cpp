@@ -700,7 +700,7 @@ public:
             expect (r.correctionAvailable);
         }
 
-        beginTest ("Auto Candidate is excluded; Manual Candidate and Stable Auto are eligible");
+        beginTest ("Candidates are recognizable but Auto Candidate has no correction");
         {
             const auto autoCandidate = matcherState (1, 0.0f, DynamicStateOrigin::Auto,
                                                      DynamicStateEvidence::Candidate, true, false, true);
@@ -708,9 +708,10 @@ public:
                                                        DynamicStateEvidence::Candidate, true, false, true);
             const auto map = matcherMap ({ autoCandidate, manualCandidate });
             const auto r = matchDynamicFingerprint (observation, map);
-            expectEquals (r.eligibleStateCount, 1);
-            expect (r.selectedStableStateId == 2u); // manual candidate selected
+            expectEquals (r.eligibleStateCount, 2);
+            expect (r.selectedStableStateId == 1u); // nearest Auto Candidate selected
             expectEquals ((int) r.decision, (int) DynamicMatchDecision::Matched);
+            expect (! r.correctionAvailable);
         }
 
         beginTest ("Recognized Stable Auto with no package matches with correctionAvailable=false");
@@ -734,14 +735,15 @@ public:
             expectEquals ((int) rBeyond.decision, (int) DynamicMatchDecision::Unknown);
         }
 
-        beginTest ("No eligible states yields NoEligibleStates");
+        beginTest ("A Candidate-only map remains recognizable without correction");
         {
             const auto onlyAutoCandidate = matcherState (1, 0.1f, DynamicStateOrigin::Auto,
                                                          DynamicStateEvidence::Candidate, true, false, true);
             const auto map = matcherMap ({ onlyAutoCandidate });
             const auto r = matchDynamicFingerprint (observation, map);
-            expectEquals ((int) r.decision, (int) DynamicMatchDecision::NoEligibleStates);
-            expectEquals (r.eligibleStateCount, 0);
+            expectEquals ((int) r.decision, (int) DynamicMatchDecision::Matched);
+            expectEquals (r.eligibleStateCount, 1);
+            expect (! r.correctionAvailable);
         }
 
         beginTest ("Eight-state map selects the nearest by identity");
