@@ -548,16 +548,17 @@ public:
             expectEquals ((int) engine.getStateInfo (0).stableStateId, 6);
 
             // Partial Service prime below the warm requirement is not warm.
+            // Fill shared history without Service active, then prime only 10 frames.
             engine.reset();
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
+            const int historyForShortPrime = globalNeed + 32;
+            processChunked (engine, makeSine (1, historyForShortPrime, rate, 60.0), g, s, h);
             expect (engine.configureService (cfg (rate, 0.0, 0, false, 2, false)));
-            // Enough history for a short prime, far below warmFramesNeeded.
-            processChunked (engine, makeSine (1, globalNeed / 2, rate, 60.0), g, s, h);
             expect (! engine.getServiceInfo().warm);
             auto partial = engine.primeService (10);
             expect (partial.valid);
-            expect (partial.primedSamples == 10);
-            expect (partial.fullyPrimed); // fully primed relative to the request only
+            expectEquals (partial.primedSamples, 10);
+            expect (partial.fullyPrimed); // request fully satisfied
             expect (partial.primedSamples < globalNeed);
             expect (! engine.getServiceInfo().warm);
             juce::ignoreUnused (stateNeed);
