@@ -54,14 +54,29 @@ public:
 
         sampleRate = sampleRateIn;
         prepared = true;
-        reset (0);
+        if (! reset (0))
+        {
+            // Unreachable in practice (0 is never INT64_MAX), but keep the
+            // prepared/reset contract honest if that policy ever changes.
+            prepared = false;
+            return false;
+        }
         return true;
     }
 
     // Resets to Global with an explicit absolute-sample origin. Clears events,
     // Hold, and any active fade. Does not touch Phase-5 branch DSP state.
-    void reset (int64_t originSample) noexcept
+    //
+    // int64 overflow policy: originSample == INT64_MAX is rejected so that at
+    // least one further sample (originSample + 1) always remains a
+    // representable expectedNextSample. Rejection leaves all prior state
+    // (gains, active target, Hold, queued events, expected sample position)
+    // completely unmutated.
+    bool reset (int64_t originSample) noexcept
     {
+        if (originSample == std::numeric_limits<int64_t>::max())
+            return false;
+
         queueCount = 0;
         nextInsertionSequence = 0;
 
@@ -84,6 +99,7 @@ public:
 
         diagnostics = DynamicSelectorDiagnostics {};
         diagnostics.safetySamples = safetySamples;
+        return true;
     }
 
     bool isPrepared() const noexcept { return prepared; }
@@ -154,22 +170,36 @@ public:
     // Explicit transport-discontinuity reset. Clears pending events, Hold, the
     // active fade, and snaps gains to Global. Updates the expected absolute
     // sample origin. Does not reset DynamicHotBranchEngine.
-    void reportTransportDiscontinuity (DynamicSelectorTransportReason reason,
+    //
+    // Returns false (rejecting newOriginSample == INT64_MAX per reset()'s
+    // overflow policy) without mutating any state, including the diagnostics'
+    // last decision.
+    bool reportTransportDiscontinuity (DynamicSelectorTransportReason reason,
                                        int64_t newOriginSample) noexcept
     {
         (void) reason;
         if (! prepared)
-            return;
-        reset (newOriginSample);
+            return false;
+        if (! reset (newOriginSample))
+            return false;
         diagnostics.lastDecision = DynamicSelectorDiagnostic::TransportReset;
+        return true;
     }
 
     // Advances exactly one absolute sample. `absoluteSample` must equal
     // getExpectedNextSample(); otherwise this call fails explicitly and the
     // caller must issue a transport-discontinuity reset.
+    //
+    // int64 overflow policy: absoluteSample == INT64_MAX is rejected before
+    // any mutation, since expectedNextSample = absoluteSample + 1 would
+    // otherwise overflow. A sample at INT64_MAX - 1 may still be processed
+    // once, leaving expectedNextSample at exactly INT64_MAX (representable);
+    // the scheduler simply cannot advance any further after that.
     bool advanceSample (int64_t absoluteSample, const DynamicSelectorBranchRoster& roster) noexcept
     {
-        if (! prepared || absoluteSample != expectedNextSample
+        if (! prepared
+            || absoluteSample == std::numeric_limits<int64_t>::max()
+            || absoluteSample != expectedNextSample
             || ! isValidDynamicSelectorBranchRoster (roster))
             return false;
 
@@ -212,9 +242,7 @@ public:
         using namespace DynamicSelectorContract;
         if (slot < 0 || slot >= kStateSlotCount)
             return false;
-        const int index = kFirstStateBranchIndex + slot;
-        return currentGains[(size_t) index] > kGainEpsilon
-            || (fadeActive && targetGains[(size_t) index] > kGainEpsilon);
+        return isBranchIndexLive (kFirstStateBranchIndex + slot);
     }
 
     bool isSemanticStateReferenced (uint64_t stableStateId) const noexcept
@@ -227,8 +255,7 @@ public:
                 && isStateSlotReferenced (slot))
                 return true;
         if (boundStableId[(size_t) kServiceBranchIndex] == stableStateId
-            && (currentGains[(size_t) kServiceBranchIndex] > kGainEpsilon
-                || (fadeActive && targetGains[(size_t) kServiceBranchIndex] > kGainEpsilon)))
+            && isBranchIndexLive (kServiceBranchIndex))
             return true;
         return false;
     }
@@ -464,7 +491,40 @@ private:
         return std::numeric_limits<double>::quiet_NaN();
     }
 
-    // Emergency safety net: if the identity bound to any currently-referenced
+    // Single source of truth for "is this gain-vector index currently live"
+    // (contributing audio now, or about to via an in-progress fade).
+    //
+    // currentGains alone is sufficient once settled: after a fade completes,
+    // computeSampleGains() canonicalizes fadeStartGains to currentGains and
+    // clears boundStableId for every index that settled to zero, so a
+    // completed fade's old source is never treated as live again (this is
+    // the fix for the ghost-reference bug: checkStaleReferences() used to
+    // read fadeStartGains unconditionally, so it kept seeing the pre-transition
+    // branch as "referenced" forever after the fade had already settled
+    // elsewhere).
+    //
+    // While a fade is active, targetGains/fadeStartGains are also consulted.
+    // In this implementation processEvent() and checkStaleReferences() always
+    // see the same roster snapshot within one advanceSample() call, so a
+    // fade's destination is already validated (warm/active) at the instant
+    // the fade starts and currentGains reaches a detectable nonzero value
+    // within the same call's computeSampleGains(); the extra targetGains/
+    // fadeStartGains checks are therefore defensive redundancy (e.g. against
+    // a future refactor that separates resolution from staleness checking
+    // across different roster snapshots) rather than covering a reachable gap
+    // today. They cost nothing and keep the policy correct under that change.
+    bool isBranchIndexLive (int index) const noexcept
+    {
+        using namespace DynamicSelectorContract;
+        if (currentGains[(size_t) index] > kGainEpsilon)
+            return true;
+        if (! fadeActive)
+            return false;
+        return targetGains[(size_t) index] > kGainEpsilon
+            || fadeStartGains[(size_t) index] > kGainEpsilon;
+    }
+
+    // Emergency safety net: if the identity bound to any currently-live
     // gain index no longer matches the live roster, the whole selection
     // collapses immediately to Global rather than routing a replaced branch's
     // audio under a stale gain.
@@ -476,20 +536,14 @@ private:
         for (int slot = 0; slot < kStateSlotCount; ++slot)
         {
             const int index = kFirstStateBranchIndex + slot;
-            const bool referenced = currentGains[(size_t) index] > kGainEpsilon
-                || targetGains[(size_t) index] > kGainEpsilon
-                || fadeStartGains[(size_t) index] > kGainEpsilon;
-            if (! referenced || boundStableId[(size_t) index] == 0)
+            if (boundStableId[(size_t) index] == 0 || ! isBranchIndexLive (index))
                 continue;
             const auto& state = roster.states[(size_t) slot];
             if (! (state.active && state.stableStateId == boundStableId[(size_t) index]))
                 stale = true;
         }
 
-        const bool serviceReferenced = currentGains[(size_t) kServiceBranchIndex] > kGainEpsilon
-            || targetGains[(size_t) kServiceBranchIndex] > kGainEpsilon
-            || fadeStartGains[(size_t) kServiceBranchIndex] > kGainEpsilon;
-        if (serviceReferenced && boundStableId[(size_t) kServiceBranchIndex] != 0)
+        if (boundStableId[(size_t) kServiceBranchIndex] != 0 && isBranchIndexLive (kServiceBranchIndex))
         {
             if (! (roster.serviceBindingValid && roster.service.active
                    && roster.serviceBoundStableStateId == boundStableId[(size_t) kServiceBranchIndex]))
@@ -544,6 +598,15 @@ private:
         if (fadePosition >= fadeLength)
         {
             currentGains = targetGains;
+            // Canonicalize the fade-start snapshot to the settled vector so a
+            // completed fade's old source is never read as "referenced" again
+            // (see isBranchIndexLive()), and drop bound identities for every
+            // index that settled to zero gain so a later roster change to
+            // that slot/Service binding cannot trigger a false stale collapse.
+            fadeStartGains = currentGains;
+            for (int i = 0; i < DynamicSelectorContract::kBranchCount; ++i)
+                if (currentGains[(size_t) i] <= DynamicSelectorContract::kGainEpsilon)
+                    boundStableId[(size_t) i] = 0;
             fadeActive = false;
         }
 
@@ -592,7 +655,13 @@ private:
         diagnostics.selectedBranchKind = activeTarget.kind;
         diagnostics.selectedStateSlot = activeTarget.stateSlot;
         diagnostics.holdEventCount = unresolvedHoldCount;
-        diagnostics.holdAgeSamples = expectedNextSample - lastConfidentReadySample;
+        // Overflow-safe: both operands are absolute sample positions bounded
+        // well under INT64_MAX by the reset()/advanceSample() overflow guards,
+        // and expectedNextSample only ever increases from lastConfidentReadySample
+        // forward, but this stays explicit and defined even if that invariant
+        // is ever violated rather than risking UB on the subtraction.
+        diagnostics.holdAgeSamples = (expectedNextSample >= lastConfidentReadySample)
+            ? (expectedNextSample - lastConfidentReadySample) : 0;
     }
 
     bool prepared = false;

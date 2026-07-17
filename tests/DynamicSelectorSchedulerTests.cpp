@@ -131,6 +131,8 @@ public:
         testTransportDiscontinuity();
         testNonFiniteRecovery();
         testRealTimeSafetyStructural();
+        testGhostReferenceLifecycle();
+        testInt64OverflowHardening();
     }
 
     // ---------------------------------------------------------------- A ----
@@ -857,7 +859,7 @@ public:
             submitAndAdvanceThrough (scheduler, roster, makeDecisionOnly (DynamicMatchDecision::Ambiguous), scheduler.getExpectedNextSample() + 10);
             expect (scheduler.getDiagnostics().holdEventCount == 1);
 
-            scheduler.reportTransportDiscontinuity (DynamicSelectorTransportReason::Seek, 500000);
+            expect (scheduler.reportTransportDiscontinuity (DynamicSelectorTransportReason::Seek, 500000));
             expect (scheduler.getDiagnostics().lastDecision == DynamicSelectorDiagnostic::TransportReset);
             expect (scheduler.getDiagnostics().holdEventCount == 0);
             expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::Global);
@@ -876,7 +878,7 @@ public:
                 expect (scheduler.advanceSample (i, roster));
             expect (scheduler.getDiagnostics().fadeActive);
 
-            scheduler.reportTransportDiscontinuity (DynamicSelectorTransportReason::LoopWrap, 0);
+            expect (scheduler.reportTransportDiscontinuity (DynamicSelectorTransportReason::LoopWrap, 0));
             expect (! scheduler.getDiagnostics().fadeActive);
             expectWithinAbsoluteError (scheduler.getCurrentGains()[(size_t) DynamicSelectorContract::kGlobalBranchIndex], 1.0f, 1.0e-6f);
         }
@@ -890,7 +892,7 @@ public:
             expect (scheduler.submitEvent (futureEvent));
             expect (scheduler.getDiagnostics().queuedEventCount == 1);
 
-            scheduler.reportTransportDiscontinuity (DynamicSelectorTransportReason::HostReset, 0);
+            expect (scheduler.reportTransportDiscontinuity (DynamicSelectorTransportReason::HostReset, 0));
             expect (scheduler.getDiagnostics().queuedEventCount == 0);
 
             // A block whose start sample does not equal the expected next
@@ -1010,6 +1012,281 @@ public:
         for (int ch = 0; ch < 2; ++ch)
             for (int i = 0; i < numSamples; ++i)
                 expect (std::isfinite (output.getSample (ch, i)));
+    }
+
+    // ------------------------------------------------ ghost references ----
+    void testGhostReferenceLifecycle()
+    {
+        const double sr = 48000.0;
+        const int64_t globalTap = (int64_t) std::ceil (sr * 20.0 / 1000.0);
+
+        beginTest ("A. Completed State A -> State B: replacing A afterward is not stale");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            auto roster = makeRoster (sr, (double) globalTap, 0, 10, true, (double) globalTap + 300.0);
+            roster.states[1] = makeBranchInfo (true, DynamicHotBranchKind::State, 20, (double) globalTap + 300.0, true);
+
+            runEventToCompletion (scheduler, roster, makeMatched (10), globalTap + 600);
+            expect (scheduler.getDiagnostics().selectedStateSlot == 0);
+
+            submitAndAdvanceThrough (scheduler, roster, makeMatched (20), scheduler.getExpectedNextSample() + 5);
+            // Run well past transition completion.
+            for (int64_t i = 0; i < scheduler.getTransitionSamples() + 10; ++i)
+                expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+            expect (! scheduler.getDiagnostics().fadeActive);
+            expect (scheduler.getDiagnostics().selectedStateSlot == 1);
+
+            // State A (slot 0) must no longer be referenced once settled on B.
+            expect (! scheduler.isStateSlotReferenced (0));
+            expect (! scheduler.isSemanticStateReferenced (10));
+
+            // Replace slot 0's identity entirely; this must NOT be seen as a
+            // stale reference to the still-selected State B.
+            roster.states[0] = makeBranchInfo (true, DynamicHotBranchKind::State, 999, (double) globalTap + 300.0, true);
+            const uint64_t staleBefore = scheduler.getDiagnostics().staleReferenceCount;
+            expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+
+            expect (scheduler.getDiagnostics().staleReferenceCount == staleBefore);
+            expect (scheduler.getDiagnostics().lastDecision != DynamicSelectorDiagnostic::StaleBranchReference);
+            expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::State);
+            expect (scheduler.getDiagnostics().selectedStateSlot == 1);
+            expectWithinAbsoluteError (scheduler.getCurrentGains()[(size_t) (DynamicSelectorContract::kFirstStateBranchIndex + 1)],
+                                      1.0f, 1.0e-6f);
+        }
+
+        beginTest ("B. Completed State -> Global: clearing the old State slot is not stale");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            auto roster = makeRoster (sr, (double) globalTap, 4, 55, true, (double) globalTap + 300.0);
+
+            runEventToCompletion (scheduler, roster, makeMatched (55), globalTap + 600);
+            expect (scheduler.getDiagnostics().selectedStateSlot == 4);
+
+            // correctionAvailable=false forces a real transition back to Global.
+            submitAndAdvanceThrough (scheduler, roster, makeMatched (55, false, false), scheduler.getExpectedNextSample() + 5);
+            for (int64_t i = 0; i < scheduler.getTransitionSamples() + 10; ++i)
+                expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+            expect (! scheduler.getDiagnostics().fadeActive);
+            expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::Global);
+
+            roster.states[4].active = false;
+            const uint64_t staleBefore = scheduler.getDiagnostics().staleReferenceCount;
+            expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+
+            expect (scheduler.getDiagnostics().staleReferenceCount == staleBefore);
+            expect (scheduler.getDiagnostics().lastDecision != DynamicSelectorDiagnostic::StaleBranchReference);
+            expectWithinAbsoluteError (scheduler.getCurrentGains()[(size_t) DynamicSelectorContract::kGlobalBranchIndex], 1.0f, 1.0e-6f);
+        }
+
+        beginTest ("C. Completed Service -> persistent State: changing the old Service binding is not stale");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            auto roster = makeRoster (sr, (double) globalTap, -1, 0, true, -1.0,
+                                      true, 77, true, true, (double) globalTap + 300.0);
+            roster.states[2] = makeBranchInfo (true, DynamicHotBranchKind::State, 88, (double) globalTap + 300.0, true);
+
+            runEventToCompletion (scheduler, roster, makeMatched (77), globalTap + 600);
+            expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::Service);
+
+            submitAndAdvanceThrough (scheduler, roster, makeMatched (88), scheduler.getExpectedNextSample() + 5);
+            for (int64_t i = 0; i < scheduler.getTransitionSamples() + 10; ++i)
+                expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+            expect (! scheduler.getDiagnostics().fadeActive);
+            expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::State);
+            expect (scheduler.getDiagnostics().selectedStateSlot == 2);
+
+            roster.serviceBoundStableStateId = 12345;
+            const uint64_t staleBefore = scheduler.getDiagnostics().staleReferenceCount;
+            expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+
+            expect (scheduler.getDiagnostics().staleReferenceCount == staleBefore);
+            expect (scheduler.getDiagnostics().lastDecision != DynamicSelectorDiagnostic::StaleBranchReference);
+            expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::State);
+            expectWithinAbsoluteError (scheduler.getCurrentGains()[(size_t) (DynamicSelectorContract::kFirstStateBranchIndex + 2)],
+                                      1.0f, 1.0e-6f);
+        }
+
+        beginTest ("D. Active-fade protection remains intact for both source and destination");
+        {
+            // D1: replacing the still-fading-out source mid-fade is stale.
+            {
+                DynamicSelectorScheduler scheduler;
+                expect (scheduler.prepare (sr));
+                auto roster = makeRoster (sr, (double) globalTap, 0, 30, true, (double) globalTap + 400.0);
+                roster.states[1] = makeBranchInfo (true, DynamicHotBranchKind::State, 40, (double) globalTap + 400.0, true);
+
+                runEventToCompletion (scheduler, roster, makeMatched (30), globalTap + 600);
+                submitAndAdvanceThrough (scheduler, roster, makeMatched (40), scheduler.getExpectedNextSample() + 5);
+                // Advance partway through the fade only (still active).
+                for (int64_t i = 0; i < scheduler.getTransitionSamples() / 2; ++i)
+                    expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+                expect (scheduler.getDiagnostics().fadeActive);
+
+                roster.states[0].stableStateId = 999; // source (A) still contributing gain
+                expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+                expect (scheduler.getDiagnostics().lastDecision == DynamicSelectorDiagnostic::StaleBranchReference);
+                expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::Global);
+            }
+
+            // D2: replacing a fade's destination immediately after the fade
+            // begins is still caught as stale (protection applies from the
+            // very first fade sample, not only after full settlement).
+            {
+                DynamicSelectorScheduler scheduler;
+                expect (scheduler.prepare (sr));
+                auto roster = makeRoster (sr, (double) globalTap, 0, 30, true, (double) globalTap + 400.0);
+
+                runEventToCompletion (scheduler, roster, makeMatched (30), globalTap + 600);
+                // No transition to Global here: use correctionAvailable=false
+                // path instead so the destination is Global, then go
+                // Global -> State again to exercise a fresh destination slot.
+                auto event = makeEvent (scheduler.getExpectedNextSample(), scheduler.getFingerprintSamples(), makeMatched (30, false, false));
+                expect (scheduler.submitEvent (event));
+                for (int64_t i = 0; i < scheduler.getTransitionSamples() + 10; ++i)
+                    expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+                expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::Global);
+
+                roster.states[1] = makeBranchInfo (true, DynamicHotBranchKind::State, 50, (double) globalTap + 400.0, true);
+                auto toB = makeEvent (scheduler.getExpectedNextSample(), scheduler.getFingerprintSamples(), makeMatched (50));
+                expect (scheduler.submitEvent (toB));
+                // Advance all the way to the event's readySample (events fire
+                // there, not at triggerSample) so the fade actually begins.
+                for (int64_t i = scheduler.getExpectedNextSample(); i <= toB.readySample; ++i)
+                    expect (scheduler.advanceSample (i, roster));
+                expect (scheduler.getDiagnostics().fadeActive);
+                expect (scheduler.getDiagnostics().selectedStateSlot == 1);
+
+                // Replace the destination's identity on the very next sample.
+                roster.states[1].stableStateId = 777;
+                expect (scheduler.advanceSample (scheduler.getExpectedNextSample(), roster));
+                expect (scheduler.getDiagnostics().lastDecision == DynamicSelectorDiagnostic::StaleBranchReference);
+                expect (scheduler.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::Global);
+            }
+        }
+    }
+
+    // ------------------------------------------------- int64 overflow ------
+    void testInt64OverflowHardening()
+    {
+        const double sr = 48000.0;
+        constexpr int64_t kMaxI64 = std::numeric_limits<int64_t>::max();
+
+        beginTest ("reset() rejects originSample == INT64_MAX without mutating state");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            const auto gainsBefore = scheduler.getCurrentGains();
+            const int64_t expectedBefore = scheduler.getExpectedNextSample();
+
+            expect (! scheduler.reset (kMaxI64));
+
+            expect (scheduler.getExpectedNextSample() == expectedBefore);
+            expect (scheduler.getCurrentGains() == gainsBefore);
+        }
+
+        beginTest ("reportTransportDiscontinuity() rejects INT64_MAX with the same policy");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            auto roster = makeRoster (sr, (double) std::ceil (sr * 20.0 / 1000.0), 0, 60, true,
+                                      (double) std::ceil (sr * 20.0 / 1000.0) + 300.0);
+            runEventToCompletion (scheduler, roster, makeMatched (60), 100);
+            const auto gainsBefore = scheduler.getCurrentGains();
+            const int64_t expectedBefore = scheduler.getExpectedNextSample();
+            const auto diagBefore = scheduler.getDiagnostics().lastDecision;
+
+            expect (! scheduler.reportTransportDiscontinuity (DynamicSelectorTransportReason::Seek, kMaxI64));
+
+            expect (scheduler.getExpectedNextSample() == expectedBefore);
+            expect (scheduler.getCurrentGains() == gainsBefore);
+            expect (scheduler.getDiagnostics().lastDecision == diagBefore);
+        }
+
+        beginTest ("advanceSample(INT64_MAX) fails explicitly without mutation; INT64_MAX-1 processes once");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            auto roster = makeRoster (sr, (double) std::ceil (sr * 20.0 / 1000.0));
+
+            expect (scheduler.reset (kMaxI64 - 1));
+            expect (scheduler.getExpectedNextSample() == kMaxI64 - 1);
+
+            // This is the one legitimate sample that can still be processed:
+            // afterward expectedNextSample becomes exactly INT64_MAX, which is
+            // representable (only advancing FROM INT64_MAX overflows).
+            expect (scheduler.advanceSample (kMaxI64 - 1, roster));
+            expect (scheduler.getExpectedNextSample() == kMaxI64);
+
+            const auto gainsBefore = scheduler.getCurrentGains();
+            const auto diagBefore = scheduler.getDiagnostics().lastDecision;
+
+            expect (! scheduler.advanceSample (kMaxI64, roster));
+
+            expect (scheduler.getExpectedNextSample() == kMaxI64);
+            expect (scheduler.getCurrentGains() == gainsBefore);
+            expect (scheduler.getDiagnostics().lastDecision == diagBefore);
+        }
+
+        beginTest ("Mixer block crossing INT64_MAX is rejected before any output is written");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            DynamicContinuityMixer mixer;
+            expect (mixer.prepare (1));
+            auto roster = makeRoster (sr, (double) std::ceil (sr * 20.0 / 1000.0));
+
+            expect (scheduler.reset (kMaxI64 - 2));
+
+            const int numSamples = 5; // touches kMaxI64-2 .. kMaxI64+2: must be rejected wholesale.
+            juce::AudioBuffer<float> globalLow (1, numSamples);
+            juce::AudioBuffer<float> serviceLow (1, numSamples);
+            juce::AudioBuffer<float> highBand (1, numSamples);
+            std::array<juce::AudioBuffer<float>, DynamicSelectorContract::kStateSlotCount> stateBuffers;
+            for (auto& buf : stateBuffers)
+                buf.setSize (1, numSamples);
+            globalLow.clear(); serviceLow.clear(); highBand.clear();
+            for (auto& buf : stateBuffers) buf.clear();
+
+            DynamicContinuityMixerInputs inputs;
+            inputs.globalLow = &globalLow;
+            inputs.serviceLow = &serviceLow;
+            inputs.commonHigh = &highBand;
+            for (int i = 0; i < DynamicSelectorContract::kStateSlotCount; ++i)
+                inputs.stateLow[(size_t) i] = &stateBuffers[(size_t) i];
+
+            juce::AudioBuffer<float> output (1, numSamples);
+            output.setSample (0, 0, 12345.0f); // sentinel: must remain untouched
+            expect (! mixer.renderBlock (scheduler, roster, inputs, numSamples, output));
+
+            expect (scheduler.getExpectedNextSample() == kMaxI64 - 2);
+            expectWithinAbsoluteError (output.getSample (0, 0), 12345.0f, 1.0e-6f);
+        }
+
+        beginTest ("Event trigger/ready overflow remains rejected");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            auto event = makeEvent (kMaxI64 - scheduler.getFingerprintSamples() + 1, scheduler.getFingerprintSamples(), makeMatched (1));
+            expect (! scheduler.submitEvent (event));
+            expect (scheduler.getDiagnostics().lastDecision == DynamicSelectorDiagnostic::InvalidEvent);
+        }
+
+        beginTest ("Hold-age diagnostics near the upper int64 boundary remain defined");
+        {
+            DynamicSelectorScheduler scheduler;
+            expect (scheduler.prepare (sr));
+            auto roster = makeRoster (sr, (double) std::ceil (sr * 20.0 / 1000.0));
+
+            expect (scheduler.reset (kMaxI64 - 5));
+            expect (scheduler.getDiagnostics().holdAgeSamples == 0);
+
+            expect (scheduler.advanceSample (kMaxI64 - 5, roster));
+            expect (scheduler.getDiagnostics().holdAgeSamples >= 0);
+            expect (scheduler.getDiagnostics().holdAgeSamples < 100);
+        }
     }
 
 private:

@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 #include <JuceHeader.h>
 
@@ -88,6 +89,13 @@ public:
                 return false;
 
         const int64_t blockStartSample = scheduler.getExpectedNextSample();
+
+        // int64 overflow policy: reject the whole block up front (before any
+        // output sample is written) if advancing through it would push the
+        // scheduler's absolute sample position to or past INT64_MAX. Matches
+        // DynamicSelectorScheduler::advanceSample()'s own INT64_MAX guard.
+        if (blockStartSample > std::numeric_limits<int64_t>::max() - (int64_t) numSamples)
+            return false;
 
         for (int i = 0; i < numSamples; ++i)
         {
