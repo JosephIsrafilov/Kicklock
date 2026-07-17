@@ -16,6 +16,7 @@
 #include "util/HitCaptureBuffer.h"
 #include "util/LearnHitQueue.h"
 #include "util/NoteMapUpdateQueue.h"
+#include "util/DynamicStateMapUpdateQueue.h"
 #include "dsp/CorrelationMeter.h"
 #include "dsp/RealtimeMultiBandMeter.h"
 #include "dsp/FractionalDelayLine.h"
@@ -30,6 +31,10 @@
 #include "dsp/MultibandPhaseCore.h"
 #include "dsp/NotePhaseMap.h"
 #include "dsp/DynamicRuntimeSelector.h"
+#include "dsp/DynamicStateMap.h"
+#include "dsp/DynamicStateSerialization.h"
+#include "dsp/DynamicMapSourceResolver.h"
+#include "dsp/DynamicProductionRuntime.h"
 #include "dsp/TransientPunchMeter.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
@@ -277,6 +282,48 @@ public:
         return activeNoteMap;
     }
     int getDynamicLastMidiForTesting() const noexcept { return dynamicNoteState.lastMidi; }
+
+    // ---- Phase 7 New DynamicStateMap runtime test hooks (not UI behavior) ----
+    // Simulates the message-thread publish and reads the audio-owned active map.
+    // The audio thread never locks mapMutex; publication uses the RT-safe SPSC
+    // queue, and messageOwnedDynamicStateMap remains available for retry.
+    bool publishDynamicStateMapForTesting (const DynamicStateMap& map) noexcept
+    {
+        {
+            const std::lock_guard<std::mutex> lock (mapMutex);
+            messageOwnedDynamicStateMap = map;
+        }
+        return dynamicMapUpdateQueue.push (map);
+    }
+    const DynamicStateMap& getActiveDynamicStateMapForTesting() const noexcept
+    {
+        return activeDynamicStateMap;
+    }
+    DynamicStateMap getMessageOwnedDynamicStateMapForTesting() const
+    {
+        const std::lock_guard<std::mutex> lock (mapMutex);
+        return messageOwnedDynamicStateMap;
+    }
+    DynamicMapSource getActiveDynamicMapSourceForTesting() const noexcept
+    {
+        return activeDynamicMapSource.load (std::memory_order_acquire);
+    }
+    uint64_t getDynamicSelectedStableStateIdForTesting() const noexcept
+    {
+        return dynamicRuntime.getSelectedStableStateId();
+    }
+    DynamicSelectorDiagnostics getDynamicSelectorDiagnosticsForTesting() const noexcept
+    {
+        return dynamicRuntime.getSelectorDiagnostics();
+    }
+    DynamicProductionDiagnostics getDynamicProductionDiagnosticsForTesting() const noexcept
+    {
+        return dynamicRuntime.getDiagnostics();
+    }
+    bool getDynamicServiceBindingValidForTesting() const noexcept
+    {
+        return dynamicRuntime.getServiceBindingValid();
+    }
     NotePhaseMapSnapshot getMessageOwnedNoteMapForTesting() const;
     uint64_t getLearnSessionIdForTesting() const noexcept
     {
@@ -445,6 +492,29 @@ private:
     RuntimeConflictFingerprintCapture runtimeFingerprintCapture;
     NoteMapUpdateQueue noteMapUpdateQueue;
     NotePhaseMapSnapshot activeNoteMap;
+
+    // Phase 7: New DynamicStateMap production runtime. messageOwnedDynamicStateMap
+    // is message-thread-owned (guarded by mapMutex, reused from the legacy map);
+    // activeDynamicStateMap is audio-thread-owned and only ever replaced by
+    // draining the RT-safe SPSC queue. The audio thread never locks mapMutex.
+    DynamicProductionRuntime dynamicRuntime;
+    DynamicStateMapUpdateQueue dynamicMapUpdateQueue;
+    DynamicStateMap activeDynamicStateMap = makeEmptyDynamicStateMap();
+    DynamicStateMap messageOwnedDynamicStateMap = makeEmptyDynamicStateMap();
+    std::atomic<DynamicMapSource> activeDynamicMapSource { DynamicMapSource::None };
+    int dynamicRuntimeChannels = 2;
+    bool dynamicHadSidechain = false;
+    bool lastBlockUsedNewDynamic = false;
+    // Internal transport classification for the New runtime (host position is
+    // only used to distinguish continuous playback / valid loop wrap / seek /
+    // stop-start, never as the scheduler's absolute time base).
+    bool dynamicHasLastPlayheadPosition = false;
+    int64_t dynamicLastPlayheadEndSample = 0;
+    bool dynamicWasPlaying = false;
+    juce::AudioBuffer<float> dynamicRawBassMono;
+    juce::AudioBuffer<float> dynamicRawKickMono;
+    juce::AudioBuffer<float> dynamicRuntimeOutput;
+
     std::atomic<bool> learnActive { false };
     std::atomic<LearnState> learnState { LearnState::Idle };
     std::atomic<uint64_t> learnSessionCounter { 0 };
@@ -554,6 +624,17 @@ private:
     void ensureRevertBundleCaptured();
     void serviceLearnAudioCommands() noexcept;
     void drainPendingMapUpdates() noexcept;
+    // Phase 7 New Dynamic runtime helpers (audio-thread, allocation-free).
+    void drainDynamicMapUpdates() noexcept;
+    void classifyDynamicTransportForNewRuntime (int numSamples) noexcept;
+    void fillRawDynamicFingerprintInputs (const juce::AudioBuffer<float>& mainBuffer,
+                                          const juce::AudioBuffer<float>& sidechainBuffer,
+                                          bool hasSidechain, int numSamples) noexcept;
+    // Renders the New Dynamic correction into mainBuffer (shadowOnly discards the
+    // corrective output but still advances the runtime for bypass continuity).
+    void renderNewDynamicRuntime (juce::AudioBuffer<float>& mainBuffer,
+                                  const juce::AudioBuffer<float>& sidechainBuffer,
+                                  bool hasSidechain, int numSamples, bool shadowOnly) noexcept;
     void runLearnWorker (uint64_t sessionId, LearnSessionContext context);
     bool prepareLearnQueueIfSafe();
     bool resetLearnQueueIfSafe();

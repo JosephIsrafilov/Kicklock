@@ -2,6 +2,7 @@
 /build-codex/
 /build-codex-asan/
 /build/
+/build-phase*/
 /build-phase5/
 /build2/
 /build-release/
@@ -31,6 +32,8 @@ Thumbs.db
 
 # Project test outputs
 /test_out.txt
+/full_run_phase7.log
+/full_run_release.log
 
 # Local tools
 /.claude/

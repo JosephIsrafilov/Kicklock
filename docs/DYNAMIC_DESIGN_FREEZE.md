@@ -97,6 +97,82 @@ a MIDI note or DAW timeline section. MIDI and pitch are optional metadata.
   distance logic, compute or configure State/Service packages, or connect to
   PluginProcessor. That connection is Phase 7's responsibility.
 
+## Phase 7 Production Runtime Integration
+
+Phase 7 activates the DynamicStateMap runtime in the product audio path via
+`DynamicProductionRuntime` (a thin coordinator over the frozen Phase 1-6
+components); `PluginProcessor` stays a thin integration layer.
+
+- Source priority uses `resolveDynamicMapSource()`. In `correction_mode ==
+  Static` the existing MultibandPhaseCore path runs unchanged and Dynamic
+  arbitration is bypassed entirely. In `correction_mode == Dynamic` priority is:
+  runtime-eligible New DynamicStateMap → new production runtime; else usable
+  legacy KLNoteMap → exact existing `selectDynamicRuntime()` + MultibandPhaseCore;
+  else a deterministic latency-compensated base/Global fallback with no
+  fabricated State selection. KLNoteMap is never converted to a DynamicStateMap
+  and legacy compatibility is unchanged.
+- New-map Global Base ownership: when New is the active source, the map's
+  `DynamicGlobalBase` is the runtime source of truth for base delay, polarity,
+  crossover enable/frequency, allpass enable/frequency/Q, stage count and delay
+  interpolation. Static APVTS values are never substituted for those fields. The
+  only live parameters controlling the New runtime are `correction_mode` and
+  `dynamic_strength`. No APVTS parameter is written from the audio thread.
+- Map ownership/publication: `messageOwnedDynamicStateMap` (message thread,
+  guarded by the existing map mutex) and `activeDynamicStateMap` (audio thread).
+  Publication is an allocation-free SPSC `DynamicStateMapUpdateQueue` modelled on
+  `NoteMapUpdateQueue`; the audio thread drains it at the block boundary, newest
+  complete update wins, and a malformed map activates as a complete empty map.
+  The audio thread never locks the map mutex.
+- Persistence: `getStateInformation()` removes any existing KLDynamicStateMap
+  child and appends exactly one `dynamicStateMapToValueTree(messageOwned…)`
+  alongside the independently-persisted KLNoteMap; `setStateInformation()`
+  locates KLDynamicStateMap independently, parses it through
+  `dynamicStateMapFromValueTree()` (missing or malformed → empty, never a prior
+  project's map), and republishes through the RT-safe queue.
+- Raw train/serve fingerprint wiring: the canonical raw mono-compatible bass and
+  kick-sidechain pair (before correction, not user-crossover filtered, not
+  double-filtered through the raw low-pass) is fed to the Phase-3
+  `DynamicFingerprintCaptureBank`. A dedicated runtime kick trigger detector,
+  separate from the scope/punch/Learn/legacy detectors, drives capture requests.
+  The legacy `RuntimeConflictFingerprintCapture` is unchanged and serves only the
+  legacy path.
+- Sample-accurate production order per bounded chunk: snapshot raw bass/kick →
+  trigger/`requestCapture()` (with the trigger sample inside the window) →
+  `pushSample()` → drain completed observations → `matchDynamicFingerprint()` →
+  submit a `DynamicSelectorEvent` preserving absolute trigger/ready samples →
+  configure packages when the map generation / Strength / rate changed → process
+  the original bass through the hot-branch engine → build the roster → render
+  through the continuity mixer, advancing capture and scheduler to the same
+  internal sample boundary. Results are invariant across process-block
+  partitions (1, 7, 64, 127, 512, prepared maximum). No `AudioBuffer::setSize`
+  in the callback.
+- Service cold-branch policy: an explicit semantic binding
+  (`serviceBoundStableStateId`, `serviceBindingValid`). Priority is warm
+  persistent State → warm Service bound to the same stable ID → Global. Service
+  is configured from the same Phase-4 package, explicitly primed from shared
+  history at the chunk boundary (never per sample), and selectable only when
+  warm; a warm persistent branch always wins and the binding is cleared on
+  map/source/reset invalidation. Ambiguous/Unknown never bind Service.
+- Internal monotonic scheduler timeline: the capture bank and scheduler share an
+  internal monotonic sample position; the looping host timeline is never the
+  scheduler's absolute time. The host position only classifies transport.
+- Loop/seek/stop policy: a valid loop wrap while the host keeps playing
+  preserves runtime continuity (it can never become an int64 scheduler rewind);
+  a seek/jump or stop→start clears captures, events, Hold, the Service binding
+  and stale delay/history and returns the scheduler to Global; prepare/host reset
+  fully resets. Missing playhead fields never cause repeated resets.
+- Bypass policy: shadow advance. Under host bypass the New runtime is advanced
+  with the real input but its corrective output is discarded, preserving
+  hot-branch and timestamp continuity so unbypass replays no stale history. The
+  audible bypass output remains the fixed 20 ms delayed dry path and diagnostic
+  observation stays active.
+- Latency: every path reports and produces exactly the existing 20 ms PDC
+  latency; the New runtime introduces no second latency layer, and the common
+  high band is added exactly once by the continuity mixer.
+- Scope: Phase 7 does not add New Learn clustering/State formation, Phase-9
+  measurements, DynamicWorkspace UI, an APVTS redesign, or any KLNoteMap
+  conversion.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.

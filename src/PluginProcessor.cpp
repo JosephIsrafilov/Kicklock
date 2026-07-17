@@ -1170,6 +1170,29 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
     const std::lock_guard<std::mutex> lock (mapMutex);
     activeNoteMap = messageOwnedNoteMap;
   }
+
+  // Phase 7: New DynamicStateMap production runtime. Prepared with the same
+  // sample rate / max block / channel count as the Static path, so its reported
+  // 20 ms PDC latency matches exactly. The audio-owned active map is seeded from
+  // the message-owned map without locking on the audio thread later.
+  dynamicRuntimeChannels = juce::jlimit (1, 2, numChannels);
+  dynamicMapUpdateQueue.prepare();
+  {
+    const std::lock_guard<std::mutex> lock (mapMutex);
+    activeDynamicStateMap = messageOwnedDynamicStateMap;
+  }
+  dynamicRuntime.prepare (sampleRate, juce::jmax (1, samplesPerBlock), dynamicRuntimeChannels);
+  dynamicRuntime.activateMap (activeDynamicStateMap);
+  dynamicRawBassMono.setSize (1, juce::jmax (1, samplesPerBlock), false, false, true);
+  dynamicRawKickMono.setSize (1, juce::jmax (1, samplesPerBlock), false, false, true);
+  dynamicRuntimeOutput.setSize (dynamicRuntimeChannels, juce::jmax (1, samplesPerBlock), false, false, true);
+  activeDynamicMapSource.store (DynamicMapSource::None, std::memory_order_release);
+  dynamicHadSidechain = false;
+  lastBlockUsedNewDynamic = false;
+  dynamicHasLastPlayheadPosition = false;
+  dynamicLastPlayheadEndSample = 0;
+  dynamicWasPlaying = false;
+
   dynamicNoteState.reset();
   dynamicSilenceResetSamples = juce::jmax (1, (int) std::round (sampleRate * 0.25));
   dynamicFallbackActive.store (false, std::memory_order_release);
@@ -1476,6 +1499,7 @@ void KickLockAudioProcessor::processBlockBypassed(
   juce::ScopedNoDenormals noDenormals;
   serviceLearnAudioCommands();
   drainPendingMapUpdates();
+  drainDynamicMapUpdates();
   dynamicNoteState.reset();
   dynamicFallbackActive.store(false, std::memory_order_release);
   dynamicMapStale.store(false, std::memory_order_release);
@@ -1515,6 +1539,32 @@ void KickLockAudioProcessor::processBlockBypassed(
   processObservationCapture(mainBuffer, sidechainBuffer, hasSidechain,
                             numSamples, observationStats);
   updateActivityAndSignalState(hasSidechain, observationStats, numSamples);
+
+  // Bypass shadow policy: when New Dynamic would be the active source, advance
+  // the runtime (capture, matcher, scheduler, hot branches) with the real input
+  // but DISCARD its corrective output, so hot-branch and timestamp continuity is
+  // preserved and unbypass never replays stale pre-bypass history. The audible
+  // output remains the fixed 20 ms delayed dry path below, and the New selection
+  // diagnostics stay at their bypass defaults (published only when audible).
+  {
+    const auto bypassCorrectionMode =
+        correctionModeParam != nullptr && correctionModeParam->load() > 0.5f
+            ? CorrectionMode::Dynamic : CorrectionMode::Static;
+    DynamicMapSource bypassSource = DynamicMapSource::None;
+    if (bypassCorrectionMode == CorrectionMode::Dynamic)
+      bypassSource = resolveDynamicMapSource(activeDynamicStateMap, activeNoteMap);
+    const bool shadowNew = bypassCorrectionMode == CorrectionMode::Dynamic
+        && bypassSource == DynamicMapSource::NewDynamicStateMap
+        && dynamicRuntime.isPrepared()
+        && mainBuffer.getNumChannels() >= dynamicRuntimeChannels;
+    activeDynamicMapSource.store(bypassCorrectionMode == CorrectionMode::Dynamic
+                                     ? bypassSource : DynamicMapSource::None,
+                                 std::memory_order_release);
+    if (shadowNew)
+      renderNewDynamicRuntime(mainBuffer, sidechainBuffer, hasSidechain, numSamples,
+                              /*shadowOnly=*/true);
+    lastBlockUsedNewDynamic = shadowNew;
+  }
 
   // Under bypass the dry relationship is what the user hears.
   liveMatchValid.store(hasSidechain && dryMultiBandMeter.hasSignal());
@@ -1623,6 +1673,7 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   juce::ScopedNoDenormals noDenormals;
   serviceLearnAudioCommands();
   drainPendingMapUpdates();
+  drainDynamicMapUpdates();
 
   bool bpmDetected = false;
   float bpmValue = 0.0f;
@@ -1745,8 +1796,27 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   const float trackedHz = pitchTracker.getFrequencyHz();
   trackedBassHz.store(trackedHz);
 
+  // Phase 7 source arbitration. Static bypasses Dynamic arbitration entirely.
+  // In Dynamic, priority is New DynamicStateMap > Legacy KLNoteMap > None, via
+  // resolveDynamicMapSource(). The New runtime path owns its own global base and
+  // selection and does not run the Static/Legacy MultibandPhaseCore correction.
+  DynamicMapSource dynamicSource = DynamicMapSource::None;
+  if (correctionMode == CorrectionMode::Dynamic)
+    dynamicSource = resolveDynamicMapSource(activeDynamicStateMap, activeNoteMap);
+  const bool useNewDynamic = correctionMode == CorrectionMode::Dynamic
+      && dynamicSource == DynamicMapSource::NewDynamicStateMap
+      && dynamicRuntime.isPrepared()
+      && mainBuffer.getNumChannels() >= dynamicRuntimeChannels;
+  activeDynamicMapSource.store(correctionMode == CorrectionMode::Dynamic
+                                   ? dynamicSource : DynamicMapSource::None,
+                               std::memory_order_release);
+
   float allpassSmoothingSeconds = 0.030f;
-  if (correctionMode == CorrectionMode::Static) {
+  if (useNewDynamic) {
+    // The New Dynamic runtime owns global base + selection; it is rendered
+    // below in place of the Static/Legacy MultibandPhaseCore path, and it
+    // publishes its own dynamicFallbackActive/activeMidiNote diagnostics.
+  } else if (correctionMode == CorrectionMode::Static) {
     const bool pitchFollowActive = pitchTrackParam != nullptr &&
                                    pitchTrackParam->load() > 0.5f &&
                                    phaseFilterEnabled && trackedHz > 0.0f;
@@ -1812,9 +1882,18 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   updateActivityAndSignalState(hasSidechain, observationStats, numSamples);
 
   const bool neutral = isBassProcessingNeutral();
-  const bool processingNeeded = !neutral;
+  // The New Dynamic runtime always applies the map's correction, so the
+  // processed meter reflects what is heard even when the Static parameters are
+  // neutral.
+  const bool processingNeeded = !neutral || useNewDynamic;
 
-  multibandCore.process(mainBuffer, sidechainBuffer, coreParams, numSamples);
+  if (useNewDynamic)
+    renderNewDynamicRuntime(mainBuffer, sidechainBuffer, hasSidechain, numSamples,
+                            /*shadowOnly=*/false);
+  else
+    multibandCore.process(mainBuffer, sidechainBuffer, coreParams, numSamples);
+
+  lastBlockUsedNewDynamic = useNewDynamic;
 
   if (hasSidechain) {
     const int mainChannels = mainBuffer.getNumChannels();
@@ -2262,15 +2341,24 @@ void KickLockAudioProcessor::getStateInformation(juce::MemoryBlock &destData) {
 
   auto state = apvts.copyState();
   for (int i = state.getNumChildren() - 1; i >= 0; --i)
-    if (state.getChild(i).hasType(juce::Identifier(NoteMapKeys::tree)))
+  {
+    const auto child = state.getChild(i);
+    if (child.hasType(juce::Identifier(NoteMapKeys::tree))
+        || child.hasType(juce::Identifier(DynamicStateMapKeys::tree)))
       state.removeChild(i, nullptr);
+  }
 
   NotePhaseMapSnapshot appliedMap;
+  DynamicStateMap appliedDynamicMap;
   {
     const std::lock_guard<std::mutex> lock(mapMutex);
     appliedMap = messageOwnedNoteMap;
+    appliedDynamicMap = messageOwnedDynamicStateMap;
   }
+  // The legacy KLNoteMap and the new KLDynamicStateMap are persisted as two
+  // independent children so old projects keep working and both coexist.
   state.appendChild(noteMapToValueTree(appliedMap), nullptr);
+  state.appendChild(dynamicStateMapToValueTree(appliedDynamicMap), nullptr);
   std::unique_ptr<juce::XmlElement> xml(state.createXml());
   copyXmlToBinary(*xml, destData);
 }
@@ -2286,9 +2374,19 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
   if (xml != nullptr && xml->hasTagName(apvts.state.getType())) {
     auto restoredState = juce::ValueTree::fromXml(*xml);
     NotePhaseMapSnapshot restoredMap = NoteMap::makeEmptyNoteMap();
+    // The new KLDynamicStateMap is located independently of the legacy KLNoteMap.
+    // A missing child restores an empty map (never a previous project's data);
+    // a malformed child is rejected by dynamicStateMapFromValueTree() and also
+    // restores empty. A legacy map is never converted into a DynamicStateMap.
+    DynamicStateMap restoredDynamicMap = makeEmptyDynamicStateMap();
     for (int i = 0; i < restoredState.getNumChildren(); ++i)
-      if (restoredState.getChild(i).hasType(juce::Identifier(NoteMapKeys::tree)))
-        restoredMap = noteMapFromValueTree(restoredState.getChild(i));
+    {
+      const auto child = restoredState.getChild(i);
+      if (child.hasType(juce::Identifier(NoteMapKeys::tree)))
+        restoredMap = noteMapFromValueTree(child);
+      else if (child.hasType(juce::Identifier(DynamicStateMapKeys::tree)))
+        restoredDynamicMap = dynamicStateMapFromValueTree(child);
+    }
     auto findParameterState = [&restoredState](const char* id) {
       for (const auto& child : restoredState) {
         if (child.hasType("PARAM")
@@ -2394,19 +2492,27 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
     {
       const std::lock_guard<std::mutex> lock(mapMutex);
       messageOwnedNoteMap = restoredMap;
+      messageOwnedDynamicStateMap = restoredDynamicMap;
     }
     resetResolvedLearnStateToIdle();
     requestMapPublication(restoredMap);
+    // Publish the restored DynamicStateMap through the RT-safe SPSC queue. If
+    // the queue is transiently full the message-owned copy is retained and
+    // prepareToPlay() re-seeds the audio-owned map from it.
+    dynamicMapUpdateQueue.push(restoredDynamicMap);
   }
   else
   {
     const auto empty = NoteMap::makeEmptyNoteMap();
+    const auto emptyDynamic = makeEmptyDynamicStateMap();
     {
       const std::lock_guard<std::mutex> lock(mapMutex);
       messageOwnedNoteMap = empty;
+      messageOwnedDynamicStateMap = emptyDynamic;
     }
     resetResolvedLearnStateToIdle();
     requestMapPublication(empty);
+    dynamicMapUpdateQueue.push(emptyDynamic);
   }
 }
 
@@ -2950,6 +3056,175 @@ void KickLockAudioProcessor::drainPendingMapUpdates() noexcept
   }
   if (replaced)
     dynamicNoteState.reset();
+}
+
+void KickLockAudioProcessor::drainDynamicMapUpdates() noexcept
+{
+  // Audio thread owns activeDynamicStateMap. Drain the RT-safe SPSC queue; the
+  // newest complete update wins. A malformed/empty map arrives as a complete
+  // empty map (the deserializer never produces a partial one), so it activates
+  // as empty rather than partially. The runtime is only re-activated when a new
+  // update was actually drained; its package cache additionally skips redundant
+  // branch reconfiguration for identical generation/strength/rate.
+  bool replaced = false;
+  DynamicStateMap pending;
+  while (dynamicMapUpdateQueue.pop(pending))
+  {
+    activeDynamicStateMap = pending;
+    replaced = true;
+  }
+  if (replaced)
+    dynamicRuntime.activateMap(activeDynamicStateMap);
+}
+
+void KickLockAudioProcessor::classifyDynamicTransportForNewRuntime(int numSamples) noexcept
+{
+  // The New runtime's capture bank and scheduler run on an internal monotonic
+  // timeline; the host position is used ONLY to classify transport changes and
+  // is never the scheduler's absolute time. A missing playhead / missing sample
+  // position must not cause repeated resets.
+  bool hasPosition = false;
+  bool isPlaying = false;
+  bool isLooping = false;
+  int64_t startSample = 0;
+
+  if (auto* playHead = getPlayHead())
+  {
+    if (const auto position = playHead->getPosition())
+    {
+      isPlaying = position->getIsPlaying();
+      isLooping = position->getIsLooping();
+      if (const auto timeInSamples = position->getTimeInSamples())
+      {
+        hasPosition = true;
+        startSample = *timeInSamples;
+      }
+    }
+  }
+
+  // Stop -> start: restart from a deterministic Global state; never reuse a
+  // pre-stop fingerprint result.
+  if (isPlaying && ! dynamicWasPlaying && dynamicHasLastPlayheadPosition)
+    dynamicRuntime.notifyTransportReset(DynamicProductionTransportReason::StopStart);
+
+  if (hasPosition && dynamicHasLastPlayheadPosition && isPlaying && dynamicWasPlaying)
+  {
+    const int64_t expected = dynamicLastPlayheadEndSample;
+    if (startSample != expected)
+    {
+      const bool backward = startSample < expected;
+      if (backward && isLooping)
+      {
+        // Valid loop wrap while the host keeps playing: preserve runtime
+        // continuity. The internal monotonic timeline is unaffected, so the
+        // lower host position can never become an int64 scheduler rewind.
+        dynamicRuntime.notifyTransportReset(DynamicProductionTransportReason::LoopWrap);
+      }
+      else
+      {
+        // Any other non-contiguous jump is a seek: clear captures, events,
+        // Hold, Service binding, and stale delay/history so old delayed audio
+        // cannot leak into the new position.
+        dynamicRuntime.notifyTransportReset(DynamicProductionTransportReason::Seek);
+      }
+    }
+  }
+
+  dynamicWasPlaying = isPlaying;
+  if (hasPosition)
+  {
+    dynamicHasLastPlayheadPosition = true;
+    dynamicLastPlayheadEndSample = startSample + (int64_t) juce::jmax(0, numSamples);
+  }
+}
+
+void KickLockAudioProcessor::fillRawDynamicFingerprintInputs(
+    const juce::AudioBuffer<float>& mainBuffer,
+    const juce::AudioBuffer<float>& sidechainBuffer, bool hasSidechain,
+    int numSamples) noexcept
+{
+  float* bassMono = dynamicRawBassMono.getWritePointer(0);
+  float* kickMono = dynamicRawKickMono.getWritePointer(0);
+
+  const int mainCh = mainBuffer.getNumChannels();
+  const float mainNorm = mainCh > 0 ? 1.0f / (float)mainCh : 0.0f;
+  for (int i = 0; i < numSamples; ++i)
+  {
+    float sum = 0.0f;
+    for (int ch = 0; ch < mainCh; ++ch)
+      sum += mainBuffer.getSample(ch, i);
+    bassMono[i] = sum * mainNorm;
+  }
+
+  if (hasSidechain)
+  {
+    const int scCh = sidechainBuffer.getNumChannels();
+    const float scNorm = scCh > 0 ? 1.0f / (float)scCh : 0.0f;
+    for (int i = 0; i < numSamples; ++i)
+    {
+      float sum = 0.0f;
+      for (int ch = 0; ch < scCh; ++ch)
+        sum += sidechainBuffer.getSample(ch, i);
+      kickMono[i] = sum * scNorm;
+    }
+  }
+  else
+  {
+    for (int i = 0; i < numSamples; ++i)
+      kickMono[i] = 0.0f;
+  }
+}
+
+void KickLockAudioProcessor::renderNewDynamicRuntime(
+    juce::AudioBuffer<float>& mainBuffer,
+    const juce::AudioBuffer<float>& sidechainBuffer, bool hasSidechain,
+    int numSamples, bool shadowOnly) noexcept
+{
+  // Entering the New source (from Static / Legacy / None / a previous non-New
+  // block): clear stale runtime state so no old State identity is routed. Both
+  // paths report and produce exactly 20 ms latency, so no second latency layer
+  // is introduced.
+  if (! lastBlockUsedNewDynamic)
+  {
+    dynamicRuntime.notifyTransportReset(DynamicProductionTransportReason::HostReset);
+    dynamicHasLastPlayheadPosition = false;
+    dynamicWasPlaying = false;
+    dynamicHadSidechain = hasSidechain;
+  }
+  else
+  {
+    classifyDynamicTransportForNewRuntime(numSamples);
+  }
+
+  // Sidechain-loss transition (once, on the edge): return to Global, clear Hold,
+  // captures and the Service binding; keep the bass path latency-correct.
+  if (dynamicHadSidechain && ! hasSidechain)
+    dynamicRuntime.notifySidechainLost();
+  dynamicHadSidechain = hasSidechain;
+
+  fillRawDynamicFingerprintInputs(mainBuffer, sidechainBuffer, hasSidechain, numSamples);
+
+  const double strength =
+      dynamicStrengthParam != nullptr ? (double)dynamicStrengthParam->load() : 1.0;
+
+  const bool ok = dynamicRuntime.process(
+      mainBuffer, dynamicRawBassMono.getReadPointer(0),
+      hasSidechain ? dynamicRawKickMono.getReadPointer(0) : nullptr, hasSidechain,
+      strength, dynamicRuntimeOutput, numSamples);
+
+  if (! shadowOnly)
+  {
+    if (ok)
+      for (int ch = 0; ch < dynamicRuntimeChannels && ch < mainBuffer.getNumChannels(); ++ch)
+        mainBuffer.copyFrom(ch, 0, dynamicRuntimeOutput, ch, 0, numSamples);
+
+    // Publish New Dynamic diagnostics: fallback active whenever selection is not
+    // a confidently corrected State/Service branch; the map is never stale on
+    // this path (an ineligible map would not have arbitrated to New).
+    dynamicFallbackActive.store(dynamicRuntime.isFallbackActive(), std::memory_order_release);
+    dynamicMapStale.store(false, std::memory_order_release);
+    activeMidiNote.store(dynamicRuntime.getSelectedLikelyMidi(), std::memory_order_release);
+  }
 }
 
 bool KickLockAudioProcessor::beginLearn()
