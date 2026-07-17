@@ -2,87 +2,132 @@ name: Build KickLock
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+    branches: [main, master]
+  workflow_dispatch:
 
-# Cancel an in-flight run for the same branch/PR when a new commit is pushed.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  windows-release:
+  windows-pr:
     name: Windows Release (build, tests, pluginval)
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure fast validation
+        shell: bash
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=OFF
+      - name: Build fast tests
+        shell: bash
+        run: cmake --build build --target KickLockFastTests --parallel 4
+      - name: Run fast tests
+        shell: bash
+        run: |
+          start=$SECONDS
+          build/tests/KickLockFastTests Phase8 Phase7 Processor
+          elapsed=$((SECONDS - start))
+          {
+            echo "## PR FAST"
+            echo "- Build target: KickLockFastTests"
+            echo "- Categories: Phase8 Phase7 Processor"
+            echo "- pluginval executed: no"
+            echo "- Universal build: no"
+            echo "- Test elapsed: ${elapsed}s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  windows-full:
+    name: Windows Release (build, tests, pluginval)
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure CMake
+      - uses: actions/checkout@v4
+      - name: Configure full validation
         shell: bash
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
-
-      - name: Build plugin
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
+      - name: Build plugin and tests
         shell: bash
-        run: cmake --build build --config Release --parallel 4
-
-      - name: Build tests
+        run: cmake --build build --parallel 4
+      - name: Run full tests and pluginval
         shell: bash
-        run: cmake --build build --config Release --target KickLockDspTests --parallel 4
-
-      # Runs the DSP/processor/RT-safety/serialization/Stabilization unit tests
-      # and the pluginval strictness-10 VST3 validation registered by
-      # cmake/Pluginval.cmake.
-      - name: Run tests + pluginval (ctest)
-        shell: bash
-        run: ctest --test-dir build -C Release --output-on-failure
-
+        run: |
+          start=$SECONDS
+          build/tests/KickLockDspTests
+          ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
+          elapsed=$((SECONDS - start))
+          {
+            echo "## FULL"
+            echo "- Build target: KickLock + KickLockDspTests"
+            echo "- Categories: all"
+            echo "- pluginval executed: yes"
+            echo "- Universal build: no"
+            echo "- Test elapsed: ${elapsed}s"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Zip VST3
         run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
-
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: KickLock-Windows
           path: KickLock-Windows-VST3.zip
 
-  macos-release:
+  macos-pr:
     name: macOS Release (universal build, tests, pluginval)
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure fast validation
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DKICKLOCK_ENABLE_PLUGINVAL=OFF
+      - name: Build fast tests
+        run: cmake --build build --target KickLockFastTests --parallel 4
+      - name: Run fast tests
+        run: |
+          start=$SECONDS
+          build/tests/KickLockFastTests Phase8 Phase7 Processor
+          elapsed=$((SECONDS - start))
+          {
+            echo "## PR FAST"
+            echo "- Build target: KickLockFastTests"
+            echo "- Categories: Phase8 Phase7 Processor"
+            echo "- pluginval executed: no"
+            echo "- Universal build: no (arm64 only)"
+            echo "- Test elapsed: ${elapsed}s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  macos-full:
+    name: macOS Release (universal build, tests, pluginval)
+    if: github.event_name != 'pull_request'
     runs-on: macos-14
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure CMake
-        shell: bash
+      - uses: actions/checkout@v4
+      - name: Configure full validation
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DKICKLOCK_ENABLE_PLUGINVAL=ON
+      - name: Build plugin and tests
+        run: cmake --build build --parallel 4
+      - name: Run full tests and pluginval
         run: |
-          # Build Universal Binary for Intel and Apple Silicon Macs.
-          cmake -B build -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-                -DKICKLOCK_ENABLE_PLUGINVAL=ON
-
-      - name: Build plugin
-        shell: bash
-        run: cmake --build build --config Release --parallel 4
-
-      - name: Build tests
-        shell: bash
-        run: cmake --build build --config Release --target KickLockDspTests --parallel 4
-
-      # ctest runs the unit tests and the pluginval VST3 validation. The
-      # universal test binary runs natively on the Apple-Silicon runner.
-      - name: Run tests + pluginval (ctest)
-        shell: bash
-        run: ctest --test-dir build -C Release --output-on-failure
-
+          start=$SECONDS
+          build/tests/KickLockDspTests
+          ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
+          elapsed=$((SECONDS - start))
+          {
+            echo "## FULL"
+            echo "- Build target: KickLock + KickLockDspTests"
+            echo "- Categories: all"
+            echo "- pluginval executed: yes"
+            echo "- Universal build: yes"
+            echo "- Test elapsed: ${elapsed}s"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Zip VST3
         run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "KickLock-Mac-VST3.zip"
-
       - name: Zip AU
         run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/AU/KickLock.component" "KickLock-Mac-AU.zip"
-
       - name: Upload Mac Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -91,77 +136,87 @@ jobs:
             KickLock-Mac-VST3.zip
             KickLock-Mac-AU.zip
 
-  linux-sanitizers:
+  linux-pr:
     name: Linux Debug (ASan + UBSan, tests only)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Install JUCE Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev libx11-dev libxext-dev libxinerama-dev \
-            libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev \
-            libgl1-mesa-dev libcurl4-openssl-dev ninja-build
-
-      - name: Configure CMake (Debug + sanitizers)
-        run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-                -DKICKLOCK_ENABLE_PLUGINVAL=OFF \
-                -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
-                -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-
-      # Tests only under sanitizers; no release artifacts are produced here.
-      - name: Build tests
-        run: cmake --build build --target KickLockDspTests --parallel 4
-
-      # KICKLOCK_SKIP_TIMED_ASSERTS disables the two wall-clock performance
-      # gates (meaningless under instrumentation); every correctness, RT-safety,
-      # serialization and Stabilization assertion still runs under ASan/UBSan.
-      #
-      # Per-category invocation matches publish-macos-release.yml. Phase5
-      # (LearnOrchestration) depends on real-time worker scheduling and flakes
-      # under ASan (assertion timing, not heap/UB reports). Windows and macOS
-      # Release jobs exercise Phase5 against the same source on this push.
-      - name: Run tests (ASan + UBSan)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev ninja-build
+      - name: Configure fast sanitizers
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKICKLOCK_ENABLE_PLUGINVAL=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build fast tests
+        run: cmake --build build --target KickLockFastTests --parallel 4
+      - name: Run focused sanitizers
         env:
           KICKLOCK_SKIP_TIMED_ASSERTS: "1"
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: |
-          test_binary="build/tests/KickLockDspTests"
-          test -x "$test_binary"
-          # ponytail: Phase5 depends on real-time worker scheduling and flakes under ASan;
-          # Windows and macOS release builds exercise it against the same push.
-          for category in DSP Phase1 Phase2 Phase3 Phase4 P10 Processor Stabilization "UI Helpers"; do
-            "$test_binary" "$category"
-          done
+          start=$SECONDS
+          build/tests/KickLockFastTests Phase8 Phase7 DSP Processor
+          elapsed=$((SECONDS - start))
+          {
+            echo "## PR FAST"
+            echo "- Build target: KickLockFastTests"
+            echo "- Categories: Phase8 Phase7 DSP Processor"
+            echo "- pluginval executed: no"
+            echo "- Universal build: no"
+            echo "- Test elapsed: ${elapsed}s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  linux-full:
+    name: Linux Debug (ASan + UBSan, tests only)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install JUCE Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev ninja-build
+      - name: Configure full sanitizers
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKICKLOCK_ENABLE_PLUGINVAL=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build full tests
+        run: cmake --build build --target KickLockDspTests --parallel 4
+      - name: Run full sanitizer-safe categories
+        env:
+          KICKLOCK_SKIP_TIMED_ASSERTS: "1"
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: |
+          start=$SECONDS
+          build/tests/KickLockDspTests DSP Phase1 Phase2 Phase3 Phase4 Phase7 Phase8 P10 Processor Stabilization "UI Helpers"
+          elapsed=$((SECONDS - start))
+          {
+            echo "## FULL"
+            echo "- Build target: KickLockDspTests"
+            echo "- Categories: sanitizer-safe full set including Phase7 Phase8"
+            echo "- pluginval executed: no"
+            echo "- Universal build: no"
+            echo "- Test elapsed: ${elapsed}s"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   release:
     name: Publish Nightly Release
-    needs: [ windows-release, macos-release, linux-sanitizers ]
-    runs-on: ubuntu-latest
+    needs: [windows-full, macos-full, linux-full]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Create or Update Nightly Release
-        uses: ncipollo/release-action@v1
+      - uses: ncipollo/release-action@v1
         with:
           tag: nightly
-          name: "Nightly Build"
-          body: "Auto-generated nightly build."
+          name: Nightly Build
+          body: Auto-generated nightly build.
           allowUpdates: true
           removeArtifacts: true
           replacesArtifacts: true
           prerelease: true
           makeLatest: true
-          artifacts: "artifacts/**/*.zip"
+          artifacts: artifacts/**/*.zip
           token: ${{ secrets.GITHUB_TOKEN }}

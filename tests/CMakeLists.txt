@@ -65,3 +65,38 @@ if(MSVC)
 endif()
 
 add_test(NAME KickLockDspTests COMMAND KickLockDspTests)
+
+add_executable(KickLockFastTests
+    DspTestMain.cpp
+    DynamicStateMapTests.cpp
+    DynamicFingerprintTests.cpp
+    DynamicPackageMorpherTests.cpp
+    DynamicHotBranchEngineTests.cpp
+    DynamicSelectorSchedulerTests.cpp
+    DynamicProductionRuntimeTests.cpp
+    LegacyDynamicCompatibilityTests.cpp
+    ProcessorTests.cpp
+)
+
+target_include_directories(KickLockFastTests
+    PRIVATE
+        ../src
+        ../src/dsp
+        ../src/util
+        ${CMAKE_BINARY_DIR}/KickLock_artefacts/JuceLibraryCode
+)
+
+target_compile_features(KickLockFastTests PRIVATE cxx_std_20)
+set_target_properties(KickLockFastTests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+target_link_libraries(KickLockFastTests
+    PRIVATE
+        KickLock
+        juce::juce_core
+        juce::juce_dsp
+        juce::juce_audio_utils
+)
+
+if(MSVC)
+    target_link_options(KickLockFastTests PRIVATE "/STACK:8388608")
+    target_compile_options(KickLockFastTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
+endif()
