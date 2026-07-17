@@ -421,8 +421,6 @@ public:
         if (! prepared || slot < 0 || slot >= kStateSlots || ! globalConfigured
             || ! DynamicHotBranchDetail::isValidBranchConfig (config, DynamicHotBranchKind::State, sampleRate))
             return false;
-        if (config.active && ! DynamicHotBranchDetail::globalFieldsMatch (globalBranch.config, config))
-            return false;
         if (config.active)
         {
             for (int i = 0; i < kStateSlots; ++i)
@@ -431,21 +429,23 @@ public:
                     return false;
         }
 
+        // Normalize to live Global-only fields before equality / storage.
+        DynamicHotBranchConfig normalized = config;
+        copyGlobalOnlyFields (normalized, globalBranch.config);
+
         auto& branch = stateBranches[(size_t) slot];
-        if (DynamicHotBranchDetail::configsEqual (branch.config, config))
+        if (DynamicHotBranchDetail::configsEqual (branch.config, normalized))
             return true;
 
-        const bool identityChanged = branch.config.stableStateId != config.stableStateId
-            || branch.config.active != config.active;
+        const bool identityChanged = branch.config.stableStateId != normalized.stableStateId
+            || branch.config.active != normalized.active;
         const int previousInterp = branch.config.delayInterpolationIndex;
-        branch.config = config;
-        // Always store the live Global-only fields even if the caller passed them.
-        copyGlobalOnlyFields (branch.config, globalBranch.config);
-        branch.physicalTapSamples = config.active
-            ? physicalTapSamplesFor (config.effectiveAbsoluteDelayMs) : 0.0;
-        branch.warmFramesNeeded = config.active
+        branch.config = normalized;
+        branch.physicalTapSamples = normalized.active
+            ? physicalTapSamplesFor (normalized.effectiveAbsoluteDelayMs) : 0.0;
+        branch.warmFramesNeeded = normalized.active
             ? DynamicHotBranchDetail::warmFramesRequired (branch.physicalTapSamples) : 0;
-        if (identityChanged || ! config.active)
+        if (identityChanged || ! normalized.active)
             branch.resetRuntime();
         else
         {
@@ -469,21 +469,22 @@ public:
         if (! prepared || ! globalConfigured
             || ! DynamicHotBranchDetail::isValidBranchConfig (config, DynamicHotBranchKind::Service, sampleRate))
             return false;
-        if (config.active && ! DynamicHotBranchDetail::globalFieldsMatch (globalBranch.config, config))
-            return false;
-        if (serviceConfigured && DynamicHotBranchDetail::configsEqual (serviceBranch.config, config))
+
+        DynamicHotBranchConfig normalized = config;
+        normalized.stableStateId = 0;
+        copyGlobalOnlyFields (normalized, globalBranch.config);
+
+        if (serviceConfigured && DynamicHotBranchDetail::configsEqual (serviceBranch.config, normalized))
             return true;
 
         const bool wasActive = serviceBranch.config.active;
         const int previousInterp = serviceBranch.config.delayInterpolationIndex;
-        serviceBranch.config = config;
-        serviceBranch.config.stableStateId = 0;
-        copyGlobalOnlyFields (serviceBranch.config, globalBranch.config);
-        serviceBranch.physicalTapSamples = config.active
-            ? physicalTapSamplesFor (config.effectiveAbsoluteDelayMs) : 0.0;
-        serviceBranch.warmFramesNeeded = config.active
+        serviceBranch.config = normalized;
+        serviceBranch.physicalTapSamples = normalized.active
+            ? physicalTapSamplesFor (normalized.effectiveAbsoluteDelayMs) : 0.0;
+        serviceBranch.warmFramesNeeded = normalized.active
             ? DynamicHotBranchDetail::warmFramesRequired (serviceBranch.physicalTapSamples) : 0;
-        if (! wasActive || ! config.active)
+        if (! wasActive || ! normalized.active)
             serviceBranch.resetRuntime();
         else
         {

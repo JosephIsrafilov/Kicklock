@@ -527,31 +527,40 @@ public:
             expect (! engine.getStateInfo (0).warm);
             expect (! engine.getServiceInfo().warm);
 
-            const int globalNeed = (int) engine.getGlobalInfo().physicalTapSamples + 2;
+            const int globalNeed = (int) std::floor (engine.getGlobalInfo().physicalTapSamples) + 2;
+            const int stateNeed = (int) std::floor (engine.getStateInfo (0).physicalTapSamples) + 2;
+            expect (globalNeed > 2);
+            expect (stateNeed > 2);
             juce::AudioBuffer<float> g, s, h;
-            // After 1 + (need-2) = need-1 frames: still not warm.
+
+            // Process exactly need-1 frames total (including the first sample).
             processChunked (engine, makeSine (1, globalNeed - 2, rate, 60.0), g, s, h);
             expect (! engine.getGlobalInfo().warm);
 
-            // One more frame reaches the exact warm boundary.
             expect (engine.process (one, 1).valid);
             expect (engine.getGlobalInfo().warm);
+            // State needs fewer frames, so it must already be warm.
             expect (engine.getStateInfo (0).warm);
 
             // Identity replace resets warm.
             expect (engine.configureStateSlot (0, cfg (rate, -3.0, 6, false, 2, false)));
             expect (! engine.getStateInfo (0).warm);
+            expectEquals ((int) engine.getStateInfo (0).stableStateId, 6);
 
             // Partial Service prime below the warm requirement is not warm.
             engine.reset();
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
             expect (engine.configureService (cfg (rate, 0.0, 0, false, 2, false)));
-            processChunked (engine, makeSine (1, 200, rate, 60.0), g, s, h);
+            // Enough history for a short prime, far below warmFramesNeeded.
+            processChunked (engine, makeSine (1, globalNeed / 2, rate, 60.0), g, s, h);
+            expect (! engine.getServiceInfo().warm);
             auto partial = engine.primeService (10);
             expect (partial.valid);
-            expect (partial.primedSamples > 0);
-            expect (! partial.fullyPrimed || partial.primedSamples < globalNeed);
+            expect (partial.primedSamples == 10);
+            expect (partial.fullyPrimed); // fully primed relative to the request only
+            expect (partial.primedSamples < globalNeed);
             expect (! engine.getServiceInfo().warm);
+            juce::ignoreUnused (stateNeed);
         }
 
         beginTest ("Service full prime is deterministic and isolates Global/State");
@@ -660,7 +669,7 @@ public:
             const double rate = 48000.0;
             DynamicHotBranchEngine engine;
             expect (engine.prepare (rate, 256, 1));
-            // High crossover frequency keeps more impulse energy above the split.
+            // Low crossover keeps more impulse energy in the high band.
             auto global = cfg (rate, 0.0, 0, false, 2, false, 0, true);
             global.crossoverHz = 80.0;
             expect (engine.configureGlobal (global));
@@ -669,29 +678,35 @@ public:
             juce::AudioBuffer<float> g, s, h;
             processChunked (engine, impulse, g, s, h);
 
-            // Find first high sample with significant energy; should be near latency.
+            // High path is pure integer delay of the high-band split. The LR
+            // filters smear the impulse, so the first non-zero sample is at or
+            // shortly after reportedLatencySamples and never before it.
+            for (int i = 0; i < latency; ++i)
+                expectWithinAbsoluteError (h.getSample (0, i), 0.0f, 1.0e-7f);
+
             int firstHigh = -1;
-            for (int i = 0; i < h.getNumSamples(); ++i)
-                if (std::abs (h.getSample (0, i)) > 1.0e-4f)
+            for (int i = latency; i < h.getNumSamples(); ++i)
+                if (std::abs (h.getSample (0, i)) > 1.0e-5f)
                 {
                     firstHigh = i;
                     break;
                 }
-            expect (firstHigh >= 0);
-            // LR filters smear the impulse, so allow a small causal window after latency.
             expect (firstHigh >= latency);
-            expect (firstHigh <= latency + 64);
+            expect (firstHigh <= latency + 128);
 
             juce::AudioBuffer<float> highAlone;
             highAlone.makeCopyOf (h);
-            expect (engine.configureStateSlot (0, cfg (rate, -3.0, 3, false, 2, false, 0, true)));
-            expect (engine.configureStateSlot (1, cfg (rate, 3.0, 4, false, 2, true, 0, true)));
+
+            // State packages must not change the common high path.
             engine.reset();
-            global = cfg (rate, 0.0, 0, false, 2, false, 0, true);
-            global.crossoverHz = 80.0;
             expect (engine.configureGlobal (global));
             expect (engine.configureStateSlot (0, cfg (rate, -3.0, 3, false, 2, false, 0, true)));
             expect (engine.configureStateSlot (1, cfg (rate, 3.0, 4, false, 2, true, 0, true)));
+            // Even if callers pass stale Global-only values, live Global wins.
+            auto stale = cfg (rate, 1.0, 5, true, 4, true, 1, false);
+            stale.crossoverHz = 400.0;
+            expect (engine.configureStateSlot (2, stale));
+            expect (engine.getStateInfo (2).active);
             processChunked (engine, impulse, g, s, h);
             for (int i = 0; i < h.getNumSamples(); ++i)
                 expectWithinAbsoluteError (h.getSample (0, i), highAlone.getSample (0, i), 1.0e-6f);
@@ -770,16 +785,19 @@ public:
             expect (engine.prepare (rate, 512, 1));
             auto global = cfg (rate, 0.0, 0, false, 2, false);
             expect (engine.configureGlobal (global));
+            // Caller polarity is ignored; live Global polarity remains false.
             auto state = cfg (rate, 0.0, 3, true, 2, false);
-            expect (! engine.configureStateSlot (0, state));
+            expect (engine.configureStateSlot (0, state));
+            juce::AudioBuffer<float> g, s, h;
+            processChunked (engine, makeImpulse (1, 2048, 0), g, s, h);
+            int idx = findImpulseIndex (g, 0, 0.5f);
+            expect (idx >= 0);
+            expect (g.getSample (0, idx) > 0.0f);
 
             global.polarityInvert = true;
             expect (engine.configureGlobal (global));
-            state.polarityInvert = true;
-            expect (engine.configureStateSlot (0, state));
-            juce::AudioBuffer<float> g, s, h;
-            processChunked (engine, makeImpulse (1, 1024, 0), g, s, h);
-            const int idx = findImpulseIndex (g, 0, 0.5f);
+            processChunked (engine, makeImpulse (1, 2048, 0), g, s, h);
+            idx = findImpulseIndex (g, 0, 0.5f);
             expect (idx >= 0);
             expect (g.getSample (0, idx) < 0.0f);
         }
