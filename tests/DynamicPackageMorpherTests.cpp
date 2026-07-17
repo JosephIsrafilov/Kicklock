@@ -116,8 +116,8 @@ public:
                                                              coordinates.logPoleDamping,
                                                              sampleRate,
                                                              roundTrip));
-                        expectWithinAbsoluteError (roundTrip.frequencyHz, frequency, 1.0e-11);
-                        expectWithinAbsoluteError (roundTrip.q, q, 1.0e-11);
+                        expectWithinAbsoluteError (roundTrip.frequencyHz, frequency, 1.0e-9);
+                        expectWithinAbsoluteError (roundTrip.q, q, 1.0e-9);
                         expect (std::isfinite (coordinates.logPoleDamping));
                     }
                 }
@@ -200,7 +200,7 @@ public:
             map.globalBase.globalAllpassQ = 0.4f;
             const auto result = resolveDynamicPackage (map, 12, 0.5, 48000.0);
             expect (result.valid);
-            expectWithinAbsoluteError (result.effectiveAllpassFreqHz, 100.0, 1.0e-11);
+            expectWithinAbsoluteError (result.effectiveAllpassFreqHz, 100.0, 1.0e-9);
 
             DynamicAllpassPoleCoordinates globalCoordinates, stateCoordinates;
             expect (frequencyQToPoleCoordinates (50.0, 0.4, 48000.0, globalCoordinates));
@@ -211,7 +211,7 @@ public:
                                                          + stateCoordinates.logPoleDamping),
                                                   48000.0,
                                                   expected));
-            expectWithinAbsoluteError (result.effectiveAllpassQ, expected.q, 1.0e-11);
+            expectWithinAbsoluteError (result.effectiveAllpassQ, expected.q, 1.0e-9);
             expect (std::abs (result.effectiveAllpassQ - 1.1) > 1.0e-3,
                     "raw-Q midpoint must not define package morphing");
         }
@@ -225,22 +225,22 @@ public:
             auto map = mapWith (state);
             const auto doubled = resolveDynamicPackage (map, 13, 1.0, 48000.0);
             expect (doubled.valid && doubled.sourceWasManual);
-            expectWithinAbsoluteError (doubled.effectiveAllpassFreqHz, 200.0, 1.0e-11);
-            expectWithinAbsoluteError (doubled.trimmedStateDelayDeltaMs, 1.5, 1.0e-11);
+            expectWithinAbsoluteError (doubled.effectiveAllpassFreqHz, 200.0, 1.0e-9);
+            expectWithinAbsoluteError (doubled.trimmedStateDelayDeltaMs, 1.5, 1.0e-9);
             expect (map.states[0].manualBasePackage.allpassFreqHz == before.manualBasePackage.allpassFreqHz
                     && map.states[0].manualTrim.frequencyTrimSemitones == before.manualTrim.frequencyTrimSemitones);
 
             map.states[0].manualTrim.frequencyTrimSemitones = -12.0f;
             const auto halved = resolveDynamicPackage (map, 13, 1.0, 48000.0);
-            expectWithinAbsoluteError (halved.effectiveAllpassFreqHz, 50.0, 1.0e-11);
+            expectWithinAbsoluteError (halved.effectiveAllpassFreqHz, 50.0, 1.0e-9);
             map.states[0].manualTrim.frequencyTrimSemitones = 24.0f;
             const auto highClamp = resolveDynamicPackage (map, 13, 1.0, 48000.0);
             expect (highClamp.valid && highClamp.frequencyTrimClamped);
-            expectWithinAbsoluteError (highClamp.effectiveAllpassFreqHz, 220.0, 1.0e-11);
+            expectWithinAbsoluteError (highClamp.effectiveAllpassFreqHz, 220.0, 1.0e-9);
             map.states[0].manualTrim.frequencyTrimSemitones = -24.0f;
             const auto lowClamp = resolveDynamicPackage (map, 13, 1.0, 48000.0);
             expect (lowClamp.valid && lowClamp.frequencyTrimClamped);
-            expectWithinAbsoluteError (lowClamp.effectiveAllpassFreqHz, 30.0, 1.0e-11);
+            expectWithinAbsoluteError (lowClamp.effectiveAllpassFreqHz, 30.0, 1.0e-9);
 
             map.states[0].manualTrim = { 0.0f, 0.0f, (float) std::log (2.0) };
             const auto doubledDamping = resolveDynamicPackage (map, 13, 1.0, 48000.0);

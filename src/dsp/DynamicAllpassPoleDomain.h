@@ -64,6 +64,35 @@ namespace DynamicAllpassPoleDomain
             && isFinite (coefficients.a2) && radiusSquared > 0.0 && radiusSquared < 1.0;
     }
 
+    // Inverse log/exp chains can land a few ULPs outside the frozen production
+    // envelope even when intermediates are valid. Snap only within that epsilon.
+    inline bool snapToProductionFrequencyQ (double& frequencyHz, double& q) noexcept
+    {
+        constexpr double kSnapEpsilon = 1.0e-9;
+        const double frequencyMin = (double) DynamicStateMapContract::kAllpassFrequencyMinHz;
+        const double frequencyMax = (double) DynamicStateMapContract::kAllpassFrequencyMaxHz;
+        const double qMin = (double) DynamicStateMapContract::kAllpassQMin;
+        const double qMax = (double) DynamicStateMapContract::kAllpassQMax;
+
+        if (! isFinite (frequencyHz) || ! isFinite (q))
+            return false;
+        if (frequencyHz < frequencyMin - kSnapEpsilon || frequencyHz > frequencyMax + kSnapEpsilon
+            || q < qMin - kSnapEpsilon || q > qMax + kSnapEpsilon)
+            return false;
+
+        if (frequencyHz < frequencyMin)
+            frequencyHz = frequencyMin;
+        else if (frequencyHz > frequencyMax)
+            frequencyHz = frequencyMax;
+
+        if (q < qMin)
+            q = qMin;
+        else if (q > qMax)
+            q = qMax;
+
+        return isValidFrequency (frequencyHz) && isValidQ (q);
+    }
+
     inline bool frequencyQToPoleCoordinates (double frequencyHz,
                                              double q,
                                              double sampleRate,
@@ -105,11 +134,11 @@ namespace DynamicAllpassPoleDomain
             || ! isValidSampleRate (sampleRate))
             return false;
 
-        const double frequencyHz = std::exp2 (log2FrequencyHz);
+        double frequencyHz = std::exp2 (log2FrequencyHz);
         const double poleDamping = std::exp (logPoleDamping);
         const double radius = std::exp (-poleDamping);
         const double radiusSquared = radius * radius;
-        if (! isValidFrequency (frequencyHz) || ! isFinite (poleDamping) || poleDamping <= 0.0
+        if (! isFinite (frequencyHz) || ! isFinite (poleDamping) || poleDamping <= 0.0
             || ! isFinite (radius) || radius <= 0.0 || radius >= 1.0
             || ! isFinite (radiusSquared) || radiusSquared <= 0.0 || radiusSquared >= 1.0)
             return false;
@@ -117,9 +146,10 @@ namespace DynamicAllpassPoleDomain
         const double alpha = (1.0 - radiusSquared) / (1.0 + radiusSquared);
         const double w0 = kTwoPi * frequencyHz / sampleRate;
         const double sine = std::sin (w0);
-        const double q = sine / (2.0 * alpha);
+        double q = sine / (2.0 * alpha);
         if (! isFinite (alpha) || alpha <= 0.0 || alpha >= 1.0
-            || ! isFinite (w0) || ! isFinite (sine) || sine <= 0.0 || ! isValidQ (q))
+            || ! isFinite (w0) || ! isFinite (sine) || sine <= 0.0 || ! isFinite (q)
+            || ! snapToProductionFrequencyQ (frequencyHz, q))
             return false;
 
         frequencyQ = { frequencyHz, q };
