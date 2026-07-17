@@ -171,7 +171,12 @@ public:
             expectEquals (findImpulseIndex (globalOut, 0), latency);
             expectEquals (findImpulseIndex (state0, 0), stateATap);
             expectEquals (findImpulseIndex (state1, 0), stateBTap);
-            expectEquals (findImpulseIndex (highOut, 0), latency);
+            // Crossover is disabled: high input is zero, so high output stays silent.
+            bool highSilent = true;
+            for (int i = 0; i < highOut.getNumSamples(); ++i)
+                if (std::abs (highOut.getSample (0, i)) > 1.0e-7f)
+                    highSilent = false;
+            expect (highSilent);
         }
 
         beginTest ("Minimum and maximum physical taps and rejection beyond capacity");
@@ -230,11 +235,12 @@ public:
             DynamicHotBranchEngine engine;
             expect (engine.prepare (rate, 512, 1));
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false, 0, false)));
-            const auto impulse = makeImpulse (1, 512, 0);
+            // Need more than 20 ms of material for the delayed impulse to emerge.
+            const auto impulse = makeImpulse (1, 2048, 0);
             juce::AudioBuffer<float> globalOut, stateOut, highOut;
             processChunked (engine, impulse, globalOut, stateOut, highOut);
             bool highSilent = true;
-            for (int i = 0; i < 512; ++i)
+            for (int i = 0; i < highOut.getNumSamples(); ++i)
                 if (std::abs (highOut.getSample (0, i)) > 1.0e-7f)
                     highSilent = false;
             expect (highSilent);
@@ -393,13 +399,13 @@ public:
             expect (engine.prepare (rate, 512, 1));
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
             juce::AudioBuffer<float> g, s, h;
-            processChunked (engine, makeImpulse (1, 512, 0), g, s, h);
+            processChunked (engine, makeImpulse (1, 2048, 0), g, s, h);
             expect (findImpulseIndex (g, 0) >= 0);
             engine.reset();
-            juce::AudioBuffer<float> silence (1, 512);
+            juce::AudioBuffer<float> silence (1, 2048);
             silence.clear();
             processChunked (engine, silence, g, s, h);
-            for (int i = 0; i < 512; ++i)
+            for (int i = 0; i < 2048; ++i)
                 expectWithinAbsoluteError (g.getSample (0, i), 0.0f, 1.0e-7f);
         }
 
@@ -428,7 +434,7 @@ public:
             DynamicHotBranchEngine engine;
             expect (engine.prepare (rate, 256, 2));
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
-            juce::AudioBuffer<float> input (2, 256);
+            juce::AudioBuffer<float> input (2, 2048);
             input.clear();
             input.setSample (0, 0, 1.0f);
             input.setSample (1, 5, 0.5f);

@@ -259,9 +259,9 @@ public:
             return false;
 
         const double latencySamplesD = std::ceil (newSampleRate * (double) kReportedLatencyMs / 1000.0);
-        // Match ceil(sr * 0.340) + guard exactly; avoid float intermediate drift.
+        // Integer-ceil of 340 ms plus guard and one neighbor sample for fractional taps.
         const double historySamplesD = std::ceil (newSampleRate * kSharedHistoryMs / 1000.0)
-            + (double) kInterpolationGuardSamples;
+            + (double) kInterpolationGuardSamples + 1.0;
         if (! DynamicHotBranchDetail::isFinite (latencySamplesD)
             || ! DynamicHotBranchDetail::isFinite (historySamplesD)
             || latencySamplesD < 0.0 || historySamplesD < latencySamplesD
