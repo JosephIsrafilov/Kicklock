@@ -1269,7 +1269,19 @@ public:
         {
             DynamicSelectorScheduler scheduler;
             expect (scheduler.prepare (sr));
-            auto event = makeEvent (kMaxI64 - scheduler.getFingerprintSamples() + 1, scheduler.getFingerprintSamples(), makeMatched (1));
+
+            // Construct the event's fields directly (not via makeEvent(), which
+            // computes readySample = triggerSample + fingerprintSamples: that
+            // expression itself would overflow here, which is exactly the
+            // scenario submitEvent() must reject without ever evaluating it).
+            // readySample is chosen to exceed triggerSample by a small, safe
+            // margin so the ordering/window checks don't short-circuit before
+            // reaching the overflow guard being tested.
+            DynamicSelectorEvent event;
+            event.triggerSample = kMaxI64 - scheduler.getFingerprintSamples() + 1;
+            event.readySample = event.triggerSample + 1;
+            event.match = makeMatched (1);
+
             expect (! scheduler.submitEvent (event));
             expect (scheduler.getDiagnostics().lastDecision == DynamicSelectorDiagnostic::InvalidEvent);
         }
