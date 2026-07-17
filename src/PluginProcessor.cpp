@@ -1134,7 +1134,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   // ~2 seconds of raw bass/kick for the Analyze button's cross-correlation.
   rawCapture.prepare((int)(sampleRate * 2.0));
   // ~20 s covers long multi-bar Learn loops without sharing the 2 s Analyze ring.
-  learnLoopCapture.prepare((int)(sampleRate * 20.0));
+  learnLoopCapture.prepare((int)(sampleRate * 20.0), false);
   transientDetector.prepare(sampleRate);
   transientDetector.setThreshold(1.0e-7f);
   transientDetector.setMinimumEnergyGate(1.0e-8f);
@@ -1144,12 +1144,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
 
    // Learn queue storage is rebuilt only after both its audio producer and
    // persistent worker consumer have observed this lifecycle boundary.
-  learnTransientDetector.prepare(sampleRate);
-  learnTransientDetector.setThreshold(1.0e-7f);
-  learnTransientDetector.setMinimumEnergyGate(1.0e-8f);
-  learnTransientDetector.setAttackReleaseMs(2.0f, 60.0f);
-  learnTransientDetector.setTriggerRatio(1.35f);
-  learnTransientDetector.setHoldoffMs(90.0f);
+  configureDynamicFingerprintTrigger (learnTransientDetector, sampleRate);
   runtimeFingerprintCapture.prepare(sampleRate);
    learnActive.store (false, std::memory_order_release);
     learnAudioCaptureAcknowledged.store (false, std::memory_order_release);
@@ -1357,13 +1352,19 @@ void KickLockAudioProcessor::processObservationCapture(
       // performs no analysis and never writes the audio output.
         if (usingLearnQueue && learnQueueReady.load (std::memory_order_acquire))
         {
-          const bool learnTrigger = learnTransientDetector.processSample(kickLow);
+          // Dynamic Learn uses the same canonical raw kick source and detector
+          // configuration as the Phase-7 runtime. The queued analysis window
+          // remains low-band for legacy timing/rotator work only.
+          const bool learnTrigger = learnTransientDetector.processSample(kickMono);
+          const int fingerprintSamples = DynamicFingerprintWindow::forSampleRate (getSampleRate()).windowSamples;
+          const bool rawTimelineHasHeadroom = learnLoopCapture.getFilledSamples() + fingerprintSamples
+              <= learnLoopCapture.getCapacity();
           const bool acceptTrigger = learnActive.load (std::memory_order_relaxed)
-              && ! learnStopRequested.load (std::memory_order_acquire);
+              && ! learnStopRequested.load (std::memory_order_acquire) && rawTimelineHasHeadroom;
           learnHitQueue.pushSample(rawBassLow, kickLow, learnTrigger,
                                    pitchTracker.getFrequencyHz(), acceptTrigger);
           // Same sample index timeline as LearnHitQueue::absoluteSampleAtTrigger.
-          learnLoopCapture.push(rawBassLow, kickLow);
+          learnLoopCapture.push(bassMono, kickMono);
         }
 
       if (autoAlignEngine != nullptr)
@@ -2838,6 +2839,7 @@ void KickLockAudioProcessor::ensureRevertBundleCaptured() {
   {
     const std::lock_guard<std::mutex> lock(mapMutex);
     revertBundle.noteMap = messageOwnedNoteMap;
+    revertBundle.dynamicStateMap = messageOwnedDynamicStateMap;
   }
   revertSnapshotValid.store(true, std::memory_order_release);
 }
@@ -2853,9 +2855,11 @@ bool KickLockAudioProcessor::revertLatestFix() {
   {
     const std::lock_guard<std::mutex> lock(mapMutex);
     messageOwnedNoteMap = revertBundle.noteMap;
+    messageOwnedDynamicStateMap = revertBundle.dynamicStateMap;
   }
   resetResolvedLearnStateToIdle();
   requestMapPublication(revertBundle.noteMap);
+  requestDynamicMapPublication(revertBundle.dynamicStateMap);
   revertSnapshotValid.store(false, std::memory_order_release);
   return true;
 }
@@ -3503,6 +3507,8 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
   config.crossoverHz = context.crossoverHz;
   config.preLearnAllpassFreqHz = context.preLearnAllpassFreqHz;
   config.preLearnAllpassQ = context.preLearnAllpassQ;
+  config.preLearnAllpassEnabled = context.preLearnAllpassEnabled;
+  config.preLearnAllpassStages = context.preLearnStages;
 
   LearnDiagnostics diagnostics;
   diagnostics.droppedQueueHits = droppedHits;
@@ -3512,13 +3518,20 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
   {
     std::vector<float> loopBass, loopKick;
     const int loopN = learnLoopCapture.snapshot (loopBass, loopKick);
-    auto result = LearnPipelineCore::finalize (
-        windows, config, diagnostics, cancelled,
-        loopN > 0 ? loopBass.data() : nullptr, loopN);
+    DynamicStateMap previousDynamicMap;
+    {
+      const std::lock_guard<std::mutex> lock (mapMutex);
+      previousDynamicMap = messageOwnedDynamicStateMap;
+    }
+    auto result = LearnPipelineCore::finalizeDynamic (
+        windows, config, previousDynamicMap,
+        loopN > 0 ? loopBass.data() : nullptr, loopN > 0 ? loopKick.data() : nullptr, loopN,
+        diagnostics, cancelled);
     if (cancelled())
       return;
 
-    const bool candidateValid = result.valid && NoteMap::isValidNoteMap (result.map);
+    const bool candidateValid = result.valid && result.hasDynamicStateMap
+        && isStructurallyValidDynamicStateMap (result.dynamicMap);
     const auto resolvedState = candidateValid ? LearnState::ResultReady
                                               : LearnState::NotEnoughMaterial;
     LearnProgressSnapshot completedProgress;
@@ -3665,7 +3678,9 @@ juce::String KickLockAudioProcessor::getLearnApplyBlockedReason (const PendingLe
   if (learnState.load (std::memory_order_acquire) != LearnState::ResultReady)
     return "Learn has no ready result.";
   if (! candidate.present || ! candidate.result.valid
-      || ! NoteMap::isValidNoteMap (candidate.result.map))
+      || (! (candidate.result.hasDynamicStateMap
+              && isStructurallyValidDynamicStateMap (candidate.result.dynamicMap))
+          && ! NoteMap::isValidNoteMap (candidate.result.map)))
     return "The pending Learn result is invalid.";
   if (candidate.sessionId != activeLearnSessionId.load (std::memory_order_acquire))
     return "The pending Learn result is stale.";
@@ -3673,6 +3688,12 @@ juce::String KickLockAudioProcessor::getLearnApplyBlockedReason (const PendingLe
     return "Analyze is still running.";
 
   const double currentRate = getSampleRate();
+  if (candidate.result.hasDynamicStateMap)
+  {
+    if (std::abs (currentRate - candidate.context.sampleRate) > 0.01)
+      return "Sample rate changed; start Learn again.";
+    return {};
+  }
   const bool currentCrossover = crossoverEnableParamRaw == nullptr
       || crossoverEnableParamRaw->load() > 0.5f;
   const float currentCrossoverHz = crossoverFreqParam != nullptr ? crossoverFreqParam->load() : 150.0f;
@@ -3701,7 +3722,9 @@ void KickLockAudioProcessor::setPendingLearnResultForTesting (const LearnFinaliz
   }
   {
     const std::lock_guard<std::mutex> lock (learnMutex);
-    pendingLearnCandidate.present = result.valid && NoteMap::isValidNoteMap (result.map);
+    pendingLearnCandidate.present = result.valid
+        && ((result.hasDynamicStateMap && isStructurallyValidDynamicStateMap (result.dynamicMap))
+            || NoteMap::isValidNoteMap (result.map));
     pendingLearnCandidate.sessionId = context.sessionId;
     pendingLearnCandidate.context = context;
     pendingLearnCandidate.result = result;
@@ -3745,6 +3768,35 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
 
   if (const auto blockedReason = getLearnApplyBlockedReason (candidate); blockedReason.isNotEmpty())
     return reject (blockedReason);
+
+  if (candidate.result.hasDynamicStateMap)
+  {
+    const DynamicStateMap appliedMap = candidate.result.dynamicMap;
+    if (! isStructurallyValidDynamicStateMap (appliedMap))
+      return reject ("The pending Dynamic Learn map is invalid.");
+
+    ensureRevertBundleCaptured();
+    // Do not alter APVTS correction fields for New Dynamic. The map owns the
+    // complete Global Base; only the message thread selects Dynamic mode.
+    // Queue first while the message-owned value is still recoverable, so a full
+    // SPSC queue leaves the pending result intact for an explicit retry.
+    {
+      const std::lock_guard<std::mutex> publicationLock (mapPublicationMutex);
+      const std::lock_guard<std::mutex> lock (mapMutex);
+      const auto previous = messageOwnedDynamicStateMap;
+      hasPendingDynamicMapPublication = false;
+      messageOwnedDynamicStateMap = appliedMap;
+      if (! dynamicMapUpdateQueue.push (appliedMap))
+      {
+        messageOwnedDynamicStateMap = previous;
+        return reject ("Dynamic map publication is temporarily busy; try Apply again.");
+      }
+    }
+
+    setParameterValueWithGesture ("correction_mode", 1.0f);
+    resetResolvedLearnStateToIdle();
+    return true;
+  }
 
   const auto globalFix = candidate.result.globalFix;
   const float delay = juce::jlimit (-20.0f, 20.0f, globalFix.bassDelayMs);
@@ -3835,9 +3887,11 @@ bool KickLockAudioProcessor::clearNoteMap()
   {
     const std::lock_guard<std::mutex> lock (mapMutex);
     messageOwnedNoteMap = empty;
+    messageOwnedDynamicStateMap = makeEmptyDynamicStateMap();
   }
   resetResolvedLearnStateToIdle();
   requestMapPublication (empty);
+  requestDynamicMapPublication (makeEmptyDynamicStateMap());
   return true;
 }
 
@@ -3886,7 +3940,7 @@ void KickLockAudioProcessor::timerCallback()
   }
   if (mapPublicationRetryObserver != nullptr)
     mapPublicationRetryObserver->fetch_add (1, std::memory_order_relaxed);
-  if (retryMapPublication())
+  if (retryMapPublication() && retryDynamicMapPublication())
     stopTimer();
 }
 
@@ -3898,6 +3952,31 @@ bool KickLockAudioProcessor::retryMapPublication()
   if (! noteMapUpdateQueue.push (pendingMapPublication))
     return false;
   hasPendingMapPublication = false;
+  return true;
+}
+
+void KickLockAudioProcessor::requestDynamicMapPublication (const DynamicStateMap& map)
+{
+  {
+    const std::lock_guard<std::mutex> lock (mapPublicationMutex);
+    pendingDynamicMapPublication = map;
+    hasPendingDynamicMapPublication = true;
+  }
+  if (retryDynamicMapPublication())
+  {
+    return;
+  }
+  startTimer (10);
+}
+
+bool KickLockAudioProcessor::retryDynamicMapPublication()
+{
+  std::lock_guard<std::mutex> lock (mapPublicationMutex);
+  if (! hasPendingDynamicMapPublication)
+    return true;
+  if (! dynamicMapUpdateQueue.push (pendingDynamicMapPublication))
+    return false;
+  hasPendingDynamicMapPublication = false;
   return true;
 }
 

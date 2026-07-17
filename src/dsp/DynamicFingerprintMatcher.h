@@ -45,10 +45,9 @@ struct DynamicMatchResult
 
 namespace DynamicFingerprintMatcherDetail
 {
-    // Auto Candidate states must never be auto-selected; a disabled state is
-    // always excluded. A Manual state (Candidate or Stable) with valid minimum
-    // evidence is eligible. A bypassed state remains recognizable. A Stable Auto
-    // state with no learned package remains recognizable with no confident fix.
+    // Candidates are recognizable identities but never correction-eligible.
+    // This lets a three-hit State route deterministically to Global while the
+    // five-hit Stable gate continues to protect automatic correction.
     inline bool isEligibleState (const DynamicState& state) noexcept
     {
         if (! state.occupied || ! state.enabled)
@@ -58,7 +57,7 @@ namespace DynamicFingerprintMatcherDetail
             return false;
 
         if (state.origin == DynamicStateOrigin::Auto)
-            return state.evidence == DynamicStateEvidence::Stable;
+            return isValidDynamicStateEvidence (state.evidence);
         if (state.origin == DynamicStateOrigin::Manual)
             return isValidDynamicStateEvidence (state.evidence);
         return false;
@@ -66,7 +65,9 @@ namespace DynamicFingerprintMatcherDetail
 
     inline bool stateHasCorrection (const DynamicState& state) noexcept
     {
-        return state.hasLearnedPackage || state.hasManualBasePackage;
+        return (state.origin != DynamicStateOrigin::Auto
+                || state.evidence == DynamicStateEvidence::Stable)
+            && (state.hasLearnedPackage || state.hasManualBasePackage);
     }
 }
 

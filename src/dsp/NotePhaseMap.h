@@ -10,6 +10,7 @@
 
 #include "HitConsensus.h"    // HitObservation (Pass A container in LearnHitAnalysis)
 #include "PhaseFixEngine.h"  // PhaseFixResult  (global fix in LearnFinalizeResult)
+#include "DynamicStateMap.h"
 #include "ConflictRegion.h"
 
 // =============================================================================
@@ -640,6 +641,10 @@ struct LearnFinalizeResult
     bool valid = false;
 
     NotePhaseMapSnapshot map;
+    // New Dynamic Learn is intentionally independent of the frozen legacy map.
+    // `map` remains report compatibility only until DynamicWorkspace exists.
+    DynamicStateMap dynamicMap = makeEmptyDynamicStateMap();
+    bool hasDynamicStateMap = false;
     PhaseFixResult globalFix;
     LearnDiagnostics diagnostics;
     std::vector<LearnHitAnalysis> hitAnalyses;

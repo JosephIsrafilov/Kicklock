@@ -9,6 +9,7 @@
 
 #include "DynamicStateMap.h"
 #include "DynamicFingerprintExtractor.h"
+#include "DynamicFingerprintTrigger.h"
 #include "DynamicFingerprintMatcher.h"
 #include "DynamicPackageMorpher.h"
 #include "DynamicHotBranchEngine.h"
@@ -264,12 +265,7 @@ public:
 private:
     void configureKickTrigger (double newSampleRate) noexcept
     {
-        kickTrigger.prepare (newSampleRate);
-        kickTrigger.setThreshold (1.0e-7f);
-        kickTrigger.setMinimumEnergyGate (1.0e-8f);
-        kickTrigger.setAttackReleaseMs (2.0f, 60.0f);
-        kickTrigger.setTriggerRatio (1.35f);
-        kickTrigger.setHoldoffMs (90.0f);
+        configureDynamicFingerprintTrigger (kickTrigger, newSampleRate);
     }
 
     void resetTimeline() noexcept
