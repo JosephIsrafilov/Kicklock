@@ -218,10 +218,22 @@ namespace DynamicHotBranchDetail
         }
     };
 
+    // Warm once enough live frames exist for the physical tap and its
+    // fractional neighbor sample (integerDelay + 1).
+    inline int warmFramesRequired (double physicalTapSamples) noexcept
+    {
+        if (! isFinite (physicalTapSamples) || physicalTapSamples < 0.0)
+            return 0;
+        const int integerDelay = (int) physicalTapSamples;
+        return integerDelay + 2;
+    }
+
     struct BranchDspState
     {
         DynamicHotBranchConfig config;
         double physicalTapSamples = 0.0;
+        int processedFrames = 0;
+        int warmFramesNeeded = 0;
         bool warm = false;
         std::array<FractionalInterpolator, DynamicHotBranchContract::kMaxChannels> interpolators {};
         std::array<std::array<AllpassStageState, DynamicHotBranchContract::kMaxAllpassStages>,
@@ -229,6 +241,7 @@ namespace DynamicHotBranchDetail
 
         void resetRuntime() noexcept
         {
+            processedFrames = 0;
             warm = false;
             for (auto& interpolator : interpolators)
                 interpolator.reset();
@@ -241,7 +254,23 @@ namespace DynamicHotBranchDetail
         {
             config = {};
             physicalTapSamples = 0.0;
+            warmFramesNeeded = 0;
             resetRuntime();
+        }
+
+        void noteLiveFrame() noexcept
+        {
+            if (processedFrames < std::numeric_limits<int>::max())
+                ++processedFrames;
+            warm = processedFrames >= warmFramesNeeded;
+        }
+
+        void applyPrimedFrames (int frames, bool fullyPrimed) noexcept
+        {
+            if (frames < 0)
+                frames = 0;
+            processedFrames = frames;
+            warm = fullyPrimed && processedFrames >= warmFramesNeeded;
         }
     };
 }
@@ -283,6 +312,7 @@ public:
         validHighSamples = 0;
         nonFiniteInputCount = 0;
 
+        inputScratch.setSize (numChannels, maxBlock, false, true, true);
         lowScratch.setSize (numChannels, maxBlock, false, true, true);
         highScratch.setSize (numChannels, maxBlock, false, true, true);
         globalLowOut.setSize (numChannels, maxBlock, false, true, true);
@@ -326,6 +356,7 @@ public:
         serviceBranch.resetRuntime();
         for (auto& state : stateBranches)
             state.resetRuntime();
+        inputScratch.clear();
         lowScratch.clear();
         highScratch.clear();
         globalLowOut.clear();
@@ -355,10 +386,29 @@ public:
             return true;
 
         const bool wasActive = globalBranch.config.active;
+        const int previousInterp = globalBranch.config.delayInterpolationIndex;
+        const bool fieldsChanged = globalConfigured
+            && ! DynamicHotBranchDetail::globalFieldsMatch (globalBranch.config, config);
+
         globalBranch.config = config;
         globalBranch.physicalTapSamples = physicalTapSamplesFor (config.effectiveAbsoluteDelayMs);
+        globalBranch.warmFramesNeeded = DynamicHotBranchDetail::warmFramesRequired (
+            globalBranch.physicalTapSamples);
         if (! wasActive || ! config.active)
             globalBranch.resetRuntime();
+        else
+        {
+            if (previousInterp != config.delayInterpolationIndex)
+                for (auto& interpolator : globalBranch.interpolators)
+                    interpolator.reset();
+            globalBranch.warm = globalBranch.processedFrames >= globalBranch.warmFramesNeeded;
+        }
+
+        // Global is the single source of truth for Global-only fields. Propagate
+        // atomically to every active State and Service without clearing identity.
+        if (fieldsChanged || config.active)
+            propagateGlobalOnlyFields (config);
+
         globalConfigured = true;
         if (config.active)
             applyCrossoverSettings (config);
@@ -387,11 +437,23 @@ public:
 
         const bool identityChanged = branch.config.stableStateId != config.stableStateId
             || branch.config.active != config.active;
+        const int previousInterp = branch.config.delayInterpolationIndex;
         branch.config = config;
+        // Always store the live Global-only fields even if the caller passed them.
+        copyGlobalOnlyFields (branch.config, globalBranch.config);
         branch.physicalTapSamples = config.active
             ? physicalTapSamplesFor (config.effectiveAbsoluteDelayMs) : 0.0;
+        branch.warmFramesNeeded = config.active
+            ? DynamicHotBranchDetail::warmFramesRequired (branch.physicalTapSamples) : 0;
         if (identityChanged || ! config.active)
             branch.resetRuntime();
+        else
+        {
+            if (previousInterp != branch.config.delayInterpolationIndex)
+                for (auto& interpolator : branch.interpolators)
+                    interpolator.reset();
+            branch.warm = branch.processedFrames >= branch.warmFramesNeeded;
+        }
         return true;
     }
 
@@ -413,12 +475,23 @@ public:
             return true;
 
         const bool wasActive = serviceBranch.config.active;
+        const int previousInterp = serviceBranch.config.delayInterpolationIndex;
         serviceBranch.config = config;
         serviceBranch.config.stableStateId = 0;
+        copyGlobalOnlyFields (serviceBranch.config, globalBranch.config);
         serviceBranch.physicalTapSamples = config.active
             ? physicalTapSamplesFor (config.effectiveAbsoluteDelayMs) : 0.0;
+        serviceBranch.warmFramesNeeded = config.active
+            ? DynamicHotBranchDetail::warmFramesRequired (serviceBranch.physicalTapSamples) : 0;
         if (! wasActive || ! config.active)
             serviceBranch.resetRuntime();
+        else
+        {
+            if (previousInterp != serviceBranch.config.delayInterpolationIndex)
+                for (auto& interpolator : serviceBranch.interpolators)
+                    interpolator.reset();
+            serviceBranch.warm = serviceBranch.processedFrames >= serviceBranch.warmFramesNeeded;
+        }
         serviceConfigured = true;
         return true;
     }
@@ -523,11 +596,11 @@ public:
                 const float delayed = readPrimedBranchTap (serviceBranch, ch, currentBack);
                 processBranchSample (serviceBranch, ch, delayed);
             }
-            serviceBranch.warm = true;
         }
 
         result.valid = true;
         result.fullyPrimed = result.primedSamples == result.requestedSamples;
+        serviceBranch.applyPrimedFrames (result.primedSamples, result.fullyPrimed);
         return result;
     }
 
@@ -542,15 +615,27 @@ public:
 
         applyCrossoverSettings (globalBranch.config);
 
+        // Sanitize raw input before the recursive crossover or any history write
+        // so NaN/Inf cannot permanently poison filter state.
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float sanitized = DynamicHotBranchDetail::sanitizeSample (
+                    input.getSample (ch, i), nonFiniteInputCount);
+                inputScratch.setSample (ch, i, sanitized);
+            }
+        }
+
         if (globalBranch.config.crossoverEnabled)
         {
-            crossover.split (input, lowScratch, highScratch, numSamples);
+            crossover.split (inputScratch, lowScratch, highScratch, numSamples);
         }
         else
         {
             for (int ch = 0; ch < numChannels; ++ch)
             {
-                lowScratch.copyFrom (ch, 0, input, ch, 0, numSamples);
+                lowScratch.copyFrom (ch, 0, inputScratch, ch, 0, numSamples);
                 highScratch.clear (ch, 0, numSamples);
             }
         }
@@ -561,12 +646,8 @@ public:
             // every branch tap observes the same history state for this sample.
             for (int ch = 0; ch < numChannels; ++ch)
             {
-                const float lowIn = DynamicHotBranchDetail::sanitizeSample (
-                    lowScratch.getSample (ch, i), nonFiniteInputCount);
-                const float highIn = DynamicHotBranchDetail::sanitizeSample (
-                    highScratch.getSample (ch, i), nonFiniteInputCount);
-                writeLowHistory (ch, lowIn);
-                writeHighHistory (ch, highIn);
+                writeLowHistory (ch, lowScratch.getSample (ch, i));
+                writeHighHistory (ch, highScratch.getSample (ch, i));
             }
             advanceWritePointers();
 
@@ -576,7 +657,6 @@ public:
                 {
                     const float delayed = readBranchTap (globalBranch, ch);
                     globalLowOut.setSample (ch, i, processBranchSample (globalBranch, ch, delayed));
-                    globalBranch.warm = true;
                 }
                 else
                 {
@@ -591,7 +671,6 @@ public:
                         const float delayed = readBranchTap (branch, ch);
                         stateLowOut[(size_t) slot].setSample (
                             ch, i, processBranchSample (branch, ch, delayed));
-                        branch.warm = true;
                     }
                     else
                     {
@@ -603,7 +682,6 @@ public:
                 {
                     const float delayed = readBranchTap (serviceBranch, ch);
                     serviceLowOut.setSample (ch, i, processBranchSample (serviceBranch, ch, delayed));
-                    serviceBranch.warm = true;
                 }
                 else
                 {
@@ -612,6 +690,15 @@ public:
 
                 highOut.setSample (ch, i, readHighTap (ch));
             }
+
+            // Count frames once per sample, not once per channel.
+            if (globalBranch.config.active)
+                globalBranch.noteLiveFrame();
+            for (int slot = 0; slot < DynamicHotBranchContract::kStateSlots; ++slot)
+                if (stateBranches[(size_t) slot].config.active)
+                    stateBranches[(size_t) slot].noteLiveFrame();
+            if (serviceBranch.config.active)
+                serviceBranch.noteLiveFrame();
         }
 
         result.valid = true;
@@ -657,6 +744,41 @@ private:
     {
         return (double) reportedLatencySamples
             + effectiveAbsoluteDelayMs * sampleRate / 1000.0;
+    }
+
+    static void copyGlobalOnlyFields (DynamicHotBranchConfig& destination,
+                                      const DynamicHotBranchConfig& global) noexcept
+    {
+        destination.polarityInvert = global.polarityInvert;
+        destination.allpassStages = global.allpassStages;
+        destination.crossoverEnabled = global.crossoverEnabled;
+        destination.crossoverHz = global.crossoverHz;
+        destination.allpassEnabled = global.allpassEnabled;
+        destination.delayInterpolationIndex = global.delayInterpolationIndex;
+    }
+
+    void propagateGlobalOnlyFields (const DynamicHotBranchConfig& global) noexcept
+    {
+        for (auto& branch : stateBranches)
+        {
+            if (! branch.config.active)
+                continue;
+            const int previousInterp = branch.config.delayInterpolationIndex;
+            copyGlobalOnlyFields (branch.config, global);
+            if (previousInterp != branch.config.delayInterpolationIndex)
+                for (auto& interpolator : branch.interpolators)
+                    interpolator.reset();
+        }
+
+        if (serviceBranch.config.active)
+        {
+            const int previousInterp = serviceBranch.config.delayInterpolationIndex;
+            copyGlobalOnlyFields (serviceBranch.config, global);
+            serviceBranch.config.stableStateId = 0;
+            if (previousInterp != serviceBranch.config.delayInterpolationIndex)
+                for (auto& interpolator : serviceBranch.interpolators)
+                    interpolator.reset();
+        }
     }
 
     DynamicHotBranchInfo makeInfo (const DynamicHotBranchDetail::BranchDspState& branch,
@@ -810,6 +932,7 @@ private:
     std::vector<float> lowHistory;
     std::vector<float> highHistory;
     LinkwitzRileyCrossover crossover;
+    juce::AudioBuffer<float> inputScratch;
     juce::AudioBuffer<float> lowScratch;
     juce::AudioBuffer<float> highScratch;
     juce::AudioBuffer<float> globalLowOut;
