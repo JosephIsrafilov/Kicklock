@@ -32,6 +32,20 @@ a MIDI note or DAW timeline section. MIDI and pitch are optional metadata.
 - This phase does not activate the new runtime. Legacy compatibility may be
   removed only in a future major project-format break.
 
+## Phase 4 Package Morphing
+
+- Dynamic Strength morphs frequency in `log2(frequencyHz)` space; Q is never
+  linearly interpolated.
+- A second-order allpass pole has `radius = sqrt(a2)`, positive pole damping
+  `-log(radius)`, and damping morphs in `log(poleDamping)` space.
+- Manual damping trim is additive in that same log-pole-damping coordinate.
+  Manual delay trim is additive to the State delay before Dynamic Strength.
+- Polarity, stage count, crossover, allpass enablement, and delay interpolation
+  remain Global. Effective runtime packages are fixed transient values and are
+  never serialized.
+- Phase 4 defines pure package math only. It does not activate processor
+  runtime, hot-branch rendering, scheduling, or DSP integration.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.
