@@ -46,6 +46,22 @@ a MIDI note or DAW timeline section. MIDI and pitch are optional metadata.
 - Phase 4 defines pure package math only. It does not activate processor
   runtime, hot-branch rendering, scheduling, or DSP integration.
 
+## Phase 5 Hot-Branch Engine
+
+- The input is split once by one Global Linkwitz-Riley crossover.
+- Low-band input is written once into one shared circular history per channel.
+- Global, eight State, and one optional Service branch each read a separate
+  fractional delay tap from that shared history.
+- Persistent State branches process every sample continuously; they do not
+  start only when selected. Reset-and-replay is not their normal path.
+- All four second-order allpass stages remain warm on every active branch.
+- High band is delayed once by the reported 20 ms PDC path and is added only
+  after later branch selection; it is not duplicated per branch.
+- Maximum Service priming from shared history is 300 ms. Priming is explicit
+  and never runs inside the ordinary process loop.
+- Phase 5 does not implement State selection, Hold, crossfades, transport
+  policy, or PluginProcessor integration.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.
