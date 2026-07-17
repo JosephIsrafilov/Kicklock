@@ -62,6 +62,41 @@ a MIDI note or DAW timeline section. MIDI and pitch are optional metadata.
 - Phase 5 does not implement State selection, Hold, crossfades, transport
   policy, or PluginProcessor integration.
 
+## Phase 6 Selector Scheduler and Continuity Mixer
+
+- Matcher observations are acted on at their absolute `readySample`, never at
+  a block-relative offset; the scheduler is advanced exactly one absolute
+  sample at a time so block partitioning cannot change results.
+- A required branch transition begins fading at the exact `readySample` of
+  the event that requested it.
+- Transition duration is derived per sample rate from the fixed 8 ms maximum,
+  the actual `DynamicFingerprintWindow` sample count, and at least 1 ms of
+  sample-domain safety margin, and is validated against the frozen 13 ms
+  minimum physical branch tap at every supported rate.
+- Target identity is always `stableStateId`, matched against the live branch
+  roster; slot position alone is never identity, and a slot silently
+  replaced with a different stable State collapses the selection safely to
+  Global rather than routing the new occupant's audio under the old gain.
+- A warm, active persistent State branch has priority over a warm Service
+  branch bound to the same stable identity; Service is only selectable when
+  explicitly and validly bound to that identity.
+- Ambiguous/Unknown Hold is bounded to at most two unresolved events and
+  250 ms from the last confidently corrected match; InvalidInput and
+  NoEligibleStates never Hold.
+- Continuity uses one fixed ten-position low-band gain vector (Global, eight
+  State slots, Service). Every transition snapshots the exact current gain
+  vector as the fade start and a one-hot target, so retargeting mid-fade
+  never introduces a discontinuity or an unbounded nested fade structure.
+- The common high band is added exactly once per sample after the weighted
+  low-band mix; it is never crossfaded or duplicated per branch.
+- An explicit transport discontinuity (seek, loop wrap, stop/start, host
+  reset) clears queued events, Hold, and any active fade, and snaps gains to
+  Global; it does not reset Phase-5 branch DSP state, and a non-contiguous
+  block without an explicit reset is rejected rather than reinterpreted.
+- Phase 6 is standalone: it does not extract fingerprints, duplicate matcher
+  distance logic, compute or configure State/Service packages, or connect to
+  PluginProcessor. That connection is Phase 7's responsibility.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.
