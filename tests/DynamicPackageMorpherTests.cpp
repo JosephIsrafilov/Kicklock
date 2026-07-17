@@ -200,20 +200,29 @@ public:
             map.globalBase.globalAllpassQ = 0.4f;
             const auto result = resolveDynamicPackage (map, 12, 0.5, 48000.0);
             expect (result.valid);
-            expectWithinAbsoluteError (result.effectiveAllpassFreqHz, 100.0, 1.0e-9);
 
+            // Hand-calc must use the same float storage the resolver reads, so
+            // double promotion matches the production path bit-for-bit.
             DynamicAllpassPoleCoordinates globalCoordinates, stateCoordinates;
-            expect (frequencyQToPoleCoordinates (50.0, 0.4, 48000.0, globalCoordinates));
-            expect (frequencyQToPoleCoordinates (200.0, 1.8, 48000.0, stateCoordinates));
+            expect (frequencyQToPoleCoordinates ((double) map.globalBase.globalAllpassFreqHz,
+                                                 (double) map.globalBase.globalAllpassQ,
+                                                 48000.0,
+                                                 globalCoordinates));
+            expect (frequencyQToPoleCoordinates ((double) map.states[0].learnedPackage.allpassFreqHz,
+                                                 (double) map.states[0].learnedPackage.allpassQ,
+                                                 48000.0,
+                                                 stateCoordinates));
+            const double midLog2Frequency = 0.5 * (globalCoordinates.log2FrequencyHz
+                                                   + stateCoordinates.log2FrequencyHz);
+            const double midLogPoleDamping = 0.5 * (globalCoordinates.logPoleDamping
+                                                    + stateCoordinates.logPoleDamping);
             DynamicAllpassFrequencyQ expected;
-            expect (poleCoordinatesToFrequencyQ (std::log2 (100.0),
-                                                  0.5 * (globalCoordinates.logPoleDamping
-                                                         + stateCoordinates.logPoleDamping),
-                                                  48000.0,
-                                                  expected));
-            expectWithinAbsoluteError (result.effectiveAllpassQ, expected.q, 1.0e-9);
+            expect (poleCoordinatesToFrequencyQ (midLog2Frequency, midLogPoleDamping, 48000.0, expected));
+            expectWithinAbsoluteError (result.effectiveAllpassFreqHz, expected.frequencyHz, 1.0e-12);
+            expectWithinAbsoluteError (result.effectiveAllpassQ, expected.q, 1.0e-12);
             expect (std::abs (result.effectiveAllpassQ - 1.1) > 1.0e-3,
                     "raw-Q midpoint must not define package morphing");
+            expectWithinAbsoluteError (result.effectiveAllpassFreqHz, 100.0, 1.0e-4);
         }
 
         beginTest ("Manual trim is applied before Strength and respects frozen frequency and damping bounds");
