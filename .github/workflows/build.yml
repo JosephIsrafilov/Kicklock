@@ -20,25 +20,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure fast validation
-        shell: bash
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=OFF
-      - name: Build fast tests
-        shell: bash
-        run: cmake --build build --target KickLockFastTests --parallel 4
-      - name: Run fast tests
-        shell: bash
+        shell: cmd
         run: |
-          start=$SECONDS
-          build/tests/KickLockFastTests Phase8 Phase7 Processor
-          elapsed=$((SECONDS - start))
-          {
-            echo "## PR FAST"
-            echo "- Build target: KickLockFastTests"
-            echo "- Categories: Phase8 Phase7 Processor"
-            echo "- pluginval executed: no"
-            echo "- Universal build: no"
-            echo "- Test elapsed: ${elapsed}s"
-          } >> "$GITHUB_STEP_SUMMARY"
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=OFF
+      - name: Build fast tests
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cmake --build build --target KickLockFastTests --parallel 4
+      - name: Run fast tests
+        shell: pwsh
+        run: |
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          & "build/tests/KickLockFastTests.exe" Phase8 Phase7 Processor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timer.Stop()
+          @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase8 Phase7 Processor", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
 
   windows-full:
     name: Windows Release (build, tests, pluginval)
@@ -47,26 +45,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure full validation
-        shell: bash
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
-      - name: Build plugin and tests
-        shell: bash
-        run: cmake --build build --parallel 4
-      - name: Run full tests and pluginval
-        shell: bash
+        shell: cmd
         run: |
-          start=$SECONDS
-          build/tests/KickLockDspTests
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
+      - name: Build plugin and tests
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cmake --build build --parallel 4
+      - name: Run full tests and pluginval
+        shell: pwsh
+        run: |
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          & "build/tests/KickLockDspTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
-          elapsed=$((SECONDS - start))
-          {
-            echo "## FULL"
-            echo "- Build target: KickLock + KickLockDspTests"
-            echo "- Categories: all"
-            echo "- pluginval executed: yes"
-            echo "- Universal build: no"
-            echo "- Test elapsed: ${elapsed}s"
-          } >> "$GITHUB_STEP_SUMMARY"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $timer.Stop()
+          @("## FULL", "- Build target: all", "- Categories: all", "- pluginval executed: yes", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Zip VST3
         run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
       - name: Upload Windows Artifacts
