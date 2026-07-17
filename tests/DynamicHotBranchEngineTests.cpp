@@ -522,24 +522,27 @@ public:
             juce::AudioBuffer<float> one (1, 1);
             one.clear();
             one.setSample (0, 0, 0.1f);
-            expect (engine.process (one, 1).valid);
-            expect (! engine.getGlobalInfo().warm);
-            expect (! engine.getStateInfo (0).warm);
-            expect (! engine.getServiceInfo().warm);
 
             const int globalNeed = (int) std::floor (engine.getGlobalInfo().physicalTapSamples) + 2;
             const int stateNeed = (int) std::floor (engine.getStateInfo (0).physicalTapSamples) + 2;
             expect (globalNeed > 2);
             expect (stateNeed > 2);
-            juce::AudioBuffer<float> g, s, h;
+            expect (globalNeed > stateNeed);
 
-            // Process exactly need-1 frames total (including the first sample).
-            processChunked (engine, makeSine (1, globalNeed - 2, rate, 60.0), g, s, h);
-            expect (! engine.getGlobalInfo().warm);
-
+            // Feed one sample at a time up to the boundary.
+            for (int frame = 1; frame < globalNeed; ++frame)
+            {
+                expect (engine.process (one, 1).valid);
+                expect (! engine.getGlobalInfo().warm,
+                        "global warm at frame " + juce::String (frame)
+                            + " need=" + juce::String (globalNeed));
+                if (frame < stateNeed)
+                    expect (! engine.getStateInfo (0).warm);
+                else
+                    expect (engine.getStateInfo (0).warm);
+            }
             expect (engine.process (one, 1).valid);
             expect (engine.getGlobalInfo().warm);
-            // State needs fewer frames, so it must already be warm.
             expect (engine.getStateInfo (0).warm);
 
             // Identity replace resets warm.
@@ -550,18 +553,19 @@ public:
             // Partial Service prime below the warm requirement is not warm.
             // Fill shared history without Service active, then prime only 10 frames.
             engine.reset();
+            engine.clearService();
             expect (engine.configureGlobal (cfg (rate, 0.0, 0, false, 2, false)));
-            const int historyForShortPrime = globalNeed + 32;
-            processChunked (engine, makeSine (1, historyForShortPrime, rate, 60.0), g, s, h);
+            juce::AudioBuffer<float> g, s, h;
+            processChunked (engine, makeSine (1, globalNeed + 32, rate, 60.0), g, s, h);
             expect (engine.configureService (cfg (rate, 0.0, 0, false, 2, false)));
             expect (! engine.getServiceInfo().warm);
             auto partial = engine.primeService (10);
             expect (partial.valid);
             expectEquals (partial.primedSamples, 10);
-            expect (partial.fullyPrimed); // request fully satisfied
+            expect (partial.fullyPrimed);
             expect (partial.primedSamples < globalNeed);
-            expect (! engine.getServiceInfo().warm);
-            juce::ignoreUnused (stateNeed);
+            expect (! engine.getServiceInfo().warm,
+                    "Service warm after only 10 primed frames; need=" + juce::String (globalNeed));
         }
 
         beginTest ("Service full prime is deterministic and isolates Global/State");
