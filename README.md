@@ -147,6 +147,13 @@ The intended release gate is:
 pluginval --strictness-level 10 path/to/KickLock.vst3
 ```
 
+Release candidates also run the deterministic Phase 11 fixture, callback
+allocation gates, Release performance ratios, artifact extraction checks, and
+cross-platform sanitizer coverage. Recorded kick/bass integration is optional:
+without `tests/assets/real_kick.wav` and `tests/assets/real_bass.wav` it is
+reported as unverified, never as a successful real-audio test. Set
+`KICKLOCK_REQUIRE_REAL_AUDIO_FIXTURES=1` to require those stems.
+
 ## License
 
 KickLock is licensed under GPL-3.0. The project uses JUCE under GPL-compatible

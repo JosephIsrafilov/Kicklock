@@ -38,3 +38,14 @@ genuine material, Apply measurably improving `MultiBandCorrelation::
 weightedMatchPercent` versus the untouched baseline, finite/bounded output,
 determinism across independent instances, and survival across representative
 host block sizes (64/128/512/2048).
+
+## Phase 11 release gate
+
+Phase 11 adds a separate deterministic synthetic fixture and Release-only
+runtime ratio gate. It is not reported as real audio. Missing private stems log
+`REAL_AUDIO_STATUS: UNVERIFIED`; setting `KICKLOCK_REQUIRE_REAL_AUDIO_FIXTURES=1`
+makes absent or undecodable `real_kick.wav` / `real_bass.wav` fail explicitly.
+The throughput gate warms fixed buffers, measures whole batches with
+`steady_clock`, and compares median plus robust upper quantile against represented
+audio duration. Sanitizer jobs skip wall-clock thresholds but retain finite and
+correctness checks.

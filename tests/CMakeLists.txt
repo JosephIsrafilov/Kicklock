@@ -29,6 +29,10 @@ add_executable(KickLockDspTests
     TransportQueueTests.cpp
     UiHelperTests.cpp
     DynamicWorkspaceTests.cpp
+    DynamicReleaseFixture.cpp
+    DynamicReleaseGateTests.cpp
+    DynamicPerformanceGateTests.cpp
+    TestAllocationCounter.cpp
 )
 
 target_include_directories(KickLockDspTests
@@ -83,6 +87,9 @@ add_executable(KickLockFastTests
     ProcessorTests.cpp
     UiHelperTests.cpp
     DynamicWorkspaceTests.cpp
+    DynamicReleaseFixture.cpp
+    DynamicReleaseGateTests.cpp
+    TestAllocationCounter.cpp
 )
 
 target_include_directories(KickLockFastTests
