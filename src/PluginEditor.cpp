@@ -43,11 +43,11 @@ SegmentedModeSelector::SegmentedModeSelector()
         addAndMakeVisible (*button);
     }
     staticButton.setTooltip ("Static: uses one fixed correction for the whole bass part. Best for basslines that stay mostly on one pitch.");
-    dynamicButton.setTooltip ("Dynamic: learns a separate Freq/Q correction for each trusted bass note. Delay and Polarity always remain global.");
+    dynamicButton.setTooltip ("Dynamic: learns repeatable kick/bass conflict States. MIDI and pitch are optional metadata; unknown conflicts use the safe Global path.");
     staticButton.setName ("Static correction mode");
     staticButton.setDescription ("Uses the manual and Analyze correction workflow.");
     dynamicButton.setName ("Dynamic correction mode");
-    dynamicButton.setDescription ("Uses the learned global and per-note correction workflow.");
+    dynamicButton.setDescription ("Uses the learned Global and conflict-State correction workflow.");
     staticButton.onClick = [this] { parameterChoice.setSelectedItemIndex (0, juce::sendNotification); };
     dynamicButton.onClick = [this] { parameterChoice.setSelectedItemIndex (1, juce::sendNotification); };
     syncButtons();
@@ -499,6 +499,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
         if (cleanScopeMode)
             helpOverlayVisible = false;
         resized();
+        if (readCorrectionMode() == CorrectionMode::Dynamic)
+            refreshDynamicWorkflow();
+        else
+            refreshAnalyzeWorkflow();
         repaint();
     };
     oscilloscope.onToggleCleanMode = toggleCleanScopeMode;
@@ -598,6 +602,13 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     configureControlLabel (crossoverLabel, "Crossover Freq");
     configureControlLabel (crossoverEnableLabel, "Crossover");
 
+    // The workspace owns Dynamic presentation only. Workflow actions remain in
+    // this editor and are forwarded to the established processor operations.
+    addAndMakeVisible (dynamicWorkspace);
+    dynamicWorkspace.setDynamicStrengthControls (&dynamicStrengthLabel, &dynamicStrengthSlider);
+    dynamicWorkspace.onClear = [this] { audioProcessor.clearLearnedDynamicData(); };
+    dynamicWorkspace.onRevert = [this] { audioProcessor.revertLatestFix(); };
+
 
 
     // --- Advanced ----------------------------------------------------------
@@ -641,7 +652,7 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     {
         if (showingLearnWorkflow)
         {
-            audioProcessor.clearNoteMap();
+            audioProcessor.clearLearnedDynamicData();
             return;
         }
         if (audioProcessor.isTransientPunchReferenceSet())
@@ -796,7 +807,10 @@ void KickLockAudioProcessorEditor::configureCombo (juce::ComboBox& combo, const 
 
 void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 {
+    const auto dynamicVisibility = dynamicWorkspaceWorkflowVisibility (
+        false, LearnState::Idle, cleanScopeMode);
     const bool showScopeToolbar = shouldBeVisible || cleanScopeMode;
+    const bool showStaticLower = shouldBeVisible && ! dynamicModeSelected;
     gridCombo.setVisible (shouldBeVisible);
     viewCombo.setVisible (true);
     correctionModeSelector.setVisible (shouldBeVisible);
@@ -805,7 +819,7 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     analyzeButton.setVisible (shouldBeVisible);
     applyFixButton.setVisible (shouldBeVisible);
     discardButton.setVisible (shouldBeVisible && showingLearnWorkflow);
-    revertButton.setVisible (shouldBeVisible);
+    revertButton.setVisible (showStaticLower);
     compareAButton.setVisible (shouldBeVisible);
     compareBButton.setVisible (shouldBeVisible);
     compareCopyButton.setVisible (shouldBeVisible);
@@ -816,40 +830,41 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     noSidechainOverlay.setVisible (shouldBeVisible);
     splitter.setVisible (shouldBeVisible);
 
-    manualHeader.setVisible (shouldBeVisible);
-    delaySlider.setVisible (shouldBeVisible);
-    polarityInvertButton.setVisible (shouldBeVisible);
-    phaseFilterButton.setVisible (shouldBeVisible);
-    pitchTrackButton.setVisible (shouldBeVisible);
-    phaseFreqSlider.setVisible (shouldBeVisible);
-    phaseQSlider.setVisible (shouldBeVisible);
-    visualOffsetSlider.setVisible (shouldBeVisible);
-    dynamicStrengthSlider.setVisible (shouldBeVisible);
-    crossoverEnableButton.setVisible (shouldBeVisible);
-    crossoverSlider.setVisible (shouldBeVisible);
+    manualHeader.setVisible (showStaticLower);
+    delaySlider.setVisible (showStaticLower);
+    polarityInvertButton.setVisible (showStaticLower);
+    phaseFilterButton.setVisible (showStaticLower);
+    pitchTrackButton.setVisible (showStaticLower);
+    phaseFreqSlider.setVisible (showStaticLower);
+    phaseQSlider.setVisible (showStaticLower);
+    visualOffsetSlider.setVisible (showStaticLower);
+    dynamicStrengthSlider.setVisible (shouldBeVisible && dynamicVisibility.dynamicStrength);
+    crossoverEnableButton.setVisible (showStaticLower);
+    crossoverSlider.setVisible (showStaticLower);
 
-    delayLabel.setVisible (shouldBeVisible);
-    polarityLabel.setVisible (shouldBeVisible);
-    phaseFilterLabel.setVisible (shouldBeVisible);
-    pitchTrackLabel.setVisible (shouldBeVisible);
-    phaseFreqLabel.setVisible (shouldBeVisible);
-    phaseQLabel.setVisible (shouldBeVisible);
-    visualOffsetLabel.setVisible (shouldBeVisible);
-    dynamicStrengthLabel.setVisible (shouldBeVisible);
-    crossoverEnableLabel.setVisible (shouldBeVisible);
-    crossoverLabel.setVisible (shouldBeVisible);
+    delayLabel.setVisible (showStaticLower);
+    polarityLabel.setVisible (showStaticLower);
+    phaseFilterLabel.setVisible (showStaticLower);
+    pitchTrackLabel.setVisible (showStaticLower);
+    phaseFreqLabel.setVisible (showStaticLower);
+    phaseQLabel.setVisible (showStaticLower);
+    visualOffsetLabel.setVisible (showStaticLower);
+    dynamicStrengthLabel.setVisible (shouldBeVisible && dynamicVisibility.dynamicStrength);
+    crossoverEnableLabel.setVisible (showStaticLower);
+    crossoverLabel.setVisible (showStaticLower);
 
-    advancedHeader.setVisible (shouldBeVisible);
-    delayInterpCombo.setVisible (shouldBeVisible);
-    phaseStagesCombo.setVisible (shouldBeVisible);
-    delayInterpLabel.setVisible (shouldBeVisible);
-    phaseStagesLabel.setVisible (shouldBeVisible);
+    advancedHeader.setVisible (showStaticLower);
+    delayInterpCombo.setVisible (showStaticLower);
+    phaseStagesCombo.setVisible (showStaticLower);
+    delayInterpLabel.setVisible (showStaticLower);
+    phaseStagesLabel.setVisible (showStaticLower);
 
-    analyzerTitle.setVisible (shouldBeVisible);
-    analyzerBody.setVisible (shouldBeVisible);
-    transientPunch.setVisible (shouldBeVisible && ! showingLearnWorkflow);
-    learnProgressDisplay.setVisible (shouldBeVisible && showingLearnWorkflow);
-    setRefButton.setVisible (shouldBeVisible);
+    analyzerTitle.setVisible (showStaticLower);
+    analyzerBody.setVisible (showStaticLower);
+    transientPunch.setVisible (showStaticLower);
+    learnProgressDisplay.setVisible (false);
+    setRefButton.setVisible (showStaticLower);
+    dynamicWorkspace.setVisible (shouldBeVisible && dynamicModeSelected && dynamicVisibility.workspace);
 }
 
 void KickLockAudioProcessorEditor::pushScopeSettings()
@@ -1081,26 +1096,15 @@ void KickLockAudioProcessorEditor::applyWorkflowChromeForMode (CorrectionMode mo
     }
     else
     {
-        // Dynamic owns Learn. Hide Static Apply Fix until Apply Learn is valid.
+        // Dynamic owns Learn and the dedicated workspace. Static lower controls
+        // never imply direct editing of a New Dynamic map.
         transientPunch.setVisible (false);
-        learnProgressDisplay.setVisible (! cleanScopeMode);
+        learnProgressDisplay.setVisible (false);
         applyFixButton.setVisible (false);
         applyFixButton.setButtonText ("Apply Learn");
         lastApplyButtonText = "Apply Learn";
         discardButton.setVisible (false);
-        setRefButton.setButtonText ("Clear Map");
-        setRefButton.setEnabled (audioProcessor.hasValidNoteMap());
-        setRefButton.setTooltip ("Clears the applied note map. Revert restores the previous map when available.");
-
-        latestNoteMap = audioProcessor.getNoteMapSnapshot();
-        const int activeMidi = audioProcessor.activeMidiNote.load (std::memory_order_acquire);
-        const auto runtime = dynamicRuntimeStatus (true,
-                                                   audioProcessor.dynamicMapStale.load (std::memory_order_acquire),
-                                                   NoteMap::isValidNoteMap (latestNoteMap),
-                                                   phaseFilterButton.getToggleState(),
-                                                   audioProcessor.dynamicFallbackActive.load (std::memory_order_acquire));
-        analyzerTitle.setText ("DYNAMIC - " + dynamicRuntimeStatusText (runtime, activeMidi),
-                               juce::dontSendNotification);
+        setRefButton.setVisible (false);
 
         const auto primary = primaryWorkflowPresentation (true, audioProcessor.getLearnState(), canStartAnalyze,
                                                           analyzeStateIsBusy (audioProcessor.getAnalyzeState()));
@@ -1113,15 +1117,6 @@ void KickLockAudioProcessorEditor::applyWorkflowChromeForMode (CorrectionMode mo
         analyzeButton.setEnabled (primary.enabled);
         analyzeButton.setTooltip ("Starts a Dynamic Learn session. Nothing changes until Apply Learn.");
 
-        // Fresh Dynamic entry: idle Learn body (do not resurrect Failed/ResultReady).
-        if (audioProcessor.getLearnState() == LearnState::Idle)
-        {
-            analyzerBody.setText ("Press Learn while the loop plays. KickLock captures kick-locked bass "
-                                  "hits and builds a per-note map. Nothing is applied until Apply Learn.",
-                                  juce::dontSendNotification);
-            lastLearnBodyText = analyzerBody.getText();
-            lastLearnBodyState = LearnState::Idle;
-        }
     }
 
     if (layoutMayChange && wasShowingLearn != showingLearnWorkflow)
@@ -1289,43 +1284,20 @@ void KickLockAudioProcessorEditor::refreshAnalyzeWorkflow()
 
 void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
 {
-    // Dynamic-only. Never called while Static is active.
-    const bool dynamic = true;
+    // Dynamic-only. This is the sole production reader of the SPSC runtime
+    // snapshot; the stored value is then shared by the whole workspace.
     const auto learnState = audioProcessor.getLearnState();
     showingLearnWorkflow = true;
     dynamicModeSelected = true;
 
     const bool learnBusy = learnStateIsBusy (learnState);
-    // Allow leaving Dynamic even while Learn is busy; cancel is handled on transition.
-    correctionModeSelector.setEnabled (true);
-    dynamicStrengthSlider.setEnabled (true);
-    dynamicStrengthSlider.setAlpha (1.0f);
-    dynamicStrengthLabel.setAlpha (1.0f);
-    pitchTrackButton.setEnabled (false);
-    pitchTrackButton.setAlpha (0.45f);
-    pitchTrackLabel.setText ("Pitch (ignored)", juce::dontSendNotification);
-    pitchTrackButton.setTooltip ("Pitch Follow is ignored in Dynamic mode. Its saved value is unchanged.");
-
     latestLearnProgress = audioProcessor.getLearnProgress();
-    // present==false means "no applicable map to Apply", not "no diagnostics".
-    const bool hasPending = audioProcessor.hasPendingLearnResult();
-    const bool learnResolved = learnState == LearnState::ResultReady
-                            || learnState == LearnState::NotEnoughMaterial
-                            || learnState == LearnState::Failed;
-    // Only pull the full finalize payload for resolved Learn states.
-    const auto learnResult = learnResolved ? audioProcessor.getPendingLearnResult()
-                                           : LearnFinalizeResult {};
+    const auto preview = audioProcessor.getPendingDynamicLearnPreviewForUi();
+    const auto pendingResult = audioProcessor.getPendingLearnResult();
+    const auto runtime = audioProcessor.getDynamicRuntimeSnapshotForUi();
 
-    // Runtime status must describe the applied processor-owned map for status
-    // chips; Learn pending map (not yet applied) drives post-Learn note list.
-    latestNoteMap = audioProcessor.getNoteMapSnapshot();
-    const int activeMidi = audioProcessor.activeMidiNote.load (std::memory_order_acquire);
-    const NotePhaseMapSnapshot& chipMap =
-        (learnResolved && learnResult.map.valid) ? learnResult.map : latestNoteMap;
-    learnProgressDisplay.setModel (latestLearnProgress, chipMap, activeMidi, selectedLearnMidi);
-
-    const auto primary = primaryWorkflowPresentation (dynamic, learnState, canStartAnalyze,
-                                                      analyzeStateIsBusy (audioProcessor.getAnalyzeState()));
+    const auto primary = primaryWorkflowPresentation (true, learnState, canStartAnalyze,
+                                                       analyzeStateIsBusy (audioProcessor.getAnalyzeState()));
     const auto primaryText = primaryWorkflowText (primary, latestLearnProgress.capturedHits);
     if (primaryText != lastPrimaryButtonText)
     {
@@ -1337,10 +1309,11 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
                                   ? "Stops new Learn captures and finishes the current captured material."
                                   : "Starts a Dynamic Learn session. Nothing changes until Apply Learn.");
 
-    const bool resultReady = learnApplyEnabled (learnState, hasPending);
-    const auto blockedReason = resultReady ? audioProcessor.getLearnApplyBlockedReason() : juce::String {};
+    const bool resultReady = preview.valid && preview.applyAvailable;
+    const auto blockedReason = resultReady ? preview.applyBlockedReason : juce::String {};
+    const auto workflowVisibility = dynamicWorkspaceWorkflowVisibility (resultReady, learnState, cleanScopeMode);
     // Dynamic never shows Apply Fix. Apply Learn only when applicable.
-    applyFixButton.setVisible (resultReady);
+    applyFixButton.setVisible (workflowVisibility.applyLearn);
     if (resultReady)
     {
         if (lastApplyButtonText != "Apply Learn")
@@ -1357,97 +1330,41 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
         applyFixButton.setEnabled (false);
     }
 
-    const bool showDiscard = learnState == LearnState::ResultReady
-                          || learnState == LearnState::NotEnoughMaterial
-                          || learnState == LearnState::Failed;
-    discardButton.setVisible (showDiscard);
-    discardButton.setEnabled (showDiscard);
-    revertButton.setEnabled (audioProcessor.hasRevertSnapshot());
+    discardButton.setVisible (workflowVisibility.discard);
+    discardButton.setEnabled (workflowVisibility.discard);
+    revertButton.setVisible (false);
 
     transientPunch.setVisible (false);
-    learnProgressDisplay.setVisible (! cleanScopeMode);
-    setRefButton.setButtonText ("Clear Map");
-    setRefButton.setEnabled (! learnBusy && audioProcessor.hasValidNoteMap());
-    setRefButton.setTooltip ("Clears the applied note map. Revert restores the previous map when available.");
+    learnProgressDisplay.setVisible (false);
+    setRefButton.setVisible (false);
 
-    juce::String body;
-    if (learnState == LearnState::ResultReady)
-    {
-        int learnedNotes = 0;
-        for (const auto& entry : learnResult.map.notes)
-            learnedNotes += NoteMap::isValidNoteEntry (entry) ? 1 : 0;
-        body << "Learned " << learnedNotes << " notes from " << learnResult.diagnostics.analyzedHits
-             << " usable hits.\nGlobal base: " << formatSignedDelayMs (learnResult.globalFix.bassDelayMs)
-             << ", " << (learnResult.globalFix.bassPolarityInvert ? "invert" : "normal")
-             << " polarity, " << learnResult.map.base.allpassStages << " stages.";
-        {
-            juce::StringArray noteLines;
-            for (const auto& r : learnResult.noteReports)
-            {
-                const auto line = formatLearnNoteOutcomeLine (r);
-                if (line.isNotEmpty())
-                    noteLines.add (line);
-            }
-            if (noteLines.size() > 0)
-            {
-                body << "\n\nNotes:";
-                for (const auto& line : noteLines)
-                    body << "\n• " << line;
-            }
-        }
-        if (selectedLearnMidi >= 0)
-        {
-            const auto detail = formatSelectedLearnNoteDetail (learnResult.map, selectedLearnMidi);
-            if (detail.isNotEmpty())
-                body << "\n\nSelected: " << detail;
-        }
-        if (learnResult.diagnostics.rejectedPitchHits > 0 || learnResult.diagnostics.unusableSignalHits > 0)
-            body << "\nRejected " << learnResult.diagnostics.rejectedPitchHits << " pitch / "
-                 << learnResult.diagnostics.unusableSignalHits << " unusable hits.";
-        if (learnResult.diagnostics.warning.isNotEmpty())
-            body << "\nWarning: " << learnResult.diagnostics.warning;
-        else if (learnResult.diagnostics.multipleTimingFamilies)
-            body << "\nWarning: multiple timing families; using the dominant consensus.";
-        body << "\n\nNothing has been applied yet.";
-    }
-    else if (learnState == LearnState::NotEnoughMaterial || learnState == LearnState::Failed)
-    {
-        body = formatLearnFailureBody (learnResult);
-    }
-    else if (learnState == LearnState::Idle)
-    {
-        body = "Press Learn while the loop plays. KickLock captures kick-locked bass "
-               "hits and builds a per-note map. Nothing is applied until Apply Learn.";
-    }
-    else
-    {
-        body << formatLearnListeningStatus (latestLearnProgress);
-        if (body.isNotEmpty())
-            body << "\n";
-        body << "Captured " << latestLearnProgress.capturedHits
-             << ", processed " << latestLearnProgress.drainedHits
-             << ".\nQueue " << latestLearnProgress.pendingQueueHits
-             << ", dropped " << latestLearnProgress.droppedQueueHits
-             << ", overlaps " << latestLearnProgress.ignoredOverlappingTriggers << ".";
-    }
-
-    if (body != lastLearnBodyText || lastLearnBodyState != learnState
-        || lastLearnBodySessionId != latestLearnProgress.sessionId
-        || lastLearnBodySelectedMidi != selectedLearnMidi)
-    {
-        analyzerBody.setText (body, juce::dontSendNotification);
-        lastLearnBodyText = body;
-        lastLearnBodyState = learnState;
-        lastLearnBodySessionId = latestLearnProgress.sessionId;
-        lastLearnBodySelectedMidi = selectedLearnMidi;
-    }
-
-    const auto runtime = dynamicRuntimeStatus (dynamic, audioProcessor.dynamicMapStale.load (std::memory_order_acquire),
-                                               NoteMap::isValidNoteMap (latestNoteMap),
-                                               phaseFilterButton.getToggleState(),
-                                               audioProcessor.dynamicFallbackActive.load (std::memory_order_acquire));
-    analyzerTitle.setText ("DYNAMIC - " + dynamicRuntimeStatusText (runtime, activeMidi),
-                           juce::dontSendNotification);
+    DynamicWorkspaceViewModel model;
+    model.mode = CorrectionMode::Dynamic;
+    model.learnState = learnState;
+    model.previewActive = preview.valid;
+    model.previewApplyAvailable = preview.applyAvailable;
+    model.previewApplyBlocked = preview.applyBlocked;
+    model.previewBlockedReason = preview.applyBlockedReason;
+    model.previewSessionId = preview.sessionId;
+    model.previewMap = preview.map;
+    model.previewPredicted = preview.predicted;
+    model.runtime = runtime;
+    model.capturedHits = latestLearnProgress.capturedHits;
+    model.processedHits = latestLearnProgress.drainedHits;
+    if (learnBusy)
+        model.learnStatusMessage = "Learning: captured " + juce::String (juce::jmax (0, model.capturedHits))
+            + ", processed " + juce::String (juce::jmax (0, model.processedHits)) + ".";
+    else if (! preview.valid
+        && (learnState == LearnState::ResultReady
+            || learnState == LearnState::NotEnoughMaterial
+            || learnState == LearnState::Failed))
+        model.learnStatusMessage = formatLearnFailureBody (pendingResult);
+    model.clearAvailable = ! learnBusy && audioProcessor.hasLearnedDynamicData();
+    model.revertAvailable = ! learnBusy && audioProcessor.hasRevertSnapshot();
+    dynamicWorkspace.setModel (model);
+    dynamicWorkspace.setVisible (workflowVisibility.workspace);
+    dynamicStrengthSlider.setVisible (workflowVisibility.dynamicStrength);
+    dynamicStrengthLabel.setVisible (workflowVisibility.dynamicStrength);
 }
 
 void KickLockAudioProcessorEditor::refreshCompareButtons()
@@ -1469,6 +1386,7 @@ void KickLockAudioProcessorEditor::refreshCompareButtons()
 
 void KickLockAudioProcessorEditor::timerCallback()
 {
+    const auto correctionMode = readCorrectionMode();
     oscilloscope.setTimebase (audioProcessor.getSampleRate(),
                               audioProcessor.getScopeDecimationFactor());
     spectrumAnalyzer.setSampleRate (audioProcessor.getSampleRate());
@@ -1484,7 +1402,7 @@ void KickLockAudioProcessorEditor::timerCallback()
                                    : "Waits for the next kick transient and stores it as the triggered-scope reference.");
 
     // Static owns Set Ref / Clear Ref / punch meter; Dynamic owns Clear Map (set in refresh).
-    if (readCorrectionMode() == CorrectionMode::Static)
+    if (correctionMode == CorrectionMode::Static)
     {
         setRefButton.setButtonText (audioProcessor.isTransientPunchReferenceSet() ? "Clear Ref" : "Set Ref");
 
@@ -1516,8 +1434,8 @@ void KickLockAudioProcessorEditor::timerCallback()
 
     // Strict workflow ownership: never refresh both in the same tick.
     // Edge-triggered mode transitions run only when denormalized mode changes.
-    handleCorrectionModeChanged (readCorrectionMode());
-    if (readCorrectionMode() == CorrectionMode::Static)
+    handleCorrectionModeChanged (correctionMode);
+    if (correctionMode == CorrectionMode::Static)
         refreshAnalyzeWorkflow();
     else
         refreshDynamicWorkflow();
@@ -1662,20 +1580,20 @@ void KickLockAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
               38);
 
     drawBlock("How it works",
-              "1. Place KickLock on Bass; route the Kick to its Sidechain input.\n"
-              "2. Choose Static or Dynamic mode.\n"
-              "3. Static: play and click Analyze for one fixed Delay, Polarity, Freq, and Q correction.\n"
-              "4. Dynamic: click Learn and play the full bass part. Captured-note hit chips show counts; trusted notes get separate Freq/Q. Delay and Polarity stay global.\n"
-              "5. Apply Fix (Static) or Apply Learn (Dynamic). Dynamic maps are saved with the project.",
-              72);
+               "1. Place KickLock on Bass; route the Kick to its Sidechain input.\n"
+               "2. Choose Static or Dynamic mode.\n"
+               "3. Static: play and click Analyze for one fixed Delay, Polarity, Freq, and Q correction.\n"
+               "4. Dynamic: click Learn and play the full bass part. Three repeatable conflict States become Candidates; five become Stable. Candidate States are recognized but use Global until Stable.\n"
+               "5. Apply Fix (Static) or Apply Learn (Dynamic). Predicted is Learn evidence; Verified is fresh runtime evidence. Unknown or ambiguous conflicts safely use Global.",
+               72);
 
     drawBlock("Key Features",
               "- Phase Filter (Allpass): Rotates phase smoothly without shifting the audio in time.\n"
               "- Delay & Polarity: Aligns transients perfectly with sub-millisecond precision.\n"
               "- Crossover: Ensures only the low frequencies (e.g., < 150 Hz) are affected, leaving mids/highs untouched.\n"
               "- A/B Compare: Easily switch between two configurations to verify improvements.\n"
-              "- Dynamic Mode: learns a separate Freq/Q phase correction for each trusted bass note. Delay and Polarity remain global, while unknown or low-confidence notes fall back to the global correction.",
-              72);
+               "- Dynamic Mode: learns signed conflict States, not note buckets. MIDI/pitch are optional labels. Recognized States without a correction safely use the Global package.",
+               72);
 
     drawBlock("Meters & Displays",
               "- Live Scope: Visualizes the Kick (sidechain) and Bass waveforms in real-time.\n"
@@ -1764,8 +1682,11 @@ void KickLockAudioProcessorEditor::resized()
     splitter.setBottomHeightBase (bottomPanelHeight);
     
     constexpr int scopeLowerGap = 10;
-    bottomPanelHeight = juce::jlimit (100, bounds.getHeight() - 150, bottomPanelHeight);
-    const int scopeBlockHeight = bounds.getHeight() - bottomPanelHeight - scopeLowerGap;
+    const int requiredDynamicWorkspaceHeight = dynamicModeSelected ? 360 : 100;
+    const int effectiveBottomPanelHeight = juce::jlimit (100, bounds.getHeight() - 150,
+                                                         juce::jmax (bottomPanelHeight,
+                                                                     requiredDynamicWorkspaceHeight));
+    const int scopeBlockHeight = bounds.getHeight() - effectiveBottomPanelHeight - scopeLowerGap;
     
     auto scopeBlock = bounds.removeFromTop (scopeBlockHeight);
     // +16 over the historical 108 for the sub-loss-dB headline row (see
@@ -1785,6 +1706,21 @@ void KickLockAudioProcessorEditor::resized()
     bounds.removeFromTop (2);
     splitter.setBounds (bounds.removeFromTop (6));
     bounds.removeFromTop (2);
+
+    if (dynamicModeSelected)
+    {
+        manualPanelBounds = {};
+        analyzerPanelBounds = {};
+        dynamicWorkspace.setBounds (bounds);
+        dynamicStrengthLabel.toFront (false);
+        dynamicStrengthSlider.toFront (false);
+
+        audioProcessor.apvts.state.setProperty ("editorWidth", getWidth(), nullptr);
+        audioProcessor.apvts.state.setProperty ("editorHeight", getHeight(), nullptr);
+        audioProcessor.apvts.state.setProperty ("bottomPanelHeight", bottomPanelHeight, nullptr);
+        pushScopeSettings();
+        return;
+    }
 
     // --- Lower area: manual controls (left) + analyzer/live (right) -------
     // The analyzer column scales gently with the window so it doesn't look

@@ -3004,6 +3004,8 @@ void KickLockAudioProcessor::clearPendingLearnCandidate()
 {
   const std::lock_guard<std::mutex> lock (learnMutex);
   pendingLearnCandidate = {};
+  pendingDynamicMeasurementSessionId = 0;
+  pendingDynamicPredictedMeasurements = {};
 }
 
 void KickLockAudioProcessor::invalidateLearnSession()
@@ -3269,7 +3271,12 @@ void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresen
   snapshot.stateCount = getOccupiedDynamicStateCount (activeDynamicStateMap);
 
   const auto& selectorDiag = dynamicRuntime.getSelectorDiagnostics();
-  snapshot.activeSemanticStateId = selectorDiag.fadeActive ? 0 : selectorDiag.selectedSemanticStateId;
+  // A selected semantic State can intentionally route through Global (Candidate,
+  // recognized-no-correction, or fallback). Only a settled State/Service branch
+  // carries an audible active State identity for UI presentation.
+  snapshot.activeSemanticStateId = ! selectorDiag.fadeActive
+      && selectorDiag.selectedBranchKind != DynamicSelectorBranchKind::Global
+      ? selectorDiag.selectedSemanticStateId : 0;
   snapshot.selectedSemanticStateId = selectorDiag.selectedSemanticStateId;
   snapshot.activeBranchKind = selectorDiag.selectedBranchKind;
   snapshot.selectorDiagnostic = selectorDiag.lastDecision;
@@ -3301,7 +3308,9 @@ void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresen
     card.hitCount = state.hitCount;
     card.repeatability = state.repeatability;
     card.ambiguity = state.ambiguity;
-    card.hasCorrection = (state.origin == DynamicStateOrigin::Auto && state.hasLearnedPackage)
+    card.hasCorrection = (state.origin == DynamicStateOrigin::Auto
+                          && state.evidence == DynamicStateEvidence::Stable
+                          && state.hasLearnedPackage)
         || (state.origin == DynamicStateOrigin::Manual && state.hasManualBasePackage);
     card.hasLikelyMidi = state.hasLikelyMidi;
     card.likelyMidi = state.hasLikelyMidi ? state.likelyMidi : -1;
@@ -3309,7 +3318,7 @@ void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresen
     card.likelyPitchHz = state.likelyPitchHz;
 
     card.selected = selectorDiag.selectedSemanticStateId == state.stableStateId;
-    card.active = card.selected && ! selectorDiag.fadeActive;
+    card.active = snapshot.activeSemanticStateId == state.stableStateId;
     card.activeBranchKind = card.active ? selectorDiag.selectedBranchKind : DynamicSelectorBranchKind::Global;
 
     card.predicted = activeDynamicPredictedMeasurements[(size_t) slot];
@@ -3918,6 +3927,39 @@ juce::String KickLockAudioProcessor::getLearnApplyBlockedReason() const
   return getLearnApplyBlockedReason (candidate);
 }
 
+KickLockAudioProcessor::PendingDynamicLearnPreviewForUi
+KickLockAudioProcessor::getPendingDynamicLearnPreviewForUi() const
+{
+  PendingDynamicLearnPreviewForUi preview;
+  PendingLearnCandidate candidate;
+  uint64_t predictedSessionId = 0;
+  {
+    const std::lock_guard<std::mutex> lock (learnMutex);
+    candidate = pendingLearnCandidate;
+    predictedSessionId = pendingDynamicMeasurementSessionId;
+    preview.predicted = pendingDynamicPredictedMeasurements;
+  }
+
+  preview.sessionId = candidate.sessionId;
+  preview.valid = learnState.load (std::memory_order_acquire) == LearnState::ResultReady
+      && candidate.present
+      && candidate.result.hasDynamicStateMap
+      && isStructurallyValidDynamicStateMap (candidate.result.dynamicMap);
+  if (! preview.valid)
+  {
+    preview.predicted = {};
+    return preview;
+  }
+
+  preview.map = candidate.result.dynamicMap;
+  if (predictedSessionId != candidate.sessionId)
+    preview.predicted = {};
+  preview.applyBlockedReason = getLearnApplyBlockedReason (candidate);
+  preview.applyBlocked = preview.applyBlockedReason.isNotEmpty();
+  preview.applyAvailable = true;
+  return preview;
+}
+
 bool KickLockAudioProcessor::canApplyLatestLearnResult() const
 {
   PendingLearnCandidate candidate;
@@ -4153,7 +4195,7 @@ bool KickLockAudioProcessor::clearNoteMap()
     return false;
 
   const auto empty = NoteMap::makeEmptyNoteMap();
-  if (hasValidNoteMap())
+  if (hasLearnedDynamicData())
     ensureRevertBundleCaptured();
   {
     const std::lock_guard<std::mutex> lock (mapMutex);
@@ -4168,10 +4210,24 @@ bool KickLockAudioProcessor::clearNoteMap()
   return true;
 }
 
+bool KickLockAudioProcessor::clearLearnedDynamicData()
+{
+  // clearNoteMap() already atomically clears the New map, its measurement
+  // sidecar, and legacy compatibility data through the established queues.
+  return clearNoteMap();
+}
+
 bool KickLockAudioProcessor::hasValidNoteMap() const noexcept
 {
   const std::lock_guard<std::mutex> lock (mapMutex);
   return NoteMap::isValidNoteMap (messageOwnedNoteMap);
+}
+
+bool KickLockAudioProcessor::hasLearnedDynamicData() const noexcept
+{
+  const std::lock_guard<std::mutex> lock (mapMutex);
+  return isStructurallyValidDynamicStateMap (messageOwnedDynamicStateMap)
+      || NoteMap::isValidNoteMap (messageOwnedNoteMap);
 }
 
 NotePhaseMapSnapshot KickLockAudioProcessor::getNoteMapSnapshot() const

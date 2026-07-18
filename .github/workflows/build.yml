@@ -33,10 +33,10 @@ jobs:
         shell: pwsh
         run: |
           $timer = [Diagnostics.Stopwatch]::StartNew()
-          & "build/tests/KickLockFastTests.exe" Phase9 Phase8 Phase7 Processor
+          & "build/tests/KickLockFastTests.exe" Phase10 Phase9 Phase8 Phase7 Processor "UI Helpers"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $timer.Stop()
-          @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase9 Phase8 Phase7 Processor", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
+          @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase10 Phase9 Phase8 Phase7 Processor UI Helpers", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
 
   windows-full:
     name: ${{ github.event_name != 'pull_request' && 'Windows Release (build, tests, pluginval)' || 'Windows Full Internal' }}
@@ -86,12 +86,12 @@ jobs:
       - name: Run fast tests
         run: |
           start=$SECONDS
-          build/tests/KickLockFastTests Phase9 Phase8 Phase7 Processor
+          build/tests/KickLockFastTests Phase10 Phase9 Phase8 Phase7 Processor "UI Helpers"
           elapsed=$((SECONDS - start))
           {
             echo "## PR FAST"
             echo "- Build target: KickLockFastTests"
-            echo "- Categories: Phase9 Phase8 Phase7 Processor"
+            echo "- Categories: Phase10 Phase9 Phase8 Phase7 Processor UI Helpers"
             echo "- pluginval executed: no"
             echo "- Universal build: no (arm64 only)"
             echo "- Test elapsed: ${elapsed}s"
@@ -153,12 +153,12 @@ jobs:
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: |
           start=$SECONDS
-          build/tests/KickLockFastTests Phase9 Phase8 Phase7 DSP Processor
+          build/tests/KickLockFastTests Phase10 Phase9 Phase8 Phase7 DSP Processor "UI Helpers"
           elapsed=$((SECONDS - start))
           {
             echo "## PR FAST"
             echo "- Build target: KickLockFastTests"
-            echo "- Categories: Phase9 Phase8 Phase7 DSP Processor"
+            echo "- Categories: Phase10 Phase9 Phase8 Phase7 DSP Processor UI Helpers"
             echo "- pluginval executed: no"
             echo "- Universal build: no"
             echo "- Test elapsed: ${elapsed}s"
@@ -183,12 +183,12 @@ jobs:
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: |
           start=$SECONDS
-          build/tests/KickLockDspTests DSP Phase1 Phase2 Phase3 Phase4 Phase7 Phase8 Phase9 P10 Processor Stabilization "UI Helpers"
+          build/tests/KickLockDspTests DSP Phase1 Phase2 Phase3 Phase4 Phase7 Phase8 Phase9 Phase10 P10 Processor Stabilization "UI Helpers"
           elapsed=$((SECONDS - start))
           {
             echo "## FULL"
             echo "- Build target: KickLockDspTests"
-            echo "- Categories: sanitizer-safe full set including Phase7 Phase8 Phase9"
+            echo "- Categories: sanitizer-safe full set including Phase7 Phase8 Phase9 Phase10"
             echo "- pluginval executed: no"
             echo "- Universal build: no"
             echo "- Test elapsed: ${elapsed}s"

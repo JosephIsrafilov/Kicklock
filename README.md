@@ -12,7 +12,7 @@ shows a trigger-locked oscilloscope plus a live low-end match score.
 - Measures a multi-band, low-end-weighted phase match from 20 Hz to 500 Hz.
 - Lets you adjust bass delay, polarity, and an allpass phase filter by hand.
 - Can Analyze recent kick hits and recommend delay, polarity, frequency, Q, and stage settings.
-- Supports Static correction and Dynamic learned per-note phase maps.
+- Supports Static correction and Dynamic learned conflict-State maps.
 - Supports A/B compare slots, Revert after Apply Fix, and four factory presets.
 
 ## Downloads
@@ -59,20 +59,25 @@ from before the first applied fix.
 1. Select **Dynamic** and play a representative bassline with the kick routed
    to the sidechain.
 2. Press **Learn**, then **Stop Learn** after capturing enough stable hits.
-3. Review the learned note chips and summary. Nothing has changed yet.
-4. Press **Apply Learn** to activate the global correction and per-note map, or
+3. Review the Dynamic workspace preview. Learn forms repeatable signed conflict
+   States, not note buckets: three hits create a Candidate and five repeatable
+   hits create a Stable State. MIDI and pitch are optional labels only.
+4. Candidates are recognizable but use Global; a recognizable State without a
+   confident correction also safely uses Global. Predicted values are offline
+   Learn evidence, while Verified values require fresh runtime output.
+5. Press **Apply Learn** to activate the Global correction and State map, or
    **Discard** to leave the current sound unchanged.
 
 Dynamic Strength blends from the learned global correction at 0% to the full
-per-note correction at 100%. Pitch Follow is ignored in Dynamic mode but its
+State correction at 100%. Pitch Follow is ignored in Dynamic mode but its
 saved value is not changed.
 
 Dynamic status labels are explicit: **NO MAP** means no applied map exists,
-**FALLBACK** means the current note uses the learned global correction,
-**MAP STALE - RE-LEARN** means the learned base context no longer matches, and
-**PHASE FILTER OFF** means the map is retained but inaudible. **Clear Map**
-removes the applied map without changing manual parameters; **Revert** restores
-the previous map when available.
+**ACTIVE STATE**, **ACTIVE SERVICE**, **GLOBAL FALLBACK**, **HOLD**,
+**BYPASSED**, and **NO SIDECHAIN** describe current runtime routing. Pending
+Learn is marked preview/not applied and never presented as active or Verified.
+**Clear Map** removes applied learned data without changing manual parameters;
+**Revert** restores the previous map when available.
 
 Older projects load as Static with no map.
 

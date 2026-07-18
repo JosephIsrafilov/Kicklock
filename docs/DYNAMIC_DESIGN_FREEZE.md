@@ -267,6 +267,37 @@ components); `PluginProcessor` stays a thin integration layer.
   `setStateInformation()` always starts predicted/verified Unavailable.
 - Phase 9 does not implement DynamicWorkspace or change the visible editor.
 
+## Phase 10 DynamicWorkspace
+
+- `DynamicWorkspace` is presentation-only. The editor is the sole production
+  message-thread reader of `DynamicSnapshotPublisher`, reads one Phase-9
+  `DynamicRuntimeSnapshot` per Dynamic UI update, and passes that stored value
+  to the workspace and its eight persistent card components.
+- The workspace pre-creates exactly eight State cards. `stableStateId` is the
+  only card/detail identity; slot remains visible as secondary placement data.
+  MIDI and pitch are optional display metadata, never identity.
+- Pending ResultReady New Dynamic Learn data is read as one coherent
+  message-thread preview value (session, map, predicted sidecar, validity and
+  Apply state). It is explicitly marked preview/not applied, never active, and
+  always shows Verified as unavailable. Applying or reverting never fabricates
+  local runtime cards; the next published runtime snapshot is authoritative.
+- Applied New-map cards come only from `DynamicRuntimeSnapshot`. Predicted
+  Learn evidence and fresh audible Verified evidence remain separate. Legacy
+  compatibility is labelled `LEGACY MAP` and never creates New State cards or
+  Phase-9 measurements; no-map remains `NO MAP`.
+- Selected semantic identity and active audible identity are separate. The
+  header presents Global, State, Service, Hold, fallback, bypass, and sidechain
+  status from the published snapshot. Snapshot sequence gaps are latest-state
+  behavior, never an event log.
+- Static retains its existing scope, manual controls, analyzer and workflow.
+  Dynamic replaces that lower manual/analyzer region with DynamicWorkspace;
+  Dynamic Strength is the sole existing live Dynamic control and is safely
+  laid out in its header without another APVTS attachment. Clean Scope hides presentation
+  only and preserves processor-owned Learn/map state and UI detail selection.
+- Phase 10 changes no DSP, map schema, fingerprint/matching formulas, Learn
+  formation, source priority, persistence format, service behavior, latency, or
+  audio-thread contract.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.
