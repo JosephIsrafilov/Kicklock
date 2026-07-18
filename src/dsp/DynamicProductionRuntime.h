@@ -17,6 +17,7 @@
 #include "DynamicSelectorScheduler.h"
 #include "DynamicContinuityMixer.h"
 #include "TransientDetector.h"
+#include "DynamicRuntimeMeasurementCapture.h"
 
 // =============================================================================
 // Phase 7: production runtime coordinator.
@@ -88,6 +89,9 @@ public:
 
         captureBank.prepare (newSampleRate);
         configureKickTrigger (newSampleRate);
+        if (! measurementCapture.prepare (newSampleRate))
+            return false;
+        measurementHandoffScratch.resizeWindows (measurementCapture.getWindowSamples());
 
         sampleRate = newSampleRate;
         maxBlock = maxBlockSize;
@@ -105,6 +109,10 @@ public:
         fallbackDelay.setMaximumDelayInSamples (reportedLatencySamples + 8);
         fallbackDelay.prepare (spec);
 
+        juce::dsp::ProcessSpec monoSpec { sampleRate, (juce::uint32) maxBlock, (juce::uint32) 1 };
+        measurementKickAlignDelay.setMaximumDelayInSamples (reportedLatencySamples + 8);
+        measurementKickAlignDelay.prepare (monoSpec);
+
         activeMap = makeEmptyDynamicStateMap();
         mapGeneration = 0;
 
@@ -121,6 +129,7 @@ public:
         engine.reset();
         mixer.reset();
         fallbackDelay.reset();
+        measurementKickAlignDelay.reset();
         resetTimeline();
         invalidateConfigurationCache();
         diagnostics = DynamicProductionDiagnostics {};
@@ -163,6 +172,7 @@ public:
         engine.reset();
         mixer.reset();
         fallbackDelay.reset();
+        measurementKickAlignDelay.reset();
         resetTimeline();
     }
 
@@ -175,7 +185,7 @@ public:
     {
         if (! prepared)
             return;
-        resetTimeline();
+        resetTimeline (DynamicCaptureRejectCategory::SidechainLost);
     }
 
     // Renders the New Dynamic correction. `bassInput` is the pre-correction main
@@ -257,6 +267,41 @@ public:
     bool getServiceBindingValid() const noexcept { return serviceBindingValid; }
     uint64_t getServiceBoundStableStateId() const noexcept { return serviceBoundStableStateId; }
 
+    // Pops the oldest completed measurement capture, stamping the branch
+    // that is ACTUALLY audible for this identity right now (never the branch
+    // guessed at capture start) and vetoing the hand-off entirely when the
+    // target correction is not confidently settled at completion time (Hold,
+    // mid-fade, stale reference, or a different identity now selected) -
+    // Section 14's "no unfinished fade as if it were settled" rule.
+    //
+    // `out` must already be sized via out.resizeWindows(getMeasurementWindowSamples())
+    // (PluginProcessor does this once in prepareToPlay()); this function only
+    // ever does element-wise copies into already-sized vectors, so it never
+    // allocates on the audio thread.
+    bool takeCompletedMeasurementCapture (DynamicRuntimeMeasurementCaptureResult& out) noexcept
+    {
+        if (! measurementCapture.takeCompleted (measurementHandoffScratch))
+            return false;
+
+        if (measurementHandoffScratch.mapGeneration != mapGeneration)
+            return false; // stale generation; never hand off
+
+        const auto& selectorDiag = scheduler.getDiagnostics();
+        const bool settled = ! selectorDiag.fadeActive
+            && selectorDiag.selectedSemanticStateId == measurementHandoffScratch.stableStateId
+            && selectorDiag.selectedBranchKind != DynamicSelectorBranchKind::Global;
+        if (! settled)
+            return false;
+
+        measurementHandoffScratch.branchKind = selectorDiag.selectedBranchKind;
+        out.copyFrom (measurementHandoffScratch);
+        return true;
+    }
+
+    int getMeasurementWindowSamples() const noexcept { return measurementCapture.getWindowSamples(); }
+    uint64_t getMeasurementCaptureExhaustedCount() const noexcept { return measurementCapture.getExhaustedRequestCount(); }
+    uint64_t getMeasurementCaptureDroppedForTransportCount() const noexcept { return measurementCapture.getDroppedForTransportCount(); }
+
     // ---- test-only accessors (never used by production UI) ----
     DynamicHotBranchEngine& getEngineForTesting() noexcept { return engine; }
     DynamicSelectorScheduler& getSchedulerForTesting() noexcept { return scheduler; }
@@ -268,13 +313,14 @@ private:
         configureDynamicFingerprintTrigger (kickTrigger, newSampleRate);
     }
 
-    void resetTimeline() noexcept
+    void resetTimeline (DynamicCaptureRejectCategory measurementDiscardReason = DynamicCaptureRejectCategory::TransportInvalidated) noexcept
     {
         captureBank.reset();
         scheduler.reset (0);
         kickTrigger.reset();
         runtimeSamplePos = 0;
         clearServiceBinding();
+        measurementCapture.discardInFlight (measurementDiscardReason);
     }
 
     void clearServiceBinding() noexcept
@@ -388,6 +434,7 @@ private:
             }
 
             captureBank.pushSample (rawBass, rawKick);
+            measurementCapture.pushRawSample (rawBass, rawKick);
 
             DynamicFingerprintObservation observation;
             while (captureBank.takeCompleted (observation))
@@ -413,7 +460,30 @@ private:
 
                 if (match.decision == DynamicMatchDecision::Matched
                     && match.correctionAvailable && ! match.selectedBypassed)
+                {
                     pendingConfidentId = match.selectedStableStateId;
+
+                    // Phase 9: a runtime event eligible for State verification
+                    // (Section 14) - confidently matched, correction actually
+                    // available, not bypassed, sidechain present. Whether the
+                    // audible branch really settles on this identity by the
+                    // time the after-window completes is re-checked at
+                    // hand-off (takeCompletedMeasurementCapture), never
+                    // assumed here.
+                    if (hasSidechain)
+                    {
+                        const auto package = resolveDynamicPackage (
+                            activeMap, match.selectedStableStateId, configuredStrength, sampleRate);
+                        if (package.valid && package.decision == DynamicPackageDecision::StateCorrection)
+                        {
+                            const double tap = (double) reportedLatencySamples
+                                + package.effectiveAbsoluteDelayMs * sampleRate / 1000.0;
+                            measurementCapture.beginCapture (mapGeneration, match.selectedStableStateId,
+                                                             DynamicSelectorBranchKind::Global,
+                                                             observation.triggerSample, tap, sampleRate);
+                        }
+                    }
+                }
             }
         }
 
@@ -434,6 +504,21 @@ private:
 
         for (int ch = 0; ch < numChannels; ++ch)
             output.copyFrom (ch, offset, chunkOutput, ch, 0, n);
+
+        // Phase 9: feed the actual audible processed bass and the fixed
+        // 20 ms-aligned raw kick reference (the same common-latency shift
+        // every branch shares) into any in-flight measurement captures at
+        // this same absolute stream position, then promote any capture that
+        // just finished both windows.
+        for (int i = 0; i < n; ++i)
+        {
+            const float rawKick = rawKickMono != nullptr ? rawKickMono[offset + i] : 0.0f;
+            measurementKickAlignDelay.pushSample (0, std::isfinite (rawKick) ? rawKick : 0.0f);
+            const float alignedKick = measurementKickAlignDelay.popSample (0, (float) reportedLatencySamples);
+            const float processedBass = chunkOutput.getSample (0, i);
+            measurementCapture.pushOutputSample (processedBass, alignedKick);
+        }
+        measurementCapture.serviceCompletions();
 
         runtimeSamplePos = captureBank.nextSample();
         return true;
@@ -560,6 +645,16 @@ private:
     juce::AudioBuffer<float> chunkInput;
     juce::AudioBuffer<float> chunkOutput;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> fallbackDelay;
+
+    // Phase 9: runtime measurement capture (see Section 12-14). Owns its own
+    // fixed slots/rings; measurementKickAlignDelay supplies the fixed
+    // 20 ms-aligned raw kick reference fed alongside the actual processed
+    // bass at every output sample.
+    DynamicRuntimeMeasurementCapture measurementCapture;
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> measurementKickAlignDelay;
+    // Persistent scratch for takeCompletedMeasurementCapture(); sized once in
+    // prepare() so the hand-off never allocates.
+    DynamicRuntimeMeasurementCaptureResult measurementHandoffScratch;
 
     DynamicProductionDiagnostics diagnostics;
 };

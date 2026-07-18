@@ -9,6 +9,7 @@ add_executable(KickLockDspTests
     DynamicSelectorSchedulerTests.cpp
     DynamicProductionRuntimeTests.cpp
     DynamicLearnFormationTests.cpp
+    DynamicStateMeasurementTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     DynamicRuntimeTests.cpp
     LearnCoreTests.cpp
@@ -76,6 +77,7 @@ add_executable(KickLockFastTests
     DynamicSelectorSchedulerTests.cpp
     DynamicProductionRuntimeTests.cpp
     DynamicLearnFormationTests.cpp
+    DynamicStateMeasurementTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     ProcessorTests.cpp
 )

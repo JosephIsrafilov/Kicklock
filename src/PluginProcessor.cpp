@@ -706,6 +706,52 @@ private:
   KickLockAudioProcessor& owner;
 };
 
+// Phase 9: dedicated measurement worker. Pops one completed capture from the
+// bounded audio -> worker queue, scores it with the pure canonical scorer
+// (worker allocation is allowed; this thread is never the audio thread), and
+// pushes the small result back through the bounded worker -> audio queue.
+// Never touches the DynamicStateMap or APVTS.
+class KickLockAudioProcessor::DynamicMeasurementWorker : public juce::Thread
+{
+public:
+    explicit DynamicMeasurementWorker (KickLockAudioProcessor& p)
+        : juce::Thread ("KickLock Dynamic Measurement"), owner (p) {}
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            if (owner.serviceDynamicMeasurementWorkerStep())
+                continue;
+            wait (10);
+        }
+    }
+
+private:
+    KickLockAudioProcessor& owner;
+};
+
+bool KickLockAudioProcessor::serviceDynamicMeasurementWorkerStep()
+{
+    DynamicRuntimeMeasurementCaptureResult capture;
+    if (! dynamicMeasurementCaptureQueue.pop (capture))
+        return false;
+
+    DynamicMeasurementScoredCapture scored;
+    scored.mapGeneration = capture.mapGeneration;
+    scored.stableStateId = capture.stableStateId;
+    scored.branchKind = capture.branchKind;
+    scored.triggerSample = capture.triggerSample;
+    scored.score = DynamicMeasurementScorer::scoreCapturedPair (
+        capture.beforeBass.data(), capture.beforeKick.data(),
+        capture.afterBass.data(), capture.afterKick.data(),
+        capture.windowSamples, capture.sampleRate);
+    scored.valid = capture.valid && scored.score.valid;
+
+    dynamicMeasurementScoreQueue.push (scored);
+    return true;
+}
+
 void KickLockAudioProcessor::CallbackPauseControlForTesting::pause()
 {
   const std::lock_guard<std::mutex> lock (mutex);
@@ -790,6 +836,8 @@ KickLockAudioProcessor::KickLockAudioProcessor()
    autoAlignEngine = std::make_unique<AutoAlignEngine>(*this);
    learnWorker = std::make_unique<LearnWorker> (*this);
    learnWorker->startThread();
+   dynamicMeasurementWorker = std::make_unique<DynamicMeasurementWorker> (*this);
+   dynamicMeasurementWorker->startThread();
 }
 
 KickLockAudioProcessor::~KickLockAudioProcessor() {
@@ -798,6 +846,15 @@ KickLockAudioProcessor::~KickLockAudioProcessor() {
     const std::lock_guard<std::mutex> lock (mapTimerCallbackMutex);
   }
   shuttingDown.store(true, std::memory_order_release);
+  if (dynamicMeasurementWorker != nullptr)
+  {
+    dynamicMeasurementWorker->signalThreadShouldExit();
+    dynamicMeasurementWorker->notify();
+    const bool stoppedMeasurementWorker = dynamicMeasurementWorker->waitForThreadToExit (cooperativeTeardownBoundMs);
+    if (! stoppedMeasurementWorker)
+      dynamicMeasurementWorker->waitForThreadToExit (-1);
+    dynamicMeasurementWorker.reset();
+  }
   invalidateLearnSession();
   learnStartRequested.store(false, std::memory_order_release);
   learnStopRequested.store(false, std::memory_order_release);
@@ -1192,6 +1249,29 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   dynamicSilenceResetSamples = juce::jmax (1, (int) std::round (sampleRate * 0.25));
   dynamicFallbackActive.store (false, std::memory_order_release);
   dynamicMapStale.store (false, std::memory_order_release);
+
+  // Phase 9: measurement queues/aggregation/snapshot are rebuilt every
+  // prepareToPlay(), same as the map queue above, so no runtime verification
+  // history or in-flight capture survives a sample-rate or block-size change.
+  // The capture queue's slots are pre-sized to this session's actual window
+  // length up front (allocation happens here, off the audio thread, never
+  // again afterward).
+  {
+    DynamicRuntimeMeasurementCaptureResult captureQueueTemplate;
+    captureQueueTemplate.resizeWindows (DynamicRuntimeMeasurementCaptureContract::windowSamplesFor (sampleRate));
+    dynamicMeasurementCaptureQueue.prepare (DynamicMeasurementQueueContract::kCaptureQueueCapacity, captureQueueTemplate);
+    dynamicMeasurementDrainScratch.resizeWindows (dynamicRuntime.getMeasurementWindowSamples());
+  }
+  dynamicMeasurementScoreQueue.prepare (DynamicMeasurementQueueContract::kScoreQueueCapacity);
+  dynamicPredictedMeasurementQueue.prepare (4);
+  dynamicVerifiedAggregation.reset();
+  dynamicVerifiedAggregation.reconcile (activeDynamicStateMap, dynamicRuntime.getMapGeneration());
+  dynamicSnapshotPublisher.prepare();
+  dynamicSnapshotBlockCounter = 0;
+  {
+    const std::lock_guard<std::mutex> lock (mapMutex);
+    activeDynamicPredictedMeasurements = messageOwnedDynamicPredictedMeasurements;
+  }
   activeMidiNote.store (-1, std::memory_order_release);
 
   // Triggered oscilloscope capture: keep 20 ms pre-roll internally for a
@@ -1635,6 +1715,18 @@ void KickLockAudioProcessor::processBlockBypassed(
   for (auto channel = getTotalNumInputChannels();
        channel < getTotalNumOutputChannels(); ++channel)
     buffer.clear(channel, 0, buffer.getNumSamples());
+
+  // Phase 9 / Section 19 bypass policy: shadow rendering may have completed
+  // captures, but the audible output stays the fixed dry delay, so those
+  // captures must never be published as verified correction - drain and
+  // discard them (never overwrite an in-flight slot, never block audio) and
+  // publish the snapshot with bypassActive=true instead.
+  {
+    DynamicRuntimeMeasurementCaptureResult discardedCapture;
+    while (dynamicRuntime.takeCompletedMeasurementCapture(discardedCapture)) {}
+  }
+  drainDynamicMeasurementScores();
+  publishDynamicRuntimeSnapshot(hasSidechain, /*bypassActive=*/true);
 }
 
 bool KickLockAudioProcessor::isBusesLayoutSupported(
@@ -2038,6 +2130,11 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
 
   realtimeCorrelation.store(
       juce::jlimit(-1.0f, 1.0f, activeMatch / 100.0f));
+
+  // Phase 9: once per process() call, never once per sample.
+  drainDynamicMeasurementCaptures();
+  drainDynamicMeasurementScores();
+  publishDynamicRuntimeSnapshot(hasSidechain, /*bypassActive=*/false);
 }
 
 juce::AudioProcessorEditor *KickLockAudioProcessor::createEditor() {
@@ -2494,6 +2591,10 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
       const std::lock_guard<std::mutex> lock(mapMutex);
       messageOwnedNoteMap = restoredMap;
       messageOwnedDynamicStateMap = restoredDynamicMap;
+      // Section 11/K: predicted/verified measurements are never serialized,
+      // so a restored project always starts Unavailable rather than
+      // replaying a previous session's numbers.
+      messageOwnedDynamicPredictedMeasurements = {};
     }
     resetResolvedLearnStateToIdle();
     requestMapPublication(restoredMap);
@@ -2501,6 +2602,7 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
     // the queue is transiently full the message-owned copy is retained and
     // prepareToPlay() re-seeds the audio-owned map from it.
     dynamicMapUpdateQueue.push(restoredDynamicMap);
+    dynamicPredictedMeasurementQueue.push ({});
   }
   else
   {
@@ -2510,10 +2612,12 @@ void KickLockAudioProcessor::setStateInformation(const void *data,
       const std::lock_guard<std::mutex> lock(mapMutex);
       messageOwnedNoteMap = empty;
       messageOwnedDynamicStateMap = emptyDynamic;
+      messageOwnedDynamicPredictedMeasurements = {};
     }
     resetResolvedLearnStateToIdle();
     requestMapPublication(empty);
     dynamicMapUpdateQueue.push(emptyDynamic);
+    dynamicPredictedMeasurementQueue.push ({});
   }
 }
 
@@ -2840,6 +2944,7 @@ void KickLockAudioProcessor::ensureRevertBundleCaptured() {
     const std::lock_guard<std::mutex> lock(mapMutex);
     revertBundle.noteMap = messageOwnedNoteMap;
     revertBundle.dynamicStateMap = messageOwnedDynamicStateMap;
+    revertBundle.dynamicPredictedMeasurements = messageOwnedDynamicPredictedMeasurements;
   }
   revertSnapshotValid.store(true, std::memory_order_release);
 }
@@ -2856,10 +2961,12 @@ bool KickLockAudioProcessor::revertLatestFix() {
     const std::lock_guard<std::mutex> lock(mapMutex);
     messageOwnedNoteMap = revertBundle.noteMap;
     messageOwnedDynamicStateMap = revertBundle.dynamicStateMap;
+    messageOwnedDynamicPredictedMeasurements = revertBundle.dynamicPredictedMeasurements;
   }
   resetResolvedLearnStateToIdle();
   requestMapPublication(revertBundle.noteMap);
   requestDynamicMapPublication(revertBundle.dynamicStateMap);
+  requestDynamicPredictedMeasurementPublication(revertBundle.dynamicPredictedMeasurements);
   revertSnapshotValid.store(false, std::memory_order_release);
   return true;
 }
@@ -3077,8 +3184,126 @@ void KickLockAudioProcessor::drainDynamicMapUpdates() noexcept
     activeDynamicStateMap = pending;
     replaced = true;
   }
+
+  // Phase 9: the predicted-measurement sidecar is queued in lockstep with
+  // the map at the Apply call site, so drain it in the SAME pass; the newest
+  // complete bundle wins, matching the map's own newest-wins policy.
+  std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> pendingPredicted;
+  bool predictedReplaced = false;
+  while (dynamicPredictedMeasurementQueue.pop (pendingPredicted))
+  {
+    activeDynamicPredictedMeasurements = pendingPredicted;
+    predictedReplaced = true;
+  }
+
   if (replaced)
+  {
     dynamicRuntime.activateMap(activeDynamicStateMap);
+    dynamicVerifiedAggregation.reconcile (activeDynamicStateMap, dynamicRuntime.getMapGeneration());
+    if (! predictedReplaced)
+      activeDynamicPredictedMeasurements = {};
+  }
+}
+
+void KickLockAudioProcessor::drainDynamicMeasurementCaptures() noexcept
+{
+  // Audio thread: pop every capture DynamicProductionRuntime has finished and
+  // confirmed eligible this block, and publish it to the bounded audio ->
+  // worker queue. A full queue drops the capture (fixed diagnostic on the
+  // queue itself) rather than blocking or overwriting an in-flight publish.
+  // dynamicMeasurementDrainScratch is sized once in prepareToPlay(), so
+  // neither the hand-off nor the queue push allocates here.
+  while (dynamicRuntime.takeCompletedMeasurementCapture (dynamicMeasurementDrainScratch))
+    dynamicMeasurementCaptureQueue.push (dynamicMeasurementDrainScratch);
+}
+
+void KickLockAudioProcessor::drainDynamicMeasurementScores() noexcept
+{
+  // Audio thread: fold every worker-scored result into the fixed rolling
+  // verified aggregate. addResult() itself rejects a stale
+  // stableStateId/mapGeneration pairing, so a result computed against a map
+  // generation that has since been replaced can never update the wrong slot.
+  DynamicMeasurementScoredCapture scored;
+  while (dynamicMeasurementScoreQueue.pop (scored))
+    dynamicVerifiedAggregation.addResult (scored);
+}
+
+void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresent, bool bypassActive) noexcept
+{
+  // Audio thread, once per process()/processBlockBypassed() call - never
+  // once per sample. Builds a complete, self-contained value from
+  // audio-owned state only (activeDynamicStateMap, the runtime's own
+  // diagnostics, activeDynamicPredictedMeasurements, and
+  // dynamicVerifiedAggregation), then publishes it through the tear-free
+  // N-way buffer.
+  ++dynamicSnapshotBlockCounter;
+
+  DynamicRuntimeSnapshot snapshot;
+  snapshot.mapGeneration = dynamicRuntime.getMapGeneration();
+  snapshot.source = activeDynamicMapSource.load (std::memory_order_relaxed);
+  snapshot.mapValid = activeDynamicStateMap.valid;
+  snapshot.stateCount = getOccupiedDynamicStateCount (activeDynamicStateMap);
+
+  const auto& selectorDiag = dynamicRuntime.getSelectorDiagnostics();
+  snapshot.activeSemanticStateId = selectorDiag.fadeActive ? 0 : selectorDiag.selectedSemanticStateId;
+  snapshot.selectedSemanticStateId = selectorDiag.selectedSemanticStateId;
+  snapshot.activeBranchKind = selectorDiag.selectedBranchKind;
+  snapshot.selectorDiagnostic = selectorDiag.lastDecision;
+  snapshot.holdActive = selectorDiag.holdEventCount > 0;
+  snapshot.fallbackActive = dynamicRuntime.isFallbackActive();
+  snapshot.sidechainPresent = sidechainPresent;
+  snapshot.bypassActive = bypassActive;
+  snapshot.captureExhaustedCount = dynamicRuntime.getMeasurementCaptureExhaustedCount();
+  snapshot.captureDroppedForTransportCount = dynamicRuntime.getMeasurementCaptureDroppedForTransportCount();
+  snapshot.measurementCaptureQueueDroppedCount = (uint64_t) dynamicMeasurementCaptureQueue.getDroppedCount();
+  snapshot.measurementScoreQueueDroppedCount = (uint64_t) dynamicMeasurementScoreQueue.getDroppedCount();
+  snapshot.timestampSample = dynamicRuntime.getRuntimeSamplePosition();
+
+  for (int slot = 0; slot < DynamicMeasurementContract::kMaxRetainedStates; ++slot)
+  {
+    const auto& state = activeDynamicStateMap.states[(size_t) slot];
+    auto& card = snapshot.states[(size_t) slot];
+    card = DynamicStateCard {};
+    card.occupied = state.occupied;
+    if (! state.occupied)
+      continue;
+
+    card.stableStateId = state.stableStateId;
+    card.slot = slot;
+    card.origin = state.origin;
+    card.evidence = state.evidence;
+    card.enabled = state.enabled;
+    card.bypassed = state.bypassed;
+    card.hitCount = state.hitCount;
+    card.repeatability = state.repeatability;
+    card.ambiguity = state.ambiguity;
+    card.hasCorrection = (state.origin == DynamicStateOrigin::Auto && state.hasLearnedPackage)
+        || (state.origin == DynamicStateOrigin::Manual && state.hasManualBasePackage);
+    card.hasLikelyMidi = state.hasLikelyMidi;
+    card.likelyMidi = state.hasLikelyMidi ? state.likelyMidi : -1;
+    card.hasLikelyPitchHz = state.hasLikelyPitchHz;
+    card.likelyPitchHz = state.likelyPitchHz;
+
+    card.selected = selectorDiag.selectedSemanticStateId == state.stableStateId;
+    card.active = card.selected && ! selectorDiag.fadeActive;
+    card.activeBranchKind = card.active ? selectorDiag.selectedBranchKind : DynamicSelectorBranchKind::Global;
+
+    card.predicted = activeDynamicPredictedMeasurements[(size_t) slot];
+    card.verified = dynamicVerifiedAggregation.summaryFor (slot);
+
+    if (! state.enabled)
+      card.assessment = DynamicCorrectionAssessment::Disabled;
+    else if (state.bypassed)
+      card.assessment = DynamicCorrectionAssessment::Bypassed;
+    else if (card.verified.availability == DynamicMeasurementAvailability::Available
+             || card.verified.availability == DynamicMeasurementAvailability::Collecting)
+      card.assessment = card.verified.assessment;
+    else
+      card.assessment = card.predicted.assessment;
+    card.rejectionReason = card.predicted.rejectionReason;
+  }
+
+  dynamicSnapshotPublisher.publishIfDue (snapshot, dynamicSnapshotBlockCounter);
 }
 
 void KickLockAudioProcessor::classifyDynamicTransportForNewRuntime(int numSamples) noexcept
@@ -3523,10 +3748,11 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
       const std::lock_guard<std::mutex> lock (mapMutex);
       previousDynamicMap = messageOwnedDynamicStateMap;
     }
+    std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> predictedMeasurements {};
     auto result = LearnPipelineCore::finalizeDynamic (
         windows, config, previousDynamicMap,
         loopN > 0 ? loopBass.data() : nullptr, loopN > 0 ? loopKick.data() : nullptr, loopN,
-        diagnostics, cancelled);
+        diagnostics, cancelled, &predictedMeasurements);
     if (cancelled())
       return;
 
@@ -3565,6 +3791,11 @@ void KickLockAudioProcessor::runLearnWorker (uint64_t sessionId,
       pendingLearnCandidate.context = context;
       pendingLearnCandidate.result = std::move (result);
       pendingLearnCandidate.present = candidateValid;
+      // Phase 9: the predicted-measurement sidecar is kept coherent with the
+      // pending candidate by tracking the same sessionId; Apply only installs
+      // it once the map it describes has actually been published.
+      pendingDynamicMeasurementSessionId = sessionId;
+      pendingDynamicPredictedMeasurements = predictedMeasurements;
     }
     auto expected = LearnState::Finalizing;
     if (! learnState.compare_exchange_strong (expected, resolvedState,
@@ -3775,6 +4006,13 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
     if (! isStructurallyValidDynamicStateMap (appliedMap))
       return reject ("The pending Dynamic Learn map is invalid.");
 
+    std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> appliedPredicted {};
+    {
+      const std::lock_guard<std::mutex> lock (learnMutex);
+      if (pendingDynamicMeasurementSessionId == candidate.sessionId)
+        appliedPredicted = pendingDynamicPredictedMeasurements;
+    }
+
     ensureRevertBundleCaptured();
     // Do not alter APVTS correction fields for New Dynamic. The map owns the
     // complete Global Base; only the message thread selects Dynamic mode.
@@ -3784,6 +4022,7 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
       const std::lock_guard<std::mutex> publicationLock (mapPublicationMutex);
       const std::lock_guard<std::mutex> lock (mapMutex);
       const auto previous = messageOwnedDynamicStateMap;
+      const auto previousPredicted = messageOwnedDynamicPredictedMeasurements;
       hasPendingDynamicMapPublication = false;
       messageOwnedDynamicStateMap = appliedMap;
       if (! dynamicMapUpdateQueue.push (appliedMap))
@@ -3791,6 +4030,14 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
         messageOwnedDynamicStateMap = previous;
         return reject ("Dynamic map publication is temporarily busy; try Apply again.");
       }
+      // Section 11: install the predicted-measurement bundle only after the
+      // map itself published successfully. If this second, small, generously
+      // sized queue is somehow still full, the map remains correctly applied
+      // and the sidecar simply stays Unavailable until the next Apply - it
+      // never shows a stale or mismatched measurement.
+      messageOwnedDynamicPredictedMeasurements = appliedPredicted;
+      if (! dynamicPredictedMeasurementQueue.push (appliedPredicted))
+        messageOwnedDynamicPredictedMeasurements = previousPredicted;
     }
 
     setParameterValueWithGesture ("correction_mode", 1.0f);
@@ -3888,10 +4135,12 @@ bool KickLockAudioProcessor::clearNoteMap()
     const std::lock_guard<std::mutex> lock (mapMutex);
     messageOwnedNoteMap = empty;
     messageOwnedDynamicStateMap = makeEmptyDynamicStateMap();
+    messageOwnedDynamicPredictedMeasurements = {};
   }
   resetResolvedLearnStateToIdle();
   requestMapPublication (empty);
   requestDynamicMapPublication (makeEmptyDynamicStateMap());
+  requestDynamicPredictedMeasurementPublication ({});
   return true;
 }
 
@@ -3940,7 +4189,7 @@ void KickLockAudioProcessor::timerCallback()
   }
   if (mapPublicationRetryObserver != nullptr)
     mapPublicationRetryObserver->fetch_add (1, std::memory_order_relaxed);
-  if (retryMapPublication() && retryDynamicMapPublication())
+  if (retryMapPublication() && retryDynamicMapPublication() && retryDynamicPredictedMeasurementPublication())
     stopTimer();
 }
 
@@ -3977,6 +4226,30 @@ bool KickLockAudioProcessor::retryDynamicMapPublication()
   if (! dynamicMapUpdateQueue.push (pendingDynamicMapPublication))
     return false;
   hasPendingDynamicMapPublication = false;
+  return true;
+}
+
+void KickLockAudioProcessor::requestDynamicPredictedMeasurementPublication (
+    const std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates>& predicted)
+{
+  {
+    const std::lock_guard<std::mutex> lock (mapPublicationMutex);
+    pendingDynamicPredictedMeasurementPublication = predicted;
+    hasPendingDynamicPredictedMeasurementPublication = true;
+  }
+  if (retryDynamicPredictedMeasurementPublication())
+    return;
+  startTimer (10);
+}
+
+bool KickLockAudioProcessor::retryDynamicPredictedMeasurementPublication()
+{
+  std::lock_guard<std::mutex> lock (mapPublicationMutex);
+  if (! hasPendingDynamicPredictedMeasurementPublication)
+    return true;
+  if (! dynamicPredictedMeasurementQueue.push (pendingDynamicPredictedMeasurementPublication))
+    return false;
+  hasPendingDynamicPredictedMeasurementPublication = false;
   return true;
 }
 
