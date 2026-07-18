@@ -8,6 +8,7 @@
 
 #include "DynamicStateMeasurements.h"
 #include "DynamicSelectorTypes.h"
+#include "DynamicFingerprintExtractor.h"
 
 // =============================================================================
 // Phase 9: fixed runtime measurement capture contract.
@@ -171,7 +172,21 @@ public:
         if (windowSamples <= 0 || preRollSamples <= 0)
             return false;
 
-        rawHistoryCapacity = preRollSamples + 2;
+        // Production only calls beginCapture() once the 4 ms Dynamic
+        // fingerprint observation covering this trigger has COMPLETED (see
+        // DynamicProductionRuntime::processChunk(): pushRawSample() and the
+        // capture-bank's own pushSample() advance in lockstep, so by the time
+        // takeCompleted() fires and beginCapture() runs, rawStreamPos is
+        // already triggerSample + fingerprintWindowSamples, not
+        // triggerSample). backfillBefore() therefore needs the raw ring to
+        // still hold samples from up to (preRollSamples + fingerprintWindow-
+        // Samples) ago, not just preRollSamples ago - otherwise the earliest
+        // ~4 ms of the requested pre-roll is silently left at the
+        // clearForReuse() zero fill instead of real audio. The output ring
+        // has its own, separately-scoped staleness budget and is
+        // deliberately left unchanged here.
+        const int fingerprintWindowSamples = DynamicFingerprintWindow::forSampleRate (sampleRate).windowSamples;
+        rawHistoryCapacity = preRollSamples + fingerprintWindowSamples + 8;
         rawBassHistory.assign ((size_t) rawHistoryCapacity, 0.0f);
         rawKickHistory.assign ((size_t) rawHistoryCapacity, 0.0f);
         outputHistoryCapacity = preRollSamples + 2;

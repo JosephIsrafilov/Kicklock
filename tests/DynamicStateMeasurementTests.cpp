@@ -1,5 +1,8 @@
 #include "TestCommon.h"
 
+#include <chrono>
+#include <thread>
+
 #include "DynamicStateMeasurements.h"
 #include "DynamicMeasurementScorer.h"
 #include "DynamicPredictedMeasurement.h"
@@ -136,6 +139,10 @@ public:
         testRuntimeCaptureAlignment();
         testNonVerifiableEventsNeverCaptured();
         testContractValidation();
+        testRawPreRollNotTruncated();
+        testSnapshotPublisherConcurrentStress();
+        testRepeatedPrepareWhileWorkerActive();
+        testVerifiedGenerationNeverContaminated();
     }
 
 private:
@@ -556,6 +563,264 @@ private:
         summary.validWindowCount = 0;
         expect (! isValidDynamicMeasurementSummary (summary),
                "Available must be backed by at least one valid window");
+    }
+
+    void testRawPreRollNotTruncated()
+    {
+        beginTest ("Runtime capture: raw pre-roll is never zero-filled at production's actual beginCapture() timing");
+        const double rate = 48000.0;
+        DynamicRuntimeMeasurementCapture capture;
+        expect (capture.prepare (rate));
+
+        const int windowSamples = capture.getWindowSamples();
+        const int preRollSamples = DynamicRuntimeMeasurementCaptureContract::preRollSamplesFor (rate);
+        const int fingerprintWindowSamples = DynamicFingerprintWindow::forSampleRate (rate).windowSamples;
+        const int64_t triggerSample = 5000; // > preRollSamples, so the whole before-window has real source data
+
+        const int totalSamples = (int) triggerSample + windowSamples + fingerprintWindowSamples + 200;
+        std::vector<float> rawBass ((size_t) totalSamples), rawKick ((size_t) totalSamples);
+        for (int i = 0; i < totalSamples; ++i)
+        {
+            // Deterministic, non-zero everywhere so any silent zero-fill is detectable.
+            rawBass[(size_t) i] = (float) std::sin (kTwoPi * 77.0 * (double) i / rate) + 0.01f;
+            rawKick[(size_t) i] = (float) std::sin (kTwoPi * 111.0 * (double) i / rate) + 0.02f;
+        }
+
+        bool begun = false;
+        for (int i = 0; i < totalSamples; ++i)
+        {
+            capture.pushRawSample (rawBass[(size_t) i], rawKick[(size_t) i]);
+            capture.pushOutputSample (rawBass[(size_t) i], rawKick[(size_t) i]);
+
+            // Matches production exactly: DynamicProductionRuntime only calls
+            // beginCapture() once captureBank.takeCompleted() fires for the
+            // 4 ms fingerprint observation covering this trigger - i.e.
+            // fingerprintWindowSamples AFTER the physical trigger sample,
+            // never at the trigger sample itself.
+            if (! begun && i == (int) triggerSample + fingerprintWindowSamples - 1)
+            {
+                expect (capture.beginCapture (1, 55, DynamicSelectorBranchKind::State, triggerSample, 0.0, rate));
+                begun = true;
+            }
+        }
+        capture.serviceCompletions();
+
+        DynamicRuntimeMeasurementCaptureResult result;
+        result.resizeWindows (windowSamples);
+        expect (capture.takeCompleted (result), "capture completes once both windows are filled");
+        expect (result.valid);
+
+        const int64_t beforeStartSample = triggerSample - (int64_t) preRollSamples;
+        int zeroFillCount = 0;
+        for (int k = 0; k < windowSamples; ++k)
+        {
+            const int64_t sourceIndex = beforeStartSample + k;
+            const float expectedBass = (sourceIndex >= 0 && sourceIndex < totalSamples)
+                ? rawBass[(size_t) sourceIndex] : 0.0f;
+            const float expectedKick = (sourceIndex >= 0 && sourceIndex < totalSamples)
+                ? rawKick[(size_t) sourceIndex] : 0.0f;
+            expectWithinAbsoluteError (result.beforeBass[(size_t) k], expectedBass, 1.0e-5f);
+            expectWithinAbsoluteError (result.beforeKick[(size_t) k], expectedKick, 1.0e-5f);
+            if (k < preRollSamples && std::abs (result.beforeBass[(size_t) k]) < 1.0e-6f)
+                ++zeroFillCount;
+        }
+        expectEquals (zeroFillCount, 0, "no sample in the pre-roll region may be silently zero-filled");
+    }
+
+    void testSnapshotPublisherConcurrentStress()
+    {
+        beginTest ("Snapshot publisher: concurrent writer/reader never observes a torn or mixed-generation snapshot");
+        DynamicSnapshotPublisher publisher;
+        publisher.prepare();
+
+        std::atomic<bool> stop { false };
+        std::atomic<int> mismatches { 0 };
+        std::atomic<int64_t> maxGenerationSeen { -1 };
+
+        std::thread writer ([&]
+        {
+            int64_t block = 0;
+            while (! stop.load (std::memory_order_relaxed))
+            {
+                DynamicRuntimeSnapshot snapshot;
+                snapshot.mapGeneration = (uint64_t) block;
+                for (int slot = 0; slot < DynamicMeasurementContract::kMaxRetainedStates; ++slot)
+                {
+                    snapshot.states[(size_t) slot].occupied = true;
+                    snapshot.states[(size_t) slot].stableStateId = (uint64_t) (block * 1000 + slot);
+                }
+                publisher.publishIfDue (snapshot, block);
+                ++block;
+            }
+        });
+
+        std::thread reader ([&]
+        {
+            while (! stop.load (std::memory_order_relaxed))
+            {
+                const auto snapshot = publisher.read();
+                for (int slot = 0; slot < DynamicMeasurementContract::kMaxRetainedStates; ++slot)
+                {
+                    if (! snapshot.states[(size_t) slot].occupied)
+                        continue;
+                    const uint64_t impliedGeneration = snapshot.states[(size_t) slot].stableStateId / 1000;
+                    if (impliedGeneration != snapshot.mapGeneration)
+                        mismatches.fetch_add (1, std::memory_order_relaxed);
+                }
+                int64_t seen = (int64_t) snapshot.mapGeneration;
+                int64_t prevMax = maxGenerationSeen.load (std::memory_order_relaxed);
+                while (seen > prevMax && ! maxGenerationSeen.compare_exchange_weak (prevMax, seen)) {}
+            }
+        });
+
+        std::this_thread::sleep_for (std::chrono::milliseconds (200));
+        stop.store (true, std::memory_order_relaxed);
+        writer.join();
+        reader.join();
+
+        expectEquals (mismatches.load(), 0, "no reader observation may mix two publish generations within one snapshot");
+        expectGreaterThan (maxGenerationSeen.load(), (int64_t) 0, "the reader must have observed real progress from the writer");
+    }
+
+    void testRepeatedPrepareWhileWorkerActive()
+    {
+        beginTest ("Processor: repeated prepareToPlay() never races the measurement worker's queues");
+        // Note: this test deliberately does NOT call processBlock() from a
+        // second thread concurrently with prepareToPlay() - a host never
+        // does that (it always serializes prepare/process), and driving them
+        // concurrently exercises unrelated pre-existing processBlock-vs-
+        // prepareToPlay assumptions elsewhere in this processor that are out
+        // of scope for this fix. What IS in scope, and what this test
+        // exercises for real, is the measurement worker's OWN background
+        // thread - running continuously from construction, independently of
+        // any host call - racing a sequence of prepareToPlay() calls on the
+        // message/test thread while genuine queued work is present.
+        KickLockAudioProcessor processor;
+        processor.enableAllBuses();
+        processor.setRateAndBufferSizeDetails (48000.0, 256);
+        processor.prepareToPlay (48000.0, 256);
+
+        // Drive enough real audio (sequentially, on this thread) to populate
+        // the measurement capture/score queues with genuine queued work; the
+        // background measurement worker thread starts servicing it
+        // immediately and keeps running independently of this thread.
+        const int n = 48000;
+        std::vector<float> bass ((size_t) n), kick ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            bass[(size_t) i] = 0.4f * (float) std::sin (kTwoPi * 60.0 * (double) i / 48000.0);
+            kick[(size_t) i] = (i % 4800 < 40) ? 0.8f : 0.0f;
+        }
+        const int channels = juce::jmax (processor.getTotalNumInputChannels(),
+                                         processor.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> buffer (channels, 256);
+        juce::MidiBuffer midi;
+        for (int offset = 0; offset < n; offset += 256)
+        {
+            const int len = std::min (256, n - offset);
+            buffer.clear();
+            for (int i = 0; i < len; ++i)
+            {
+                if (buffer.getNumChannels() > 0) buffer.setSample (0, i, bass[(size_t) (offset + i)]);
+                if (buffer.getNumChannels() > 1) buffer.setSample (1, i, bass[(size_t) (offset + i)]);
+                if (buffer.getNumChannels() > 2) buffer.setSample (2, i, kick[(size_t) (offset + i)]);
+                if (buffer.getNumChannels() > 3) buffer.setSample (3, i, kick[(size_t) (offset + i)]);
+            }
+            processor.processBlock (buffer, midi);
+        }
+
+        // Hammer prepareToPlay() repeatedly while the background measurement
+        // worker thread is concurrently free to pop/push whatever it was
+        // mid-servicing from the drive above.
+        for (int i = 0; i < 50; ++i)
+            processor.prepareToPlay (48000.0, 128 + (i % 3) * 64);
+
+        // Reaching here without a crash/hang/sanitizer trip already proves
+        // the queues survived every reallocation while the worker was
+        // concurrently active. A final prepare + block proves the processor
+        // is still fully usable afterward (no stale/half-initialized state).
+        processor.prepareToPlay (48000.0, 256);
+        buffer.setSize (channels, 256);
+        buffer.clear();
+        processor.processBlock (buffer, midi);
+        expect (true, "processor remains usable after repeated prepareToPlay() calls while the measurement worker is active");
+    }
+
+    void testVerifiedGenerationNeverContaminated()
+    {
+        beginTest ("Verified aggregation: a map-generation change never relabels old-package evidence as new");
+        DynamicVerifiedAggregation aggregation;
+        aggregation.reset();
+
+        const uint64_t stableId = 900;
+        DynamicStateMap mapA = makeEmptyDynamicStateMap();
+        mapA.valid = true;
+        mapA.states[0].occupied = true;
+        mapA.states[0].stableStateId = stableId;
+
+        aggregation.reconcile (mapA, /* generationA */ 10);
+
+        for (int i = 0; i < 3; ++i)
+        {
+            DynamicMeasurementScoredCapture scored;
+            scored.valid = true;
+            scored.mapGeneration = 10;
+            scored.stableStateId = stableId;
+            scored.score.valid = true;
+            scored.score.beforeScore = 40.0f;
+            scored.score.afterScore = 80.0f;
+            scored.score.improvementPoints = 40.0f;
+            scored.score.confidence = 0.9f;
+            aggregation.addResult (scored);
+        }
+
+        const auto summaryA = aggregation.summaryFor (0);
+        expectEquals ((int) summaryA.validWindowCount, 3, "generation A accumulated its three fresh events");
+
+        // Same stableStateId, but a NEW map generation - a package change is
+        // assumed possible since there is no cheap way to prove otherwise.
+        DynamicStateMap mapB = mapA;
+        aggregation.reconcile (mapB, /* generationB */ 11);
+
+        const auto summaryAfterReconcile = aggregation.summaryFor (0);
+        expect (summaryAfterReconcile.availability == DynamicMeasurementAvailability::Unavailable
+                    || summaryAfterReconcile.availability == DynamicMeasurementAvailability::Collecting,
+               "old generation-A evidence must not survive as generation-B's summary");
+        expectEquals ((int) summaryAfterReconcile.validWindowCount, 0,
+                     "zero old events must remain after a generation change, even with the same stableStateId");
+
+        // A stale generation-A result must now be rejected outright.
+        DynamicMeasurementScoredCapture staleResult;
+        staleResult.valid = true;
+        staleResult.mapGeneration = 10;
+        staleResult.stableStateId = stableId;
+        staleResult.score.valid = true;
+        staleResult.score.beforeScore = 10.0f;
+        staleResult.score.afterScore = 90.0f;
+        staleResult.score.improvementPoints = 80.0f;
+        staleResult.score.confidence = 0.9f;
+        aggregation.addResult (staleResult);
+        expectEquals ((int) aggregation.summaryFor (0).validWindowCount, 0,
+                     "a stale generation-A worker result must be rejected, never folded into generation B");
+
+        // Only fresh generation-B results may make verification Available.
+        for (int i = 0; i < DynamicMeasurementContract::kMinVerifiedEvents; ++i)
+        {
+            DynamicMeasurementScoredCapture freshResult;
+            freshResult.valid = true;
+            freshResult.mapGeneration = 11;
+            freshResult.stableStateId = stableId;
+            freshResult.score.valid = true;
+            freshResult.score.beforeScore = 40.0f;
+            freshResult.score.afterScore = 85.0f;
+            freshResult.score.improvementPoints = 45.0f;
+            freshResult.score.confidence = 0.9f;
+            aggregation.addResult (freshResult);
+        }
+        const auto summaryB = aggregation.summaryFor (0);
+        expect (summaryB.availability == DynamicMeasurementAvailability::Available,
+               "fresh generation-B events alone must be enough to reach Available");
+        expectEquals ((int) summaryB.validWindowCount, (int) DynamicMeasurementContract::kMinVerifiedEvents);
     }
 };
 

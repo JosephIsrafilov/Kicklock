@@ -1253,6 +1253,25 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   // Phase 9: measurement queues/aggregation/snapshot are rebuilt every
   // prepareToPlay(), same as the map queue above, so no runtime verification
   // history or in-flight capture survives a sample-rate or block-size change.
+  // The measurement worker thread pops dynamicMeasurementCaptureQueue and
+  // pushes dynamicMeasurementScoreQueue concurrently with this method
+  // (prepareToPlay() is a message-thread/host lifecycle call, never
+  // synchronized with any other processor thread by the host), so it must be
+  // fully stopped before either queue is reallocated below and only started
+  // again once every Phase-9 container it touches is back in a consistent
+  // state - otherwise the worker could pop/push mid-reallocation. This
+  // mirrors the destructor's own signalThreadShouldExit()/notify()/
+  // waitForThreadToExit() teardown idiom exactly, just as a bounded
+  // stop-then-restart instead of a final stop.
+  if (dynamicMeasurementWorker != nullptr)
+  {
+    dynamicMeasurementWorker->signalThreadShouldExit();
+    dynamicMeasurementWorker->notify();
+    if (! dynamicMeasurementWorker->waitForThreadToExit (cooperativeTeardownBoundMs))
+      dynamicMeasurementWorker->waitForThreadToExit (-1);
+    dynamicMeasurementWorker.reset();
+  }
+
   // The capture queue's slots are pre-sized to this session's actual window
   // length up front (allocation happens here, off the audio thread, never
   // again afterward).
@@ -1272,6 +1291,11 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
     const std::lock_guard<std::mutex> lock (mapMutex);
     activeDynamicPredictedMeasurements = messageOwnedDynamicPredictedMeasurements;
   }
+
+  // Every Phase-9 container the worker touches is consistent again; safe to
+  // resume servicing the queues.
+  dynamicMeasurementWorker = std::make_unique<DynamicMeasurementWorker> (*this);
+  dynamicMeasurementWorker->startThread();
   activeMidiNote.store (-1, std::memory_order_release);
 
   // Triggered oscilloscope capture: keep 20 ms pre-roll internally for a

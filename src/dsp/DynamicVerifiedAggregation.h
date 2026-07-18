@@ -29,10 +29,17 @@ public:
     }
 
     // Reconciles the fixed per-slot rolling stores against a newly-activated
-    // map generation: a slot whose occupant stable ID changed (or is no
-    // longer occupied) is cleared to Unavailable; a slot whose identity is
-    // unchanged keeps its rolling history (fresh events keep accumulating
-    // under the new generation).
+    // map generation. A slot whose occupant stable ID changed (or is no
+    // longer occupied) is cleared to Unavailable. A slot whose stableStateId
+    // is UNCHANGED is also cleared whenever the generation itself changed:
+    // DynamicPackageResolution/DynamicZonePackage/DynamicState carry no
+    // cheap package-identity/version stamp, so there is no way to cheaply
+    // prove the State's resolved correction package (delay/polarity/allpass/
+    // crossover) is still the exact one the retained ring's evidence was
+    // measured against. Old evidence must never be relabelled as belonging
+    // to a new generation on the strength of an unproven assumption -
+    // prefer the simple safe clear. Only a reconcile() call repeating the
+    // SAME generation (e.g. a redundant call) preserves the ring.
     void reconcile (const DynamicStateMap& map, uint64_t newGeneration) noexcept
     {
         for (int slot = 0; slot < DynamicMeasurementContract::kMaxRetainedStates; ++slot)
@@ -44,7 +51,8 @@ public:
                 state = PerState {};
                 continue;
             }
-            if (state.occupied && state.stableStateId != mapState.stableStateId)
+            if (! state.occupied || state.stableStateId != mapState.stableStateId
+                || state.mapGeneration != newGeneration)
                 state = PerState {};
 
             state.occupied = true;
