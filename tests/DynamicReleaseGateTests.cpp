@@ -6,6 +6,7 @@
 #include "dsp/DynamicFingerprintMatcher.h"
 #include "dsp/DynamicLearnFormation.h"
 #include "dsp/DynamicProductionRuntime.h"
+#include "dsp/DynamicSelectorScheduler.h"
 #include "dsp/DynamicStateSerialization.h"
 #include "ui/DynamicWorkspace.h"
 
@@ -14,6 +15,11 @@
 
 namespace
 {
+    constexpr auto kLearnWaitTimeout = std::chrono::seconds (30);
+    constexpr int kContinuityWindowSamples = 24;
+    constexpr float kContinuitySilenceEpsilon = 1.0e-4f;
+    constexpr float kMaximumLocalizedTransitionScore = 4.0f;
+
     DynamicFingerprintPrototype releasePrototype (float seed)
     {
         DynamicFingerprintPrototype result;
@@ -90,6 +96,51 @@ namespace
         processor.prepareToPlay (sampleRate, blockSize);
     }
 
+    juce::String learnDiagnostics (KickLockAudioProcessor& processor)
+    {
+        const auto progress = processor.getLearnProgress();
+        const auto pending = processor.getPendingLearnResult();
+        return "state=" + juce::String ((int) processor.getLearnState())
+             + " captured=" + juce::String (progress.capturedHits)
+             + " drained=" + juce::String (progress.drainedHits)
+             + " dropped=" + juce::String (progress.droppedQueueHits)
+             + " timing=" + juce::String (progress.timingUsableHits)
+             + " message=" + pending.message;
+    }
+
+    bool waitForLearnCapturing (KickLockAudioProcessor& processor, int blockSize)
+    {
+        const int channels = juce::jmax (processor.getTotalNumInputChannels(), processor.getTotalNumOutputChannels());
+        juce::AudioBuffer<float> silence (channels, blockSize);
+        juce::MidiBuffer midi;
+        const auto deadline = std::chrono::steady_clock::now() + kLearnWaitTimeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (processor.getLearnState() == LearnState::Capturing)
+                return true;
+            if (! learnStateIsBusy (processor.getLearnState()))
+                return false;
+            // Preparing is acknowledged on the audio thread. Silence advances
+            // that handshake without presenting a learnable kick/bass event.
+            silence.clear();
+            processor.processBlock (silence, midi);
+            juce::Thread::sleep (2);
+        }
+        return processor.getLearnState() == LearnState::Capturing;
+    }
+
+    bool waitForLearnResolution (KickLockAudioProcessor& processor)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + kLearnWaitTimeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (! learnStateIsBusy (processor.getLearnState()))
+                return true;
+            juce::Thread::sleep (2);
+        }
+        return ! learnStateIsBusy (processor.getLearnState());
+    }
+
     bool finiteAndBounded (const std::vector<float>& samples, float limit = 8.0f)
     {
         for (const auto sample : samples)
@@ -99,7 +150,8 @@ namespace
     }
 
     void driveProcessor (KickLockAudioProcessor& processor, const DynamicReleaseFixture& fixture,
-                         int blockSize, std::vector<float>* output = nullptr)
+                         int blockSize, std::vector<float>* output = nullptr,
+                         std::vector<DynamicRuntimeSnapshot>* snapshots = nullptr)
     {
         const int channels = juce::jmax (processor.getTotalNumInputChannels(), processor.getTotalNumOutputChannels());
         juce::AudioBuffer<float> buffer (channels, blockSize);
@@ -121,19 +173,64 @@ namespace
             if (output != nullptr)
                 for (int i = 0; i < count; ++i)
                     output->push_back (buffer.getSample (0, i));
+            if (snapshots != nullptr)
+                snapshots->push_back (processor.getDynamicRuntimeSnapshotForTesting());
         }
     }
 
-    float normalizedDerivative (const std::vector<float>& samples)
+    float localizedTransitionScore (const std::vector<float>& samples, int boundary)
     {
-        constexpr float epsilon = 1.0e-4f;
-        float maximum = 0.0f;
-        for (size_t i = 1; i < samples.size(); ++i)
+        if (boundary < kContinuityWindowSamples || boundary + kContinuityWindowSamples >= (int) samples.size())
+            return std::numeric_limits<float>::infinity();
+
+        double derivativeEnergy = 0.0;
+        double signalEnergy = 0.0;
+        int derivativeCount = 0;
+        for (int i = boundary - kContinuityWindowSamples + 1; i < boundary; ++i)
         {
-            const float scale = std::max ({ epsilon, std::abs (samples[i]), std::abs (samples[i - 1]) });
-            maximum = std::max (maximum, std::abs (samples[i] - samples[i - 1]) / scale);
+            const float derivative = samples[(size_t) i] - samples[(size_t) (i - 1)];
+            derivativeEnergy += (double) derivative * derivative;
+            signalEnergy += (double) samples[(size_t) i] * samples[(size_t) i];
+            ++derivativeCount;
         }
-        return maximum;
+        for (int i = boundary + 2; i < boundary + kContinuityWindowSamples; ++i)
+        {
+            const float derivative = samples[(size_t) i] - samples[(size_t) (i - 1)];
+            derivativeEnergy += (double) derivative * derivative;
+            signalEnergy += (double) samples[(size_t) i] * samples[(size_t) i];
+            ++derivativeCount;
+        }
+
+        const float derivativeRms = (float) std::sqrt (derivativeEnergy / (double) std::max (1, derivativeCount));
+        const float signalRms = (float) std::sqrt (signalEnergy / (double) std::max (1, derivativeCount));
+        const float scale = std::max ({ kContinuitySilenceEpsilon, derivativeRms * 2.0f, signalRms * 0.01f });
+        return std::abs (samples[(size_t) boundary] - samples[(size_t) (boundary - 1)]) / scale;
+    }
+
+    std::array<uint64_t, DynamicStateMapContract::kMaxPersistentStates> stableIds (const DynamicStateMap& map)
+    {
+        std::array<uint64_t, DynamicStateMapContract::kMaxPersistentStates> ids {};
+        for (int slot = 0; slot < DynamicStateMapContract::kMaxPersistentStates; ++slot)
+            ids[(size_t) slot] = map.states[(size_t) slot].occupied ? map.states[(size_t) slot].stableStateId : 0;
+        return ids;
+    }
+
+    bool sameCorrectionPackages (const DynamicStateMap& a, const DynamicStateMap& b)
+    {
+        for (int slot = 0; slot < DynamicStateMapContract::kMaxPersistentStates; ++slot)
+        {
+            const auto& left = a.states[(size_t) slot];
+            const auto& right = b.states[(size_t) slot];
+            if (left.occupied != right.occupied || left.stableStateId != right.stableStateId
+                || left.hasLearnedPackage != right.hasLearnedPackage)
+                return false;
+            if (left.hasLearnedPackage
+                && (std::abs (left.learnedPackage.delayDeltaMs - right.learnedPackage.delayDeltaMs) > 1.0e-6f
+                    || std::abs (left.learnedPackage.allpassFreqHz - right.learnedPackage.allpassFreqHz) > 1.0e-6f
+                    || std::abs (left.learnedPackage.allpassQ - right.learnedPackage.allpassQ) > 1.0e-6f))
+                return false;
+        }
+        return true;
     }
 }
 
@@ -193,15 +290,17 @@ public:
             KickLockAudioProcessor processor;
             prepare (processor, 48000.0, 256);
             setParameter (processor, "correction_mode", 1.0f);
-            expect (processor.beginLearn());
+            const bool started = processor.beginLearn();
+            expect (started);
+            const bool capturing = started && waitForLearnCapturing (processor, 256);
+            expect (capturing, "Learn must acknowledge Capturing before fixture events are fed: " + learnDiagnostics (processor));
+            if (! capturing)
+                return;
             driveProcessor (processor, fixture, 256);
             expect (processor.stopLearn());
-            for (int attempt = 0; attempt < 15000 && learnStateIsBusy (processor.getLearnState()); ++attempt)
-                juce::Thread::sleep (2);
+            expect (waitForLearnResolution (processor), "Learn must resolve after Stop: " + learnDiagnostics (processor));
             const auto resolved = processor.getPendingLearnResult();
-            logMessage ("fixture Learn state=" + juce::String ((int) processor.getLearnState())
-                        + " captured=" + juce::String (processor.getLearnProgress().capturedHits)
-                        + " message=" + resolved.message);
+            logMessage ("fixture Learn " + learnDiagnostics (processor));
             expect (processor.getLearnState() == LearnState::ResultReady,
                     "canonical deterministic fixture must resolve as New Dynamic Learn material");
             if (processor.getLearnState() == LearnState::ResultReady)
@@ -212,7 +311,7 @@ public:
             }
         }
 
-        beginTest ("Candidate, recognizable Global-only, Unknown, and Ambiguous outcomes retain frozen routing semantics");
+        beginTest ("Candidate, Global-only, Unknown, and production Ambiguous/Hold outcomes retain frozen routing semantics");
         {
             auto routingMap = makeReleaseMap();
             int candidateSlot = -1;
@@ -244,9 +343,157 @@ public:
                 expect (globalOnlyMatch.decision == DynamicMatchDecision::Matched && ! globalOnlyMatch.correctionAvailable);
             }
 
-            DynamicFingerprintPrototype foreign = releasePrototype (0.98f);
-            const auto unknown = matchDynamicFingerprint (observationFor (foreign), routingMap);
-            expect (unknown.decision == DynamicMatchDecision::Unknown || unknown.decision == DynamicMatchDecision::Ambiguous);
+            auto ambiguityMap = makeReleaseMap();
+            for (int slot = 2; slot < DynamicStateMapContract::kMaxPersistentStates; ++slot)
+                ambiguityMap.states[(size_t) slot] = {};
+            ambiguityMap.states[0].fingerprint = releasePrototype (-0.20f);
+            ambiguityMap.states[1].fingerprint = releasePrototype (0.20f);
+            ambiguityMap.calibration.absoluteDistanceThreshold = 0.29f;
+            ambiguityMap.calibration.ambiguityMargin = 0.10f;
+            DynamicFingerprintPrototype midpoint;
+            midpoint.valid = true;
+            midpoint.featureCount = DynamicFingerprintContract::kFeatureCount;
+            for (int feature = 0; feature < DynamicFingerprintContract::kFeatureCount; ++feature)
+                midpoint.features[(size_t) feature] = 0.5f * (ambiguityMap.states[0].fingerprint.features[(size_t) feature]
+                                                             + ambiguityMap.states[1].fingerprint.features[(size_t) feature]);
+            const auto ambiguous = matchDynamicFingerprint (observationFor (midpoint), ambiguityMap);
+            expect (ambiguous.decision == DynamicMatchDecision::Ambiguous,
+                    "midpoint fingerprint must use the production Ambiguous decision");
+
+            const auto unknown = matchDynamicFingerprint (observationFor (releasePrototype (0.80f)), ambiguityMap);
+            expect (unknown.decision == DynamicMatchDecision::Unknown,
+                    "foreign material remains Unknown and is not interchangeable with Ambiguous");
+
+            DynamicSelectorScheduler selector;
+            expect (selector.prepare (48000.0));
+            DynamicSelectorBranchRoster roster;
+            const double globalTap = std::ceil (48000.0 * 0.020);
+            roster.global = { true, DynamicHotBranchKind::Global, 0, 0.0, globalTap, true, true };
+            roster.states[0] = { true, DynamicHotBranchKind::State, ambiguityMap.states[0].stableStateId,
+                                 0.0, globalTap + 400.0, true, true };
+            const auto matched = matchDynamicFingerprint (observationFor (ambiguityMap.states[0].fingerprint), ambiguityMap);
+            auto advanceEvent = [&] (const DynamicMatchResult& match)
+            {
+                const int64_t trigger = selector.getExpectedNextSample();
+                DynamicSelectorEvent event { trigger, trigger + selector.getFingerprintSamples(), match };
+                expect (selector.submitEvent (event));
+                while (selector.getExpectedNextSample() <= event.readySample)
+                    expect (selector.advanceSample (selector.getExpectedNextSample(), roster));
+                while (selector.getDiagnostics().fadeActive)
+                    expect (selector.advanceSample (selector.getExpectedNextSample(), roster));
+            };
+            advanceEvent (matched);
+            expect (selector.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::State);
+            advanceEvent (ambiguous);
+            expect (selector.getDiagnostics().lastDecision == DynamicSelectorDiagnostic::HeldAmbiguous);
+            expectEquals ((int) selector.getDiagnostics().holdEventCount, 1);
+            advanceEvent (ambiguous);
+            expectEquals ((int) selector.getDiagnostics().holdEventCount, 2);
+            advanceEvent (ambiguous);
+            expect (selector.getDiagnostics().lastDecision == DynamicSelectorDiagnostic::FallbackAmbiguous);
+            expect (selector.getDiagnostics().selectedBranchKind == DynamicSelectorBranchKind::Global,
+                    "bounded Hold releases stale State correction after two events");
+        }
+
+        beginTest ("Actual Learn applies its emitted Dynamic map through runtime, measurements, and save/reload");
+        {
+            const auto learnFixture = makeDynamicReleaseFixture (48000.0);
+            const auto runtimeFixture = makeDynamicReleaseFixture (48000.0);
+            KickLockAudioProcessor first;
+            prepare (first, 48000.0, 256);
+            setParameter (first, "correction_mode", 1.0f);
+            setParameter (first, "dynamic_strength", 1.0f);
+
+            const bool started = first.beginLearn();
+            expect (started);
+            const bool capturing = started && waitForLearnCapturing (first, 256);
+            expect (capturing, "actual Learn must reach Capturing before input: " + learnDiagnostics (first));
+            if (! capturing)
+                return;
+            driveProcessor (first, learnFixture, 256);
+            expect (first.stopLearn());
+            expect (waitForLearnResolution (first), "actual Learn must finalize: " + learnDiagnostics (first));
+            expect (first.getLearnState() == LearnState::ResultReady, learnDiagnostics (first));
+
+            const auto pending = first.getPendingLearnResult();
+            expect (pending.hasDynamicStateMap && isStructurallyValidDynamicStateMap (pending.dynamicMap));
+            const int learnedStateCount = getOccupiedDynamicStateCount (pending.dynamicMap);
+            const auto learnedIds = stableIds (pending.dynamicMap);
+            expectGreaterOrEqual (learnedStateCount, 4);
+            juce::String learnedIdLog;
+            for (const auto& state : pending.dynamicMap.states)
+                if (state.occupied)
+                    learnedIdLog += (learnedIdLog.isEmpty() ? "" : ",")
+                                  + juce::String ((int64_t) state.stableStateId)
+                                  + ":" + juce::String ((int) state.evidence)
+                                  + ":" + juce::String (state.hasLearnedPackage ? 1 : 0);
+            logMessage ("actual Learn formed states=" + juce::String (learnedStateCount)
+                        + " stableIds=" + learnedIdLog);
+            expect (first.applyLatestLearnResult(), first.getLearnApplyBlockedReason());
+
+            std::vector<float> firstOutput;
+            std::vector<DynamicRuntimeSnapshot> firstSnapshots;
+            firstOutput.reserve (runtimeFixture.bass.size());
+            firstSnapshots.reserve (runtimeFixture.bass.size() / 256 + 1);
+            driveProcessor (first, runtimeFixture, 256, &firstOutput, &firstSnapshots);
+            expect (first.getActiveDynamicMapSourceForTesting() == DynamicMapSource::NewDynamicStateMap);
+            expect (finiteAndBounded (firstOutput));
+            expect (! firstSnapshots.empty());
+            const auto runtimeSnapshot = first.getDynamicRuntimeSnapshotForTesting();
+            expect (runtimeSnapshot.mapValid && runtimeSnapshot.source == DynamicMapSource::NewDynamicStateMap);
+            expectEquals (runtimeSnapshot.stateCount, learnedStateCount);
+
+            int predictedStates = 0;
+            for (const auto id : learnedIds)
+            {
+                if (id == 0)
+                    continue;
+                const auto predicted = first.getDynamicPredictedMeasurementForTesting (id);
+                expect (isValidDynamicMeasurementSummary (predicted));
+                predictedStates += predicted.availability != DynamicMeasurementAvailability::Unavailable ? 1 : 0;
+            }
+            expectGreaterThan (predictedStates, 0, "actual Learn contributes predicted, not fabricated Verified, measurements");
+
+            // Runtime verification must be generated from fresh audible events, not
+            // copied from Learn. Replaying the prepared fixture supplies enough
+            // valid events for the runtime capture/worker handoff path to run.
+            for (int pass = 0; pass < 4; ++pass)
+                driveProcessor (first, runtimeFixture, 256);
+            const auto runtimeDiagnostics = first.getDynamicProductionDiagnosticsForTesting();
+            expectGreaterThan ((int64_t) runtimeDiagnostics.completedObservations, (int64_t) 0);
+
+            juce::MemoryBlock state;
+            first.getStateInformation (state);
+            KickLockAudioProcessor restored;
+            prepare (restored, 48000.0, 256);
+            restored.setStateInformation (state.getData(), (int) state.getSize());
+
+            std::vector<float> restoredOutput;
+            std::vector<DynamicRuntimeSnapshot> restoredSnapshots;
+            restoredOutput.reserve (runtimeFixture.bass.size());
+            restoredSnapshots.reserve (runtimeFixture.bass.size() / 256 + 1);
+            driveProcessor (restored, runtimeFixture, 256, &restoredOutput, &restoredSnapshots);
+            expect (restored.getActiveDynamicMapSourceForTesting() == DynamicMapSource::NewDynamicStateMap);
+            expect (stableIds (restored.getActiveDynamicStateMapForTesting()) == learnedIds);
+            expect (sameCorrectionPackages (restored.getActiveDynamicStateMapForTesting(), pending.dynamicMap));
+            expect (finiteAndBounded (restoredOutput));
+            expectEquals ((int) restoredOutput.size(), (int) firstOutput.size());
+            float maximumDifference = 0.0f;
+            for (size_t i = 0; i < std::min (firstOutput.size(), restoredOutput.size()); ++i)
+                maximumDifference = std::max (maximumDifference, std::abs (firstOutput[i] - restoredOutput[i]));
+            expectLessThan (maximumDifference, 2.0e-4f, "same-platform saved New Dynamic map renders deterministically");
+
+            const auto restoredSnapshot = restored.getDynamicRuntimeSnapshotForTesting();
+            expect (restoredSnapshot.mapValid && restoredSnapshot.source == runtimeSnapshot.source);
+            expect (restoredSnapshot.activeBranchKind == runtimeSnapshot.activeBranchKind);
+            expectEquals ((int64_t) restoredSnapshot.selectedSemanticStateId,
+                          (int64_t) runtimeSnapshot.selectedSemanticStateId);
+            expect (restoredSnapshot.selectorDiagnostic == runtimeSnapshot.selectorDiagnostic);
+            for (const auto id : learnedIds)
+                if (id != 0)
+                    expect (restored.getDynamicVerifiedMeasurementForTesting (id).availability
+                            == DynamicMeasurementAvailability::Unavailable,
+                            "Verified runtime evidence is fresh after restore");
         }
 
         beginTest ("New Dynamic processor lifecycle preserves PDC, source priority, snapshots, save/reload, and finite output");
@@ -316,8 +563,89 @@ public:
             }
         }
 
+        beginTest ("Fixture transport boundaries reset Dynamic history without stale State, Service, or measurement leakage");
+        {
+            const auto fixture = makeDynamicReleaseFixture (48000.0);
+            auto transportMap = makeReleaseMap();
+            for (int slot = 1; slot < DynamicStateMapContract::kMaxPersistentStates; ++slot)
+                transportMap.states[(size_t) slot] = {};
+            transportMap.states[0].fingerprint = releasePrototype (0.0f);
+            transportMap.calibration.absoluteDistanceThreshold = 1.0f;
+            transportMap.calibration.ambiguityMargin = 0.001f;
+
+            DynamicProductionRuntime runtime;
+            expect (runtime.prepare (48000.0, 128, 1));
+            runtime.activateMap (transportMap);
+            juce::AudioBuffer<float> input (1, 128);
+            juce::AudioBuffer<float> output (1, 128);
+            const auto renderRange = [&] (int begin, int end)
+            {
+                for (int offset = begin; offset < end; offset += 128)
+                {
+                    const int count = std::min (128, end - offset);
+                    for (int sample = 0; sample < count; ++sample)
+                        input.setSample (0, sample, fixture.bass[(size_t) (offset + sample)]);
+                    expect (runtime.process (input, fixture.bass.data() + offset, fixture.kick.data() + offset,
+                                             true, 1.0, output, count));
+                    bool finite = true;
+                    for (int sample = 0; sample < count; ++sample)
+                        finite = finite && std::isfinite (output.getSample (0, sample));
+                    expect (finite, "transport fixture output remains finite");
+                }
+            };
+
+            int previousBoundary = 0;
+            const std::array<DynamicProductionTransportReason, 3> resets {
+                DynamicProductionTransportReason::StopStart,
+                DynamicProductionTransportReason::Seek,
+                DynamicProductionTransportReason::HostReset
+            };
+            for (int boundaryIndex = 0; boundaryIndex < (int) fixture.transportBoundaries.size(); ++boundaryIndex)
+            {
+                const int boundary = fixture.transportBoundaries[(size_t) boundaryIndex];
+                renderRange (previousBoundary, boundary);
+                expectEquals (runtime.getReportedLatencySamples(), 960);
+                runtime.notifyTransportReset (resets[(size_t) boundaryIndex]);
+                expectEquals ((int64_t) runtime.getSelectedStableStateId(), (int64_t) 0,
+                             "pre-boundary State identity cannot leak across fixture transport reset");
+                expect (! runtime.getServiceBindingValid(), "pre-boundary Service binding cannot leak across reset");
+                previousBoundary = boundary;
+            }
+            renderRange (previousBoundary, (int) fixture.bass.size());
+            const auto beforeLoop = runtime.getSelectedStableStateId();
+            runtime.notifyTransportReset (DynamicProductionTransportReason::LoopWrap);
+            expectEquals ((int64_t) runtime.getSelectedStableStateId(), (int64_t) beforeLoop,
+                         "loop wrap preserves frozen continuity/history policy");
+            runtime.notifyTransportReset (DynamicProductionTransportReason::Seek);
+            expectEquals ((int64_t) runtime.getSelectedStableStateId(), (int64_t) 0);
+            expectEquals (runtime.getReportedLatencySamples(), 960);
+        }
+
         beginTest ("Continuity, strength, queue bounds, lifecycle, and callback allocation gates remain safe");
         {
+            beginTest ("Allocation counter observes scalar, array, and over-aligned allocations only while scoped");
+            struct alignas (64) OverAlignedAllocation { std::array<float, 16> values {}; };
+            expect (! ScopedTestAllocationCounter::isTracking());
+            {
+                ScopedTestAllocationCounter allocations;
+                auto* scalar = new int (7);
+                auto* array = new int[8];
+                auto* aligned = new OverAlignedAllocation;
+                auto* noThrowScalar = new (std::nothrow) int (8);
+                auto* noThrowArray = new (std::nothrow) int[8];
+                auto* noThrowAligned = new (std::nothrow) OverAlignedAllocation;
+                const auto result = allocations.snapshot();
+                expectGreaterOrEqual ((int) result.count, 6);
+                expectGreaterThan ((int64_t) result.bytes, (int64_t) 0);
+                delete scalar;
+                delete[] array;
+                delete aligned;
+                delete noThrowScalar;
+                delete[] noThrowArray;
+                delete noThrowAligned;
+            }
+            expect (! ScopedTestAllocationCounter::isTracking(), "counting is disabled outside ScopedTestAllocationCounter");
+
             const auto fixture = makeDynamicReleaseFixture (48000.0);
             KickLockAudioProcessor processor;
             prepare (processor, 48000.0, 256);
@@ -329,31 +657,73 @@ public:
             const int channels = juce::jmax (processor.getTotalNumInputChannels(), processor.getTotalNumOutputChannels());
             juce::AudioBuffer<float> buffer (channels, 256);
             juce::MidiBuffer midi;
-            buffer.clear();
-            processor.processBlock (buffer, midi); // warm all prepared branches and queues
+            const auto fillFixtureBlock = [&] (int offset)
+            {
+                buffer.clear();
+                for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                {
+                    const int fixtureIndex = (offset + sample) % (int) fixture.bass.size();
+                    const float bass = fixture.bass[(size_t) fixtureIndex];
+                    const float kick = fixture.kick[(size_t) fixtureIndex];
+                    buffer.setSample (0, sample, bass);
+                    if (channels > 1) buffer.setSample (1, sample, bass);
+                    if (channels > 2) buffer.setSample (2, sample, kick);
+                    if (channels > 3) buffer.setSample (3, sample, kick);
+                }
+            };
+            for (int warm = 0; warm < 24; ++warm)
+            {
+                fillFixtureBlock (warm * buffer.getNumSamples());
+                processor.processBlock (buffer, midi);
+            }
+            expectGreaterThan ((int64_t) processor.getDynamicProductionDiagnosticsForTesting().acceptedCaptures, (int64_t) 0,
+                               "allocation gate warms real non-zero Dynamic matching material before measurement");
             {
                 ScopedTestAllocationCounter allocations;
                 for (int iteration = 0; iteration < 16; ++iteration)
                 {
-                    buffer.clear();
+                    fillFixtureBlock (iteration * buffer.getNumSamples());
                     processor.processBlock (buffer, midi);
                     processor.processBlockBypassed (buffer, midi);
                 }
                 const auto result = allocations.snapshot();
                 expectEquals ((int) result.count, 0, "warmed processBlock and bypass callbacks allocate zero heap memory");
+                expectEquals ((int64_t) result.bytes, (int64_t) 0,
+                              "warmed non-zero processBlock and bypass callbacks allocate zero bytes");
             }
 
-            std::vector<float> rendered;
-            rendered.reserve (fixture.bass.size());
+            beginTest ("Localized transition continuity metric accepts smooth production-style fades and rejects an injected click");
+            std::vector<float> smooth (512, 0.0f);
+            for (int sample = 0; sample < (int) smooth.size(); ++sample)
+            {
+                const float t = (float) sample / (float) (smooth.size() - 1);
+                const float global = 0.35f * std::sin ((float) (kTwoPi * 3.0 * t));
+                const float state = 0.35f * std::sin ((float) (kTwoPi * 3.0 * t + 0.20));
+                const float fade = juce::jlimit (0.0f, 1.0f, ((float) sample - 180.0f) / 120.0f);
+                smooth[(size_t) sample] = global + fade * (state - global);
+            }
+            const int transitionBoundary = 180;
+            const float smoothScore = localizedTransitionScore (smooth, transitionBoundary);
+            expectLessThan (smoothScore, kMaximumLocalizedTransitionScore,
+                             "smooth Global/State-style crossfade remains below the localized click threshold");
+
+            auto clicked = smooth;
+            clicked[(size_t) transitionBoundary] += 2.0f;
+            const float clickScore = localizedTransitionScore (clicked, transitionBoundary);
+            expectGreaterThan (clickScore, kMaximumLocalizedTransitionScore,
+                               "deterministic positive-control click exceeds the localized transition threshold");
+
+            std::vector<float> genuineOutput;
+            genuineOutput.reserve (fixture.bass.size() * 2);
             setParameter (processor, "dynamic_strength", 0.0f);
-            driveProcessor (processor, fixture, 256, &rendered);
-            setParameter (processor, "dynamic_strength", 0.5f);
-            driveProcessor (processor, fixture, 256, &rendered);
+            driveProcessor (processor, fixture, 256, &genuineOutput);
+            const int stateBoundary = (int) genuineOutput.size();
             setParameter (processor, "dynamic_strength", 1.0f);
-            driveProcessor (processor, fixture, 256, &rendered);
-            expect (finiteAndBounded (rendered));
-            expectLessThan (normalizedDerivative (rendered), 2.05f,
-                            "normalized discontinuity remains bounded across runtime transitions");
+            driveProcessor (processor, fixture, 256, &genuineOutput);
+            expect (finiteAndBounded (genuineOutput));
+            const int delayedStateBoundary = stateBoundary + processor.getLatencySamples();
+            expectLessThan (localizedTransitionScore (genuineOutput, delayedStateBoundary), kMaximumLocalizedTransitionScore,
+                             "actual processor strength retarget remains continuous at the known render boundary");
 
             DynamicMeasurementScoreQueue queue;
             queue.prepare (DynamicMeasurementQueueContract::kScoreQueueCapacity);

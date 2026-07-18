@@ -3,6 +3,10 @@
 #include <cstdlib>
 #include <new>
 
+#if defined (_WIN32)
+ #include <malloc.h>
+#endif
+
 namespace
 {
     thread_local bool allocationTracking = false;
@@ -39,18 +43,70 @@ namespace
             return nullptr;
         }
     }
+
+    void* allocateAligned (std::size_t bytes, std::align_val_t alignment)
+    {
+        const auto requested = bytes == 0 ? (std::size_t) 1 : bytes;
+        void* memory = nullptr;
+
+#if defined (_WIN32)
+        memory = _aligned_malloc (requested, static_cast<std::size_t> (alignment));
+#else
+        if (posix_memalign (&memory, static_cast<std::size_t> (alignment), requested) != 0)
+            memory = nullptr;
+#endif
+
+        if (memory != nullptr)
+        {
+            recordAllocation (requested);
+            return memory;
+        }
+
+        throw std::bad_alloc();
+    }
+
+    void* allocateAlignedNoThrow (std::size_t bytes, std::align_val_t alignment) noexcept
+    {
+        try
+        {
+            return allocateAligned (bytes, alignment);
+        }
+        catch (const std::bad_alloc&)
+        {
+            return nullptr;
+        }
+    }
+
+    void deallocateAligned (void* memory) noexcept
+    {
+#if defined (_WIN32)
+        _aligned_free (memory);
+#else
+        std::free (memory);
+#endif
+    }
 }
 
 void* operator new (std::size_t bytes) { return allocate (bytes); }
 void* operator new[] (std::size_t bytes) { return allocate (bytes); }
 void* operator new (std::size_t bytes, const std::nothrow_t&) noexcept { return allocateNoThrow (bytes); }
 void* operator new[] (std::size_t bytes, const std::nothrow_t&) noexcept { return allocateNoThrow (bytes); }
+void* operator new (std::size_t bytes, std::align_val_t alignment) { return allocateAligned (bytes, alignment); }
+void* operator new[] (std::size_t bytes, std::align_val_t alignment) { return allocateAligned (bytes, alignment); }
+void* operator new (std::size_t bytes, std::align_val_t alignment, const std::nothrow_t&) noexcept { return allocateAlignedNoThrow (bytes, alignment); }
+void* operator new[] (std::size_t bytes, std::align_val_t alignment, const std::nothrow_t&) noexcept { return allocateAlignedNoThrow (bytes, alignment); }
 void operator delete (void* memory) noexcept { std::free (memory); }
 void operator delete[] (void* memory) noexcept { std::free (memory); }
 void operator delete (void* memory, std::size_t) noexcept { std::free (memory); }
 void operator delete[] (void* memory, std::size_t) noexcept { std::free (memory); }
 void operator delete (void* memory, const std::nothrow_t&) noexcept { std::free (memory); }
 void operator delete[] (void* memory, const std::nothrow_t&) noexcept { std::free (memory); }
+void operator delete (void* memory, std::align_val_t) noexcept { deallocateAligned (memory); }
+void operator delete[] (void* memory, std::align_val_t) noexcept { deallocateAligned (memory); }
+void operator delete (void* memory, std::size_t, std::align_val_t) noexcept { deallocateAligned (memory); }
+void operator delete[] (void* memory, std::size_t, std::align_val_t) noexcept { deallocateAligned (memory); }
+void operator delete (void* memory, std::align_val_t, const std::nothrow_t&) noexcept { deallocateAligned (memory); }
+void operator delete[] (void* memory, std::align_val_t, const std::nothrow_t&) noexcept { deallocateAligned (memory); }
 
 ScopedTestAllocationCounter::ScopedTestAllocationCounter() noexcept
     : wasTracking (allocationTracking)
@@ -68,4 +124,9 @@ ScopedTestAllocationCounter::~ScopedTestAllocationCounter()
 TestAllocationSnapshot ScopedTestAllocationCounter::snapshot() const noexcept
 {
     return { allocationCount, allocatedBytes };
+}
+
+bool ScopedTestAllocationCounter::isTracking() noexcept
+{
+    return allocationTracking;
 }

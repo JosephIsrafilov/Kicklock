@@ -18,6 +18,7 @@ public:
     ScopedTestAllocationCounter& operator= (const ScopedTestAllocationCounter&) = delete;
 
     TestAllocationSnapshot snapshot() const noexcept;
+    static bool isTracking() noexcept;
 
 private:
     bool wasTracking = false;

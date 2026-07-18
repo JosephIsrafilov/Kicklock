@@ -11,17 +11,18 @@ latency.
 | --- | --- | --- |
 | Static path | VERIFIED | Processor regression suite and Phase 11 callback gate. |
 | Legacy Dynamic path | VERIFIED | Legacy compatibility and source-fallback tests. |
-| New Dynamic Learn | VERIFIED | Fixed-seed fixture drives capture through ResultReady. |
-| New Dynamic runtime | VERIFIED | New-map publication, matching, source priority, finite output, and save/reload gates. |
-| Measurements | VERIFIED | Predicted and fresh-generation Verified sidecars remain separate and non-persistent. |
+| New Dynamic Learn | VERIFIED | Phase 11 waits for the audio-thread Capturing acknowledgement before feeding deterministic Learn material. |
+| New Dynamic runtime | VERIFIED | Actual Learn -> Apply -> New map runtime -> save/reload preserves source, stable IDs, packages, snapshots, and finite bounded output. |
+| Measurements | VERIFIED | Actual-Learn predicted evidence remains separate from runtime evidence; the processor-backed Performance gate exercises fresh Verified worker handoff, and Verified starts Unavailable after restore. |
 | DynamicWorkspace | VERIFIED | Phase 10 regression and Phase 11 construction/snapshot smoke coverage. |
 | Latency/PDC | VERIFIED | Exact 20 ms at 44.1, 48, 96, and 192 kHz. |
 | Sample rates | VERIFIED | Native fixture generation at 44.1, 48, 96, and 192 kHz. |
 | Block sizes | VERIFIED | 48 kHz: 1, 7, 32, 64, 127, 256, 512, 2048; pairwise irregular/small/large coverage at other supported rates. |
-| Transport/lifecycle | VERIFIED | Reset-safe runtime, queue, worker reprepare, editor lifecycle, and source change regression coverage. |
+| Transport/lifecycle | VERIFIED | Fixture ground-truth boundaries drive stop/start, seek, host-reset, loop-wrap, reprepare, stale-selection, and 20 ms PDC gates. |
 | Serialization/migration | VERIFIED | New/legacy independence, high-bit IDs, malformed child rejection, and sidecar reset coverage. |
-| Real-time allocations | VERIFIED | Test-only current-thread allocation gate covers warmed process and bypass callbacks. |
-| Performance measurements | VERIFIED | Release-only batch ratio gate reports median and robust upper-quantile versus represented audio time. |
+| Real-time allocations | VERIFIED | Test-only current-thread hooks cover scalar, array, nothrow, aligned, and aligned-nothrow forms; warmed non-zero process and bypass callbacks report zero allocations and bytes. |
+| Continuity metric | VERIFIED | Local pre/post derivative and signal-RMS score covers processor retargeting, passes a smooth crossfade, and rejects an injected click. |
+| Performance measurements | VERIFIED | Release-only stereo host-block batches are fully built and warmed before timing; median and robust upper-quantile ratios use represented audio time. |
 | Windows VST3 | UNVERIFIED | Full workflow artifact gate is required for each release candidate. |
 | macOS VST3 | UNVERIFIED | Full universal workflow artifact gate is required for each release candidate. |
 | macOS AU | UNVERIFIED | Universal AU artifact gate runs in CI; AU registration/`auval` remains an external host check. |
@@ -46,15 +47,18 @@ metadata and is not used as identity.
 
 ## Gates
 
-The `Phase11` category covers fixture formation, Learn result readiness, New
-source priority, Global-only and Candidate routing, Unknown/Ambiguous matching,
-PDC, persistence, block partitioning, snapshot coherence, queue overflow,
-callback allocation, lifecycle, and editor construction. Existing Phase 7-10
-suites provide the more granular branch, transport, measurement, and workspace
-checks used by the release path.
+The `Phase11` category covers fixture formation, cooperative Learn capture,
+actual Learn-to-Apply runtime activation, source priority, Global-only and
+Candidate routing, distinct Unknown/Ambiguous decisions with bounded Hold,
+PDC, persistence, snapshot coherence, transport-boundary resets, localized
+continuity controls, callback allocation, lifecycle, and editor construction.
+Existing Phase 7-10 suites provide granular branch, measurement, and workspace
+coverage used by the release path.
 
-`Performance` is Release-only. It warms pre-generated buffers, times complete
-fixed batches using `steady_clock`, discards warm-up passes, and compares median
+`Performance` is Release-only. It builds reusable stereo host blocks, map
+instances, input/output buffers, and warm branch state before timing complete
+fixed batches using `steady_clock`; the timed region only feeds pre-generated
+audio and invokes processing. It discards warm-up passes and compares median
 and robust upper-quantile processing duration to represented audio duration.
 The limits are ratios, not machine-specific microsecond budgets: median below
 0.75x real time and upper quantile below 1.0x real time. Setting
@@ -63,7 +67,8 @@ and logs that wall-clock assertions were skipped.
 
 The current-thread allocation counter is linked only into test binaries. It is
 enabled after all fixture, map, buffer, MIDI, and snapshot storage is prepared;
-it records count and requested bytes from global scalar/array allocations.
+it records count and requested bytes from ordinary, array, nothrow, aligned,
+and aligned-nothrow global allocation forms.
 
 ## Known Limitations
 

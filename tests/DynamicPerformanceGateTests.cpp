@@ -12,6 +12,19 @@ namespace
     constexpr double kUpperRealtimeRatioLimit = 1.00;
     constexpr int kWarmupPasses = 2;
     constexpr int kMeasuredPasses = 7;
+    constexpr int kBatchCount = kWarmupPasses + kMeasuredPasses;
+
+    struct HostBlock
+    {
+        juce::AudioBuffer<float> input;
+        juce::AudioBuffer<float> output;
+        std::vector<float> bass;
+        std::vector<float> kick;
+        int samples = 0;
+
+        HostBlock (int blockSize, int count)
+            : input (2, blockSize), output (2, blockSize), bass ((size_t) count), kick ((size_t) count), samples (count) {}
+    };
 
     DynamicFingerprintPrototype performancePrototype (float seed)
     {
@@ -35,14 +48,13 @@ namespace
         map.globalBase.globalAllpassQ = 0.8f;
         map.globalBase.allpassStages = worstCase ? 4 : 2;
         map.globalBase.learnedSampleRate = worstCase ? 192000.0 : 48000.0;
-        map.calibration = { true, 0.2f, 0.02f };
-        map.nextStateId = 100;
+        map.calibration = { true, 1.0f, 0.001f };
         for (int slot = 0; slot < stateCount; ++slot)
         {
             auto& state = map.states[(size_t) slot];
             state.occupied = true;
             state.stableStateId = (uint64_t) (slot + 1);
-            state.fingerprint = performancePrototype (-0.8f + 0.2f * (float) slot);
+            state.fingerprint = performancePrototype (-0.75f + 0.18f * (float) slot);
             state.hasLearnedPackage = true;
             state.learnedPackage = { -1.5f + 0.3f * (float) slot, 70.0f + 12.0f * (float) slot, 0.8f };
             state.origin = DynamicStateOrigin::Auto;
@@ -55,50 +67,159 @@ namespace
         return map;
     }
 
-    bool processFixture (DynamicProductionRuntime& runtime, const DynamicReleaseFixture& fixture,
-                         int blockSize, double strength)
+    std::vector<HostBlock> makeHostBlocks (const DynamicReleaseFixture& fixture, int blockSize)
     {
-        juce::AudioBuffer<float> input (1, blockSize);
-        juce::AudioBuffer<float> output (1, blockSize);
+        std::vector<HostBlock> blocks;
+        blocks.reserve ((fixture.bass.size() + (size_t) blockSize - 1) / (size_t) blockSize);
         for (int offset = 0; offset < (int) fixture.bass.size(); offset += blockSize)
         {
             const int count = std::min (blockSize, (int) fixture.bass.size() - offset);
-            for (int sample = 0; sample < count; ++sample)
-                input.setSample (0, sample, fixture.bass[(size_t) (offset + sample)]);
-            if (! runtime.process (input, fixture.bass.data() + offset, fixture.kick.data() + offset,
-                                  true, strength, output, count))
-                return false;
-            for (int sample = 0; sample < count; ++sample)
-                if (! std::isfinite (output.getSample (0, sample)))
-                    return false;
-        }
-        return true;
-    }
-
-    bool processStaticFixture (KickLockAudioProcessor& processor, const DynamicReleaseFixture& fixture,
-                               int blockSize, juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
-    {
-        const int channels = buffer.getNumChannels();
-        for (int offset = 0; offset < (int) fixture.bass.size(); offset += blockSize)
-        {
-            const int count = std::min (blockSize, (int) fixture.bass.size() - offset);
-            buffer.clear();
+            blocks.emplace_back (blockSize, count);
+            auto& block = blocks.back();
             for (int sample = 0; sample < count; ++sample)
             {
                 const float bass = fixture.bass[(size_t) (offset + sample)];
                 const float kick = fixture.kick[(size_t) (offset + sample)];
-                buffer.setSample (0, sample, bass);
-                if (channels > 1) buffer.setSample (1, sample, bass);
-                if (channels > 2) buffer.setSample (2, sample, kick);
-                if (channels > 3) buffer.setSample (3, sample, kick);
+                block.bass[(size_t) sample] = bass;
+                block.kick[(size_t) sample] = kick;
+                block.input.setSample (0, sample, bass);
+                block.input.setSample (1, sample, bass);
             }
-            processor.processBlock (buffer, midi);
-            for (int sample = 0; sample < count; ++sample)
-                if (! std::isfinite (buffer.getSample (0, sample)))
-                    return false;
         }
-        return true;
+        return blocks;
     }
+
+    struct RuntimeBatch
+    {
+        DynamicProductionRuntime runtime;
+        std::vector<HostBlock> blocks;
+        bool finite = true;
+
+        bool prepareAndWarm (const DynamicReleaseFixture& fixture, int blockSize,
+                             const DynamicStateMap& map, double strength)
+        {
+            blocks = makeHostBlocks (fixture, blockSize);
+            if (! runtime.prepare (fixture.sampleRate, blockSize, 2))
+                return false;
+            runtime.activateMap (map);
+            return render (strength) && render (strength);
+        }
+
+        bool render (double strength) noexcept
+        {
+            finite = true;
+            for (auto& block : blocks)
+            {
+                if (! runtime.process (block.input, block.bass.data(), block.kick.data(), true,
+                                       strength, block.output, block.samples))
+                    return false;
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int sample = 0; sample < block.samples; ++sample)
+                        if (! std::isfinite (block.output.getSample (channel, sample)))
+                            finite = false;
+            }
+            return finite;
+        }
+    };
+
+    struct StaticBatch
+    {
+        KickLockAudioProcessor processor;
+        std::vector<HostBlock> blocks;
+        juce::MidiBuffer midi;
+        bool finite = true;
+
+        bool prepareAndWarm (const DynamicReleaseFixture& fixture, int blockSize)
+        {
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (fixture.sampleRate, blockSize);
+            processor.prepareToPlay (fixture.sampleRate, blockSize);
+            blocks = makeHostBlocks (fixture, blockSize);
+            for (auto& block : blocks)
+            {
+                block.input.setSize (juce::jmax (processor.getTotalNumInputChannels(), processor.getTotalNumOutputChannels()),
+                                     block.input.getNumSamples(), false, true, true);
+                for (int sample = 0; sample < block.samples; ++sample)
+                {
+                    block.input.setSample (0, sample, block.bass[(size_t) sample]);
+                    if (block.input.getNumChannels() > 1) block.input.setSample (1, sample, block.bass[(size_t) sample]);
+                    if (block.input.getNumChannels() > 2) block.input.setSample (2, sample, block.kick[(size_t) sample]);
+                    if (block.input.getNumChannels() > 3) block.input.setSample (3, sample, block.kick[(size_t) sample]);
+                }
+            }
+            return render() && render();
+        }
+
+        bool render() noexcept
+        {
+            finite = true;
+            for (auto& block : blocks)
+            {
+                block.input.clear();
+                for (int sample = 0; sample < block.samples; ++sample)
+                {
+                    block.input.setSample (0, sample, block.bass[(size_t) sample]);
+                    if (block.input.getNumChannels() > 1) block.input.setSample (1, sample, block.bass[(size_t) sample]);
+                    if (block.input.getNumChannels() > 2) block.input.setSample (2, sample, block.kick[(size_t) sample]);
+                    if (block.input.getNumChannels() > 3) block.input.setSample (3, sample, block.kick[(size_t) sample]);
+                }
+                processor.processBlock (block.input, midi);
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int sample = 0; sample < block.samples; ++sample)
+                        if (! std::isfinite (block.input.getSample (channel, sample)))
+                            finite = false;
+            }
+            return finite;
+        }
+    };
+
+    struct MeasurementBatch
+    {
+        KickLockAudioProcessor processor;
+        std::vector<HostBlock> blocks;
+        juce::MidiBuffer midi;
+        bool finite = true;
+
+        bool prepareAndWarm (const DynamicReleaseFixture& fixture, int blockSize, const DynamicStateMap& map)
+        {
+            processor.enableAllBuses();
+            processor.setRateAndBufferSizeDetails (fixture.sampleRate, blockSize);
+            processor.prepareToPlay (fixture.sampleRate, blockSize);
+            if (auto* mode = processor.apvts.getParameter ("correction_mode"))
+                mode->setValueNotifyingHost (mode->convertTo0to1 (1.0f));
+            if (auto* strength = processor.apvts.getParameter ("dynamic_strength"))
+                strength->setValueNotifyingHost (strength->convertTo0to1 (1.0f));
+            if (! processor.publishDynamicStateMapForTesting (map))
+                return false;
+            blocks = makeHostBlocks (fixture, blockSize);
+            for (auto& block : blocks)
+                block.input.setSize (juce::jmax (processor.getTotalNumInputChannels(), processor.getTotalNumOutputChannels()),
+                                     block.input.getNumSamples(), false, true, true);
+            return render() && render();
+        }
+
+        bool render() noexcept
+        {
+            finite = true;
+            for (auto& block : blocks)
+            {
+                block.input.clear();
+                for (int sample = 0; sample < block.samples; ++sample)
+                {
+                    block.input.setSample (0, sample, block.bass[(size_t) sample]);
+                    if (block.input.getNumChannels() > 1) block.input.setSample (1, sample, block.bass[(size_t) sample]);
+                    if (block.input.getNumChannels() > 2) block.input.setSample (2, sample, block.kick[(size_t) sample]);
+                    if (block.input.getNumChannels() > 3) block.input.setSample (3, sample, block.kick[(size_t) sample]);
+                }
+                processor.processBlock (block.input, midi);
+                for (int channel = 0; channel < 2; ++channel)
+                    for (int sample = 0; sample < block.samples; ++sample)
+                        if (! std::isfinite (block.input.getSample (channel, sample)))
+                            finite = false;
+            }
+            return finite;
+        }
+    };
 
     struct PerformanceSample
     {
@@ -108,17 +229,18 @@ namespace
         bool processed = true;
     };
 
-    template <typename Render>
-    PerformanceSample measure (Render&& render, double representedSeconds)
+    template <typename Batch, typename Render>
+    PerformanceSample measure (std::array<Batch, kBatchCount>& batches, Render&& render,
+                               double representedSeconds)
     {
-        bool processed = true;
-        for (int warmup = 0; warmup < kWarmupPasses; ++warmup)
-            processed = render() && processed;
         std::array<double, kMeasuredPasses> seconds {};
+        bool processed = true;
+        for (int pass = 0; pass < kWarmupPasses; ++pass)
+            processed = render (batches[(size_t) pass]) && processed;
         for (int pass = 0; pass < kMeasuredPasses; ++pass)
         {
             const auto start = std::chrono::steady_clock::now();
-            processed = render() && processed;
+            processed = render (batches[(size_t) (kWarmupPasses + pass)]) && processed;
             seconds[(size_t) pass] = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
         }
         std::sort (seconds.begin(), seconds.end());
@@ -138,32 +260,29 @@ public:
 
     void runTest() override
     {
-        beginTest ("Release runtime batches retain real-time headroom across Dynamic scenarios");
+        beginTest ("Release runtime batches retain real-time headroom with preallocated stereo host blocks");
         if (skipTimedAssertions())
-        {
-            logMessage ("KICKLOCK_SKIP_TIMED_ASSERTS=1: wall-clock Performance assertions skipped; finiteness still runs.");
-        }
-
+            logMessage ("KICKLOCK_SKIP_TIMED_ASSERTS=1: wall-clock Performance assertions skipped; preallocated correctness coverage still runs.");
        #if ! defined (NDEBUG)
         logMessage ("Debug build: timing thresholds are skipped; Release builds enforce them.");
        #endif
 
-        const auto logAndAssert = [this] (const juce::String& scenarioLabel, double rate, int block,
-                                          const PerformanceSample& sample)
+        const auto logAndAssert = [this] (const juce::String& label, double rate, int block,
+                                          const PerformanceSample& sample, const DynamicProductionDiagnostics* diagnostics)
         {
             const double medianRatio = sample.medianSeconds / sample.representedSeconds;
             const double upperRatio = sample.upperSeconds / sample.representedSeconds;
-            logMessage (scenarioLabel + " sr=" + juce::String (rate, 0)
+            logMessage (label + " sr=" + juce::String (rate, 0)
                         + " block=" + juce::String (block)
-                        + " audio=" + juce::String (sample.representedSeconds, 3)
-                        + " median=" + juce::String (sample.medianSeconds, 4)
-                        + " upper=" + juce::String (sample.upperSeconds, 4)
                         + " medianRatio=" + juce::String (medianRatio, 4)
-                        + " upperRatio=" + juce::String (upperRatio, 4)
-                        + " thresholds=" + juce::String (kMedianRealtimeRatioLimit, 2)
-                        + "/" + juce::String (kUpperRealtimeRatioLimit, 2));
-            expect (sample.processed, "pre-generated runtime batch remains finite and processable");
+                        + " upperRatio=" + juce::String (upperRatio, 4));
+            expect (sample.processed, "preallocated batch remains finite and processable");
             expect (std::isfinite (medianRatio) && std::isfinite (upperRatio));
+            if (diagnostics != nullptr)
+            {
+                expectGreaterThan ((int64_t) diagnostics->completedObservations, (int64_t) 0,
+                                  "scenario processes real production fingerprint observations");
+            }
            #if defined (NDEBUG)
             if (! skipTimedAssertions())
             {
@@ -176,40 +295,84 @@ public:
         };
 
         const auto staticFixture = makeDynamicReleaseFixture (48000.0);
-        KickLockAudioProcessor staticProcessor;
-        staticProcessor.enableAllBuses();
-        staticProcessor.setRateAndBufferSizeDetails (48000.0, 256);
-        staticProcessor.prepareToPlay (48000.0, 256);
-        juce::AudioBuffer<float> staticBuffer (
-            juce::jmax (staticProcessor.getTotalNumInputChannels(), staticProcessor.getTotalNumOutputChannels()), 256);
-        juce::MidiBuffer staticMidi;
-        const auto staticSample = measure ([&]
-        {
-            return processStaticFixture (staticProcessor, staticFixture, 256, staticBuffer, staticMidi);
-        }, (double) staticFixture.bass.size() / staticFixture.sampleRate);
-        logAndAssert ("Static baseline", 48000.0, 256, staticSample);
+        std::array<StaticBatch, kBatchCount> staticBatches;
+        for (auto& batch : staticBatches)
+            expect (batch.prepareAndWarm (staticFixture, 256));
+        const auto staticSample = measure (staticBatches, [] (StaticBatch& batch) { return batch.render(); },
+                                           (double) staticFixture.bass.size() / staticFixture.sampleRate);
+        logAndAssert ("Static baseline", 48000.0, 256, staticSample, nullptr);
 
-        struct Scenario { const char* name; double rate; int block; int states; bool worstCase; };
+        struct Scenario { const char* name; double rate; int block; int states; bool worstCase; bool expectState; bool expectService; };
         const std::array<Scenario, 4> scenarios {{
-            { "Dynamic Global-only", 48000.0, 256, 0, false },
-            { "Dynamic eight hot States", 48000.0, 256, 8, false },
-            { "Worst case State matching", 192000.0, 32, 8, true },
-            { "Service-capable package set", 96000.0, 64, 8, true }
+            { "Dynamic Global-only", 48000.0, 256, 0, false, false, false },
+            { "Dynamic eight hot States", 48000.0, 256, 8, false, true, false },
+            { "Worst-case State matching", 192000.0, 32, 8, true, true, false },
+            { "Service prime/replay", 96000.0, 64, 1, true, true, true }
         }};
 
         for (const auto& scenario : scenarios)
         {
             const auto fixture = makeDynamicReleaseFixture (scenario.rate);
-            DynamicProductionRuntime runtime;
-            expect (runtime.prepare (scenario.rate, scenario.block, 1));
-            runtime.activateMap (performanceMap (scenario.states, scenario.worstCase));
-            const auto sample = measure ([&]
+            const auto map = performanceMap (scenario.states, scenario.worstCase);
+            std::array<RuntimeBatch, kBatchCount> batches;
+            for (auto& batch : batches)
             {
-                return processFixture (runtime, fixture, scenario.block, 1.0);
-            }, (double) fixture.bass.size() / scenario.rate);
-
-            logAndAssert (scenario.name, scenario.rate, scenario.block, sample);
+                expect (batch.prepareAndWarm (fixture, scenario.block, map, 1.0));
+                if (scenario.expectService)
+                {
+                    // Service is only selected for an eligible identity whose
+                    // persistent slot is cold/unavailable. Force that bounded
+                    // production branch condition, then prime it before timing.
+                    batch.runtime.getEngineForTesting().clearStateSlot (0);
+                    expect (batch.render (1.0));
+                }
+            }
+            const auto sample = measure (batches, [] (RuntimeBatch& batch) { return batch.render (1.0); },
+                                         (double) fixture.bass.size() / fixture.sampleRate);
+            const auto diagnostics = batches.back().runtime.getDiagnostics();
+            logAndAssert (scenario.name, scenario.rate, scenario.block, sample, &diagnostics);
+            if (scenario.states == 0)
+                expect (diagnostics.selectedBranchKind == DynamicSelectorBranchKind::Global,
+                        "Global-only scenario never selects a persistent correction");
+            if (scenario.expectState)
+                expect (diagnostics.selectedBranchKind == DynamicSelectorBranchKind::State
+                        || diagnostics.serviceBindings > 0,
+                        "eligible Dynamic scenario reaches a persistent State or Service branch");
+            if (scenario.expectService)
+            {
+                expectGreaterThan ((int64_t) diagnostics.servicePrimes, (int64_t) 0,
+                                  "Service scenario exercises the bounded prime/replay path");
+                expect (diagnostics.selectedBranchKind == DynamicSelectorBranchKind::Service,
+                        "Service scenario reaches the actual Service branch before timing");
+            }
         }
+
+        beginTest ("Measurement callback batch reaches the processor worker handoff without timed allocations");
+        const auto measurementFixture = makeDynamicReleaseFixture (48000.0);
+        const auto measurementMap = performanceMap (1, false);
+        std::array<MeasurementBatch, kBatchCount> measurementBatches;
+        for (auto& batch : measurementBatches)
+            expect (batch.prepareAndWarm (measurementFixture, 128, measurementMap));
+        const auto measurementSample = measure (measurementBatches,
+                                                [] (MeasurementBatch& batch) { return batch.render(); },
+                                                (double) measurementFixture.bass.size() / measurementFixture.sampleRate);
+        logAndAssert ("Runtime measurement capture", 48000.0, 128, measurementSample, nullptr);
+        auto& measurementProcessor = measurementBatches.back().processor;
+        expectGreaterThan ((int64_t) measurementProcessor.getDynamicProductionDiagnosticsForTesting().completedObservations,
+                           (int64_t) 0, "measurement scenario completes real runtime observations");
+        bool verified = false;
+        for (int attempt = 0; attempt < 250 && ! verified; ++attempt)
+        {
+            const auto summary = measurementProcessor.getDynamicVerifiedMeasurementForTesting (1);
+            verified = summary.availability == DynamicMeasurementAvailability::Available
+                    || summary.availability == DynamicMeasurementAvailability::InsufficientMaterial;
+            if (! verified)
+            {
+                juce::Thread::sleep (2);
+                expect (measurementBatches.back().render());
+            }
+        }
+        expect (verified, "measurement scenario reaches the worker handoff and fresh Verified sidecar");
     }
 };
 
