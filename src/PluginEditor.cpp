@@ -499,6 +499,10 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
         if (cleanScopeMode)
             helpOverlayVisible = false;
         resized();
+        if (readCorrectionMode() == CorrectionMode::Dynamic)
+            refreshDynamicWorkflow();
+        else
+            refreshAnalyzeWorkflow();
         repaint();
     };
     oscilloscope.onToggleCleanMode = toggleCleanScopeMode;
@@ -803,6 +807,8 @@ void KickLockAudioProcessorEditor::configureCombo (juce::ComboBox& combo, const 
 
 void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
 {
+    const auto dynamicVisibility = dynamicWorkspaceWorkflowVisibility (
+        false, LearnState::Idle, cleanScopeMode);
     const bool showScopeToolbar = shouldBeVisible || cleanScopeMode;
     const bool showStaticLower = shouldBeVisible && ! dynamicModeSelected;
     gridCombo.setVisible (shouldBeVisible);
@@ -832,7 +838,7 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     phaseFreqSlider.setVisible (showStaticLower);
     phaseQSlider.setVisible (showStaticLower);
     visualOffsetSlider.setVisible (showStaticLower);
-    dynamicStrengthSlider.setVisible (shouldBeVisible);
+    dynamicStrengthSlider.setVisible (shouldBeVisible && dynamicVisibility.dynamicStrength);
     crossoverEnableButton.setVisible (showStaticLower);
     crossoverSlider.setVisible (showStaticLower);
 
@@ -843,7 +849,7 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     phaseFreqLabel.setVisible (showStaticLower);
     phaseQLabel.setVisible (showStaticLower);
     visualOffsetLabel.setVisible (showStaticLower);
-    dynamicStrengthLabel.setVisible (shouldBeVisible);
+    dynamicStrengthLabel.setVisible (shouldBeVisible && dynamicVisibility.dynamicStrength);
     crossoverEnableLabel.setVisible (showStaticLower);
     crossoverLabel.setVisible (showStaticLower);
 
@@ -858,7 +864,7 @@ void KickLockAudioProcessorEditor::setChromeVisible (bool shouldBeVisible)
     transientPunch.setVisible (showStaticLower);
     learnProgressDisplay.setVisible (false);
     setRefButton.setVisible (showStaticLower);
-    dynamicWorkspace.setVisible (shouldBeVisible && dynamicModeSelected);
+    dynamicWorkspace.setVisible (shouldBeVisible && dynamicModeSelected && dynamicVisibility.workspace);
 }
 
 void KickLockAudioProcessorEditor::pushScopeSettings()
@@ -1287,6 +1293,7 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     const bool learnBusy = learnStateIsBusy (learnState);
     latestLearnProgress = audioProcessor.getLearnProgress();
     const auto preview = audioProcessor.getPendingDynamicLearnPreviewForUi();
+    const auto pendingResult = audioProcessor.getPendingLearnResult();
     const auto runtime = audioProcessor.getDynamicRuntimeSnapshotForUi();
 
     const auto primary = primaryWorkflowPresentation (true, learnState, canStartAnalyze,
@@ -1304,8 +1311,9 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
 
     const bool resultReady = preview.valid && preview.applyAvailable;
     const auto blockedReason = resultReady ? preview.applyBlockedReason : juce::String {};
+    const auto workflowVisibility = dynamicWorkspaceWorkflowVisibility (resultReady, learnState, cleanScopeMode);
     // Dynamic never shows Apply Fix. Apply Learn only when applicable.
-    applyFixButton.setVisible (resultReady);
+    applyFixButton.setVisible (workflowVisibility.applyLearn);
     if (resultReady)
     {
         if (lastApplyButtonText != "Apply Learn")
@@ -1322,11 +1330,8 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
         applyFixButton.setEnabled (false);
     }
 
-    const bool showDiscard = learnState == LearnState::ResultReady
-                          || learnState == LearnState::NotEnoughMaterial
-                          || learnState == LearnState::Failed;
-    discardButton.setVisible (showDiscard);
-    discardButton.setEnabled (showDiscard);
+    discardButton.setVisible (workflowVisibility.discard);
+    discardButton.setEnabled (workflowVisibility.discard);
     revertButton.setVisible (false);
 
     transientPunch.setVisible (false);
@@ -1346,9 +1351,20 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     model.runtime = runtime;
     model.capturedHits = latestLearnProgress.capturedHits;
     model.processedHits = latestLearnProgress.drainedHits;
+    if (learnBusy)
+        model.learnStatusMessage = "Learning: captured " + juce::String (juce::jmax (0, model.capturedHits))
+            + ", processed " + juce::String (juce::jmax (0, model.processedHits)) + ".";
+    else if (! preview.valid
+        && (learnState == LearnState::ResultReady
+            || learnState == LearnState::NotEnoughMaterial
+            || learnState == LearnState::Failed))
+        model.learnStatusMessage = formatLearnFailureBody (pendingResult);
     model.clearAvailable = ! learnBusy && audioProcessor.hasLearnedDynamicData();
     model.revertAvailable = ! learnBusy && audioProcessor.hasRevertSnapshot();
     dynamicWorkspace.setModel (model);
+    dynamicWorkspace.setVisible (workflowVisibility.workspace);
+    dynamicStrengthSlider.setVisible (workflowVisibility.dynamicStrength);
+    dynamicStrengthLabel.setVisible (workflowVisibility.dynamicStrength);
 }
 
 void KickLockAudioProcessorEditor::refreshCompareButtons()

@@ -1116,7 +1116,7 @@ public:
             expectEquals (formatDynamicStrength (0.506f), juce::String ("51%"));
             expectEquals (formatDynamicStrength (1.0f), juce::String ("100%"));
             expectEquals (juce::String (dynamicStrengthTooltip()),
-                          juce::String ("0% uses the global phase filter setting for every note. 100% uses each note's learned Freq/Q; Delay and Polarity stay global."));
+                          juce::String ("0% uses Global correction. 100% uses learned State correction. Delay and Polarity remain Global."));
         }
 
         beginTest ("Learn note chips use MIDI names and the shared readiness policy");

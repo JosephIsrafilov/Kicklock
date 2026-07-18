@@ -96,8 +96,8 @@ public:
             setName (dynamicStateCardTitle (card));
             setDescription ("Dynamic conflict State. " + dynamicStateEvidenceLabel (card.evidence)
                             + ", " + dynamicStateOriginLabel (card.origin)
-                            + ", stable ID " + juce::String ((juce::int64) card.stableStateId));
-            setTooltip ("Stable State ID: " + juce::String ((juce::int64) card.stableStateId));
+                            + ", stable ID " + fullDynamicStateId (card.stableStateId));
+            setTooltip ("Stable State ID: " + fullDynamicStateId (card.stableStateId));
         }
         repaint();
     }
@@ -161,7 +161,7 @@ public:
             g.setColour (kMuted);
             g.setFont (juce::Font (juce::FontOptions (9.0f)).boldened());
             g.drawText (title, row.removeFromLeft (53), juce::Justification::centredLeft);
-            g.setColour (colourForRole (dynamicWorkspaceColourRole (card)));
+            g.setColour (colourForRole (dynamicMeasurementColourRole (summary)));
             g.drawText (formatDynamicMeasurementAvailability (summary, verified), row.removeFromTop (12),
                         juce::Justification::centredLeft, true);
             g.setColour (kText.withAlpha (0.88f));
@@ -265,10 +265,11 @@ void DynamicWorkspace::setModel (const DynamicWorkspaceViewModel& next)
         || model.runtime.holdActive != next.runtime.holdActive
         || model.runtime.fallbackActive != next.runtime.fallbackActive
         || model.runtime.sidechainPresent != next.runtime.sidechainPresent
-        || model.runtime.bypassActive != next.runtime.bypassActive
-        || model.capturedHits != next.capturedHits
-        || model.processedHits != next.processedHits
-        || model.clearAvailable != next.clearAvailable
+         || model.runtime.bypassActive != next.runtime.bypassActive
+         || model.capturedHits != next.capturedHits
+         || model.processedHits != next.processedHits
+         || model.learnStatusMessage != next.learnStatusMessage
+         || model.clearAvailable != next.clearAvailable
         || model.revertAvailable != next.revertAvailable;
 
     model = next;
@@ -300,22 +301,10 @@ void DynamicWorkspace::setModel (const DynamicWorkspaceViewModel& next)
                                                 selectedDetailStableStateId == presentation.stableStateId);
     }
 
-    headerSource = preview ? "PREVIEW - NOT APPLIED" : dynamicMapSourceLabel (model.runtime.source);
-    headerStatus = preview ? "PREDICTED ONLY" : dynamicWorkspaceRuntimeStatus (model.runtime);
-    if (preview)
-        headerDetail = model.previewApplyBlocked ? model.previewBlockedReason
-            : model.previewApplyAvailable ? "Apply Learn is available. Verified remains unavailable until fresh runtime output."
-                                          : "Pending Learn result is not applicable.";
-    else if (model.runtime.source == DynamicMapSource::LegacyDynamicCompatibility)
-        headerDetail = "Legacy note map compatibility is active. New State cards and Phase 9 measurements are unavailable.";
-    else if (model.runtime.source == DynamicMapSource::None)
-        headerDetail = "Learn repeatable conflict States. Unknown or ambiguous conflicts use the safe Global path.";
-    else
-        headerDetail = "Selected and active States are distinct runtime identities.";
-
-    if (! preview && learnStateIsBusy (model.learnState))
-        headerDetail = "Learning: captured " + juce::String (juce::jmax (0, model.capturedHits))
-            + ", processed " + juce::String (juce::jmax (0, model.processedHits)) + ".";
+    const auto header = dynamicWorkspaceHeaderPresentation (model);
+    headerSource = header.source;
+    headerStatus = header.status;
+    headerDetail = header.detail;
 
     if (headerChanged)
         repaint (getLocalBounds().removeFromTop (62));

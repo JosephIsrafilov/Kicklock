@@ -27,6 +27,8 @@ struct DynamicWorkspaceViewModel
 
     int capturedHits = 0;
     int processedHits = 0;
+    // Fully formatted by the editor from the processor-owned finalized result.
+    juce::String learnStatusMessage;
     bool clearAvailable = false;
     bool revertAvailable = false;
 };

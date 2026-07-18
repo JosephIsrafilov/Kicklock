@@ -1,7 +1,9 @@
 #include "TestCommon.h"
 #include "PluginProcessor.h"
+#include "ui/DynamicUiHelpers.h"
 #include "ui/DynamicWorkspace.h"
 
+#include <limits>
 #include <type_traits>
 
 namespace
@@ -169,6 +171,100 @@ public:
             expectEquals (formatDynamicImprovementPoints (4.5f), juce::String ("+4.5 pts"));
             expectEquals (formatDynamicBeforeAfter (available (DynamicCorrectionAssessment::Neutral)),
                           juce::String ("40.0 -> 44.0"));
+        }
+
+        beginTest ("Measurement roles use each row's published availability and assessment");
+        {
+            auto predicted = available (DynamicCorrectionAssessment::PredictedImprovement);
+            auto verified = makeUnavailableDynamicMeasurementSummary();
+            expectEquals ((int) dynamicMeasurementColourRole (predicted),
+                          (int) DynamicWorkspaceColourRole::Green);
+            expectEquals ((int) dynamicMeasurementColourRole (verified),
+                          (int) DynamicWorkspaceColourRole::Muted);
+
+            verified.availability = DynamicMeasurementAvailability::Collecting;
+            verified.validWindowCount = 1;
+            expectEquals ((int) dynamicMeasurementColourRole (verified),
+                          (int) DynamicWorkspaceColourRole::Amber);
+
+            verified = available (DynamicCorrectionAssessment::Regressed, -5.0f);
+            expectEquals ((int) dynamicMeasurementColourRole (verified),
+                          (int) DynamicWorkspaceColourRole::Red);
+        }
+
+        beginTest ("Resolved Learn diagnostics remain visible when no Dynamic preview can form");
+        {
+            DynamicWorkspaceViewModel busy;
+            busy.learnState = LearnState::Capturing;
+            busy.learnStatusMessage = "Learning: captured 4, processed 2.";
+            auto presentation = dynamicWorkspaceHeaderPresentation (busy);
+            expectEquals (presentation.detail, busy.learnStatusMessage);
+
+            LearnFinalizeResult insufficient;
+            insufficient.message = "Need more timing-usable overlap material.";
+            insufficient.diagnostics.capturedHits = 7;
+            insufficient.diagnostics.rejectedPitchHits = 3;
+            insufficient.diagnostics.analyzedHits = 2;
+
+            DynamicWorkspaceViewModel model;
+            model.learnState = LearnState::NotEnoughMaterial;
+            model.learnStatusMessage = formatLearnFailureBody (insufficient);
+            presentation = dynamicWorkspaceHeaderPresentation (model);
+            expectEquals (presentation.source, juce::String ("LEARN RESULT"));
+            expectEquals (presentation.status, juce::String ("NOT ENOUGH MATERIAL"));
+            expect (presentation.detail.contains ("Need more timing-usable overlap material."));
+            expect (presentation.detail.contains ("Captured: 7"));
+
+            LearnFinalizeResult failed;
+            failed.message = "Learn worker could not finalize the State map.";
+            failed.diagnostics.capturedHits = 5;
+            model.learnState = LearnState::Failed;
+            model.learnStatusMessage = formatLearnFailureBody (failed);
+            presentation = dynamicWorkspaceHeaderPresentation (model);
+            expectEquals (presentation.status, juce::String ("LEARN FAILED"));
+            expect (presentation.detail.contains ("Learn worker could not finalize the State map."));
+
+            model.learnState = LearnState::ResultReady;
+            model.learnStatusMessage = "The resolved Learn result did not contain a valid State map.";
+            presentation = dynamicWorkspaceHeaderPresentation (model);
+            expectEquals (presentation.status, juce::String ("NO PREVIEW"));
+            expect (presentation.detail.contains ("did not contain a valid State map"));
+        }
+
+        beginTest ("Clean Scope keeps Dynamic workflow controls hidden across refreshes");
+        {
+            const auto visible = dynamicWorkspaceWorkflowVisibility (true, LearnState::ResultReady, false);
+            expect (visible.applyLearn && visible.discard && visible.workspace
+                    && visible.workspaceMapActions && visible.dynamicStrength);
+
+            DynamicWorkspace workspace;
+            workspace.setModel (runtimeModel());
+            workspace.selectDetailState (100);
+            for (int refresh = 0; refresh < 4; ++refresh)
+            {
+                const auto hidden = dynamicWorkspaceWorkflowVisibility (true, LearnState::ResultReady, true);
+                expect (! hidden.applyLearn && ! hidden.discard && ! hidden.workspace
+                        && ! hidden.workspaceMapActions && ! hidden.dynamicStrength);
+                expectEquals ((int64) workspace.getSelectedDetailStableStateId(), (int64) 100);
+            }
+
+            const auto restored = dynamicWorkspaceWorkflowVisibility (true, LearnState::ResultReady, false);
+            expect (restored.applyLearn && restored.discard && restored.workspace
+                    && restored.workspaceMapActions && restored.dynamicStrength);
+            expectEquals ((int64) workspace.getSelectedDetailStableStateId(), (int64) 100);
+        }
+
+        beginTest ("Stable State identity formats the full unsigned value exactly");
+        {
+            constexpr uint64_t highStateId = std::numeric_limits<uint64_t>::max();
+            const auto identity = fullDynamicStateId (highStateId);
+            expectEquals (identity, juce::String ("18446744073709551615"));
+            expect (! identity.containsChar ('-'));
+
+            const auto card = makePreviewDynamicStateCard (
+                makeState (highStateId), 0, available (DynamicCorrectionAssessment::PredictedImprovement));
+            expectEquals (card.stableStateId, highStateId);
+            expect (! dynamicStateCardTitle (card).containsChar ('-'));
         }
 
         beginTest ("Preview is not applied, has no active State, and keeps Verified unavailable");

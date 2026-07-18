@@ -3,6 +3,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "DynamicWorkspaceModel.h"
 
@@ -112,10 +113,25 @@ inline juce::String dynamicCorrectionRejectionLabel (DynamicCorrectionRejectionR
 
 inline juce::String shortDynamicStateId (uint64_t stableStateId)
 {
-    auto text = juce::String::toHexString ((juce::int64) stableStateId).toUpperCase();
-    if (text.length() > 6)
-        text = text.substring (text.length() - 6);
-    return text;
+    constexpr char digits[] = "0123456789ABCDEF";
+    char text[17] {};
+    int position = 16;
+    do
+    {
+        text[--position] = digits[stableStateId & 0x0f];
+        stableStateId >>= 4;
+    }
+    while (stableStateId != 0);
+
+    auto shortText = juce::String (text + position);
+    if (shortText.length() > 6)
+        shortText = shortText.substring (shortText.length() - 6);
+    return shortText;
+}
+
+inline juce::String fullDynamicStateId (uint64_t stableStateId)
+{
+    return juce::String (std::to_string (stableStateId));
 }
 
 inline juce::String dynamicStateCardTitle (const DynamicStateCard& card)
@@ -170,6 +186,44 @@ inline DynamicWorkspaceColourRole dynamicWorkspaceColourRole (const DynamicState
         default:
             return card.hasCorrection ? DynamicWorkspaceColourRole::Teal : DynamicWorkspaceColourRole::Muted;
     }
+}
+
+inline DynamicWorkspaceColourRole dynamicMeasurementColourRole (
+    const DynamicMeasurementSummary& summary) noexcept
+{
+    switch (summary.availability)
+    {
+        case DynamicMeasurementAvailability::Unavailable:
+            return DynamicWorkspaceColourRole::Muted;
+        case DynamicMeasurementAvailability::Collecting:
+            return DynamicWorkspaceColourRole::Amber;
+        case DynamicMeasurementAvailability::InsufficientMaterial:
+            return DynamicWorkspaceColourRole::Amber;
+        case DynamicMeasurementAvailability::Invalid:
+            return DynamicWorkspaceColourRole::Red;
+        case DynamicMeasurementAvailability::Available:
+            break;
+    }
+
+    switch (summary.assessment)
+    {
+        case DynamicCorrectionAssessment::PredictedImprovement:
+        case DynamicCorrectionAssessment::VerifiedImprovement:
+            return DynamicWorkspaceColourRole::Green;
+        case DynamicCorrectionAssessment::Neutral:
+        case DynamicCorrectionAssessment::RecognizedNoCorrection:
+            return DynamicWorkspaceColourRole::Teal;
+        case DynamicCorrectionAssessment::CandidateOnly:
+        case DynamicCorrectionAssessment::Unstable:
+            return DynamicWorkspaceColourRole::Amber;
+        case DynamicCorrectionAssessment::Regressed:
+            return DynamicWorkspaceColourRole::Red;
+        case DynamicCorrectionAssessment::Disabled:
+        case DynamicCorrectionAssessment::Bypassed:
+        case DynamicCorrectionAssessment::Unknown:
+            return DynamicWorkspaceColourRole::Muted;
+    }
+    return DynamicWorkspaceColourRole::Muted;
 }
 
 inline DynamicStateCard makePreviewDynamicStateCard (
@@ -281,4 +335,72 @@ inline juce::String dynamicWorkspaceRuntimeStatus (const DynamicRuntimeSnapshot&
     if (runtime.activeBranchKind == DynamicSelectorBranchKind::State && runtime.activeSemanticStateId != 0)
         return "ACTIVE STATE";
     return runtime.fallbackActive ? "GLOBAL FALLBACK" : "GLOBAL";
+}
+
+struct DynamicWorkspaceHeaderPresentation
+{
+    juce::String source;
+    juce::String status;
+    juce::String detail;
+};
+
+inline DynamicWorkspaceHeaderPresentation dynamicWorkspaceHeaderPresentation (
+    const DynamicWorkspaceViewModel& model)
+{
+    DynamicWorkspaceHeaderPresentation presentation;
+    if (model.previewActive)
+    {
+        presentation.source = "PREVIEW - NOT APPLIED";
+        presentation.status = "PREDICTED ONLY";
+        presentation.detail = model.previewApplyBlocked ? model.previewBlockedReason
+            : model.previewApplyAvailable ? "Apply Learn is available. Verified remains unavailable until fresh runtime output."
+                                         : "Pending Learn result is not applicable.";
+        return presentation;
+    }
+
+    presentation.source = dynamicMapSourceLabel (model.runtime.source);
+    presentation.status = dynamicWorkspaceRuntimeStatus (model.runtime);
+    if (learnStateIsBusy (model.learnState))
+    {
+        presentation.detail = model.learnStatusMessage;
+        return presentation;
+    }
+
+    if (model.learnStatusMessage.isNotEmpty())
+    {
+        presentation.source = "LEARN RESULT";
+        presentation.status = model.learnState == LearnState::NotEnoughMaterial ? "NOT ENOUGH MATERIAL"
+            : model.learnState == LearnState::Failed ? "LEARN FAILED"
+                                                     : "NO PREVIEW";
+        presentation.detail = model.learnStatusMessage;
+        return presentation;
+    }
+
+    if (model.runtime.source == DynamicMapSource::LegacyDynamicCompatibility)
+        presentation.detail = "Legacy map compatibility is active. New State cards and Phase 9 measurements are unavailable.";
+    else if (model.runtime.source == DynamicMapSource::None)
+        presentation.detail = "Learn repeatable conflict States. Unknown or ambiguous conflicts use the safe Global path.";
+    else
+        presentation.detail = "Selected and active States are distinct runtime identities.";
+    return presentation;
+}
+
+struct DynamicWorkspaceWorkflowVisibility
+{
+    bool applyLearn = false;
+    bool discard = false;
+    bool workspace = false;
+    bool workspaceMapActions = false;
+    bool dynamicStrength = false;
+};
+
+inline DynamicWorkspaceWorkflowVisibility dynamicWorkspaceWorkflowVisibility (
+    bool resultReady, LearnState learnState, bool cleanScopeMode) noexcept
+{
+    const bool controlsVisible = ! cleanScopeMode;
+    const bool resolved = learnState == LearnState::ResultReady
+        || learnState == LearnState::NotEnoughMaterial
+        || learnState == LearnState::Failed;
+    return { resultReady && controlsVisible, resolved && controlsVisible,
+             controlsVisible, controlsVisible, controlsVisible };
 }
