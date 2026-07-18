@@ -45,6 +45,7 @@ target_sources(KickLock
     PRIVATE
         src/PluginProcessor.cpp
         src/PluginEditor.cpp
+        src/ui/DynamicWorkspace.cpp
         src/ui/Oscilloscope.cpp
         src/ui/SpectrumAnalyzer.cpp
 )

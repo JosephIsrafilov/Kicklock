@@ -202,10 +202,34 @@ public:
     bool hasPendingLearnResult() const noexcept;
     bool canApplyLatestLearnResult() const;
     juce::String getLearnApplyBlockedReason() const;
+
+    // Coherent message-thread read of the pending New Dynamic Learn result.
+    // This is preview data only; it never reflects the audible runtime map.
+    struct PendingDynamicLearnPreviewForUi
+    {
+        uint64_t sessionId = 0;
+        bool valid = false;
+        bool applyAvailable = false;
+        bool applyBlocked = false;
+        juce::String applyBlockedReason;
+        DynamicStateMap map = makeEmptyDynamicStateMap();
+        std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> predicted {};
+    };
+    PendingDynamicLearnPreviewForUi getPendingDynamicLearnPreviewForUi() const;
+
+    // DynamicSnapshotPublisher has one production reader: the editor's message
+    // thread. Concurrent readers are unsupported; test accessors use this path.
+    DynamicRuntimeSnapshot getDynamicRuntimeSnapshotForUi() const noexcept
+    {
+        return dynamicSnapshotPublisher.read();
+    }
+
     bool applyLatestLearnResult();
     bool discardLatestLearnResult();
+    bool clearLearnedDynamicData();
     bool clearNoteMap();
     bool hasValidNoteMap() const noexcept;
+    bool hasLearnedDynamicData() const noexcept;
     NotePhaseMapSnapshot getNoteMapSnapshot() const;
     bool hasRevertSnapshot() const noexcept { return revertSnapshotValid.load (std::memory_order_acquire); }
     void selectCompareSlot (int slotIndex);
@@ -334,11 +358,11 @@ public:
     // ---- Phase 9 measurement test hooks (not UI behavior) ----
     DynamicRuntimeSnapshot getDynamicRuntimeSnapshotForTesting() const noexcept
     {
-        return dynamicSnapshotPublisher.read();
+        return getDynamicRuntimeSnapshotForUi();
     }
     DynamicMeasurementSummary getDynamicPredictedMeasurementForTesting (uint64_t stableStateId) const noexcept
     {
-        const auto snapshot = dynamicSnapshotPublisher.read();
+        const auto snapshot = getDynamicRuntimeSnapshotForUi();
         for (const auto& card : snapshot.states)
             if (card.occupied && card.stableStateId == stableStateId)
                 return card.predicted;
@@ -346,7 +370,7 @@ public:
     }
     DynamicMeasurementSummary getDynamicVerifiedMeasurementForTesting (uint64_t stableStateId) const noexcept
     {
-        const auto snapshot = dynamicSnapshotPublisher.read();
+        const auto snapshot = getDynamicRuntimeSnapshotForUi();
         for (const auto& card : snapshot.states)
             if (card.occupied && card.stableStateId == stableStateId)
                 return card.verified;

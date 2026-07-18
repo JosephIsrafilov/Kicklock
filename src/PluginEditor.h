@@ -8,6 +8,7 @@
 #include "ui/CorrelationDisplay.h"
 #include "ui/StatusHelpers.h"
 #include "ui/DynamicUiHelpers.h"
+#include "ui/DynamicWorkspace.h"
 #include "dsp/AnalyzeState.h"
 
 // Kick-punch transient integrity readout. Shows the signed PUNCH dB (how much
@@ -232,6 +233,7 @@ private:
     juce::Label dynamicStrengthLabel;
     juce::Label crossoverEnableLabel;
     juce::Label crossoverLabel;
+    DynamicWorkspace dynamicWorkspace;
 
 
 
