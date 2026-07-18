@@ -867,6 +867,15 @@ public:
                 auto* noThrowScalar = new (std::nothrow) int (8);
                 auto* noThrowArray = new (std::nothrow) int[8];
                 auto* noThrowAligned = new (std::nothrow) OverAlignedAllocation;
+                // Cross a translation-unit boundary with every pointer so an
+                // optimizer cannot prove any of them are unobserved and elide
+                // the allocation (seen on macOS Release/Clang otherwise).
+                preventAllocationElision (scalar);
+                preventAllocationElision (array);
+                preventAllocationElision (aligned);
+                preventAllocationElision (noThrowScalar);
+                preventAllocationElision (noThrowArray);
+                preventAllocationElision (noThrowAligned);
                 const auto result = allocations.snapshot();
                 expectGreaterOrEqual ((int) result.count, 6);
                 expectGreaterThan ((int64_t) result.bytes, (int64_t) 0);

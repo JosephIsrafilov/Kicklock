@@ -130,3 +130,17 @@ bool ScopedTestAllocationCounter::isTracking() noexcept
 {
     return allocationTracking;
 }
+
+namespace
+{
+    // A global, externally-visible sink the pointer is stored into. Combined
+    // with living in a separate translation unit from the allocation, a
+    // non-LTO compiler cannot prove the pointer is unobserved and so cannot
+    // eliminate the new/delete pair that produced it.
+    const volatile void* allocationElisionSink = nullptr;
+}
+
+void preventAllocationElision (const volatile void* pointer) noexcept
+{
+    allocationElisionSink = pointer;
+}
