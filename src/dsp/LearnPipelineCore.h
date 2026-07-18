@@ -24,6 +24,7 @@
 #include "DynamicLearnFingerprintExtraction.h"
 #include "DynamicLearnFormation.h"
 #include "DynamicFingerprintTrigger.h"
+#include "DynamicPredictedMeasurement.h"
 
 struct LearnPipelineConfig
 {
@@ -62,7 +63,9 @@ public:
                                                 const float* rawLoopKick,
                                                 int rawLoopSamples,
                                                 const LearnDiagnostics& transportDiagnostics = {},
-                                                const std::function<bool()>& shouldCancel = {})
+                                                const std::function<bool()>& shouldCancel = {},
+                                                std::array<DynamicMeasurementSummary,
+                                                    DynamicMeasurementContract::kMaxRetainedStates>* outPredictedMeasurements = nullptr)
     {
         LearnFinalizeResult result;
         result.map = NoteMap::makeEmptyNoteMap();
@@ -204,6 +207,28 @@ public:
         result.valid = formation.valid;
         result.message = formation.valid ? "Dynamic Learn formed State clusters."
                                          : "Dynamic Learn found no repeatable State clusters.";
+
+        // Phase 9: predicted measurement + final-package cluster verification.
+        // Retention re-matches the ORIGINAL captured windows (real audio; the
+        // timing-free synthetic entries above have no bass/kick and are
+        // skipped) against the just-formed map through the frozen Phase-3
+        // matcher, then renders the exact Strength-1 final package against
+        // every retained window. A State whose combined final package fails
+        // verification is demoted here (hasLearnedPackage cleared, trim
+        // reset to zero) before the map is ever returned to the caller, so
+        // Apply can never publish a package Phase 9 has already rejected.
+        if (formation.valid)
+        {
+            const auto retained = retainDynamicLearnMeasurementWindows (
+                hits, capturedWindows, formation.map, config.sampleRate);
+            const auto predictedResult = computeDynamicPredictedMeasurement (
+                formation.map, retained, config.sampleRate, 0);
+            result.dynamicMap = predictedResult.map;
+            result.hasDynamicStateMap = isStructurallyValidDynamicStateMap (result.dynamicMap);
+            result.valid = result.hasDynamicStateMap;
+            if (outPredictedMeasurements != nullptr)
+                *outPredictedMeasurements = predictedResult.predicted;
+        }
         return result;
     }
 

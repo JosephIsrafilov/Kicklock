@@ -202,6 +202,71 @@ components); `PluginProcessor` stays a thin integration layer.
   compatibility map exactly.
 - Phase 8 adds no Phase-9 measurements and no DynamicWorkspace UI.
 
+## Phase 9 State Measurements and Snapshots
+
+- Two distinct, never-conflated measurement layers per Dynamic State:
+  Predicted (Learn-worker, offline, from retained member windows) and
+  Verified (runtime, fresh audible New Dynamic output only). Predicted is
+  never labelled as live verification; Verified is Unavailable/Collecting
+  until enough fresh matching runtime material exists.
+- One canonical score: `MultiBandCorrelation::weightedMatchPercent`, the same
+  low-end-weighted ruler already driving Learn/Analyze/Apply. Predicted
+  after-scores are rendered through the exact resolved
+  `DynamicPackageResolution` (delay, polarity, allpass coefficients/stages,
+  crossover) via `DynamicMeasurementScorer`, reusing
+  `DynamicHotBranchEngine::processAllpassReference()` for the allpass
+  cascade; Verified after-scores are computed directly from the actual
+  captured audible output, never re-rendered.
+- Retained Learn windows: deterministically selected (central + spread
+  members, independent of input encounter order) by re-matching each
+  originally-captured hit window against the just-formed map through the
+  frozen Phase-3 matcher; bounded to 8 States x 12 windows; temporary
+  worker-owned evidence, discarded once predicted summaries are computed.
+- Final-package cluster verification: an Auto Stable State's `hasLearnedPackage`
+  is retained only when the exact Strength-1 final package, rendered against
+  every retained window, clears a centralized median-improvement / majority-
+  improved / bounded-worst-regression / confidence gate. A State that fails
+  is demoted (package cleared, trim reset to zero) but stays occupied and
+  matchable, resolving through the existing `GlobalRecognizedNoCorrection`
+  path. Manual States are never demoted; Candidate States are measured but
+  never become correction-eligible from measurement alone.
+- Runtime verified measurement: `DynamicRuntimeMeasurementCapture` buffers, per
+  physical kick hit, the canonical pre-correction bass/kick pair and the
+  actual audible processed-bass / PDC-aligned-kick pair, aligned by one fixed
+  integer sample offset (the branch's physical tap) so both windows describe
+  the same hit. A capture is only handed to the worker once the target
+  identity is confirmed settled (not mid-fade, not Held, not stale) at
+  completion time. Verification requires New DynamicStateMap active, a
+  confident Matched correction, sidechain present, and audible output (never
+  bypass or a different branch/identity).
+- Bounded lock-free queues: fixed SPSC (juce::AbstractFifo-based, matching the
+  existing DynamicStateMapUpdateQueue pattern) queues carry captures
+  audio -> worker and scored results worker -> audio; overflow drops and
+  increments a fixed diagnostic, never blocks audio or overwrites an
+  in-flight publish. A dedicated measurement worker thread (never the audio
+  thread) performs the actual scoring.
+- Verified rolling aggregation: a fixed per-State ring (16 most recent
+  events) reconciled by stableStateId AND map generation, requiring at least
+  three fresh events before reporting VerifiedImprovement/Neutral/Unstable/
+  Regressed; a stale-generation result can never update the wrong State.
+- Fixed UI-ready snapshot: `DynamicRuntimeSnapshot`, a self-contained,
+  string-free, vector-free, pointer-free value with 8 fixed State cards,
+  published at most once per `process()`/`processBlockBypassed()` call
+  through a 4-way tear-free buffer (`DynamicSnapshotPublisher`). Test-only
+  accessors: `getDynamicRuntimeSnapshotForTesting()`,
+  `getDynamicPredictedMeasurementForTesting()`,
+  `getDynamicVerifiedMeasurementForTesting()`,
+  `getDynamicMeasurementDiagnosticsForTesting()`.
+- Reset/invalidation: a new map generation reconciles predicted/verified data
+  by stableStateId; source change away from New Dynamic marks verification
+  inactive without discarding history; sidechain loss and transport
+  discontinuities discard in-flight captures; bypass output is never counted
+  as verified correction.
+- Measurements are non-persistent sidecar/runtime data: no map schema change,
+  no raw audio, and no runtime verification history is ever serialized.
+  `setStateInformation()` always starts predicted/verified Unavailable.
+- Phase 9 does not implement DynamicWorkspace or change the visible editor.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.

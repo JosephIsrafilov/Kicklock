@@ -36,6 +36,12 @@
 #include "dsp/DynamicMapSourceResolver.h"
 #include "dsp/DynamicProductionRuntime.h"
 #include "dsp/TransientPunchMeter.h"
+#include "dsp/DynamicStateMeasurements.h"
+#include "dsp/DynamicMeasurementScorer.h"
+#include "dsp/DynamicVerifiedAggregation.h"
+#include "dsp/DynamicRuntimeSnapshot.h"
+#include "util/DynamicMeasurementResultQueue.h"
+#include "util/DynamicSnapshotPublisher.h"
 #include "ui/ScopeVisuals.h"
 #include "ui/UiFormatters.h"
 
@@ -324,6 +330,44 @@ public:
     {
         return dynamicRuntime.getServiceBindingValid();
     }
+
+    // ---- Phase 9 measurement test hooks (not UI behavior) ----
+    DynamicRuntimeSnapshot getDynamicRuntimeSnapshotForTesting() const noexcept
+    {
+        return dynamicSnapshotPublisher.read();
+    }
+    DynamicMeasurementSummary getDynamicPredictedMeasurementForTesting (uint64_t stableStateId) const noexcept
+    {
+        const auto snapshot = dynamicSnapshotPublisher.read();
+        for (const auto& card : snapshot.states)
+            if (card.occupied && card.stableStateId == stableStateId)
+                return card.predicted;
+        return makeUnavailableDynamicMeasurementSummary();
+    }
+    DynamicMeasurementSummary getDynamicVerifiedMeasurementForTesting (uint64_t stableStateId) const noexcept
+    {
+        const auto snapshot = dynamicSnapshotPublisher.read();
+        for (const auto& card : snapshot.states)
+            if (card.occupied && card.stableStateId == stableStateId)
+                return card.verified;
+        return makeUnavailableDynamicMeasurementSummary();
+    }
+    struct DynamicMeasurementDiagnosticsForTesting
+    {
+        uint64_t captureExhaustedCount = 0;
+        uint64_t captureDroppedForTransportCount = 0;
+        uint64_t captureQueueDroppedCount = 0;
+        uint64_t scoreQueueDroppedCount = 0;
+    };
+    DynamicMeasurementDiagnosticsForTesting getDynamicMeasurementDiagnosticsForTesting() const noexcept
+    {
+        DynamicMeasurementDiagnosticsForTesting out;
+        out.captureExhaustedCount = dynamicRuntime.getMeasurementCaptureExhaustedCount();
+        out.captureDroppedForTransportCount = dynamicRuntime.getMeasurementCaptureDroppedForTransportCount();
+        out.captureQueueDroppedCount = (uint64_t) dynamicMeasurementCaptureQueue.getDroppedCount();
+        out.scoreQueueDroppedCount = (uint64_t) dynamicMeasurementScoreQueue.getDroppedCount();
+        return out;
+    }
     NotePhaseMapSnapshot getMessageOwnedNoteMapForTesting() const;
     uint64_t getLearnSessionIdForTesting() const noexcept
     {
@@ -353,6 +397,7 @@ public:
 private:
     class AutoAlignEngine;
     class LearnWorker;
+    class DynamicMeasurementWorker;
 
     struct ParameterSnapshot
     {
@@ -384,6 +429,7 @@ private:
         ParameterSnapshot parameters;
         NotePhaseMapSnapshot noteMap;
         DynamicStateMap dynamicStateMap;
+        std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> dynamicPredictedMeasurements {};
     };
 
     std::atomic<float>* delayMsParam = nullptr;
@@ -516,6 +562,33 @@ private:
     juce::AudioBuffer<float> dynamicRawKickMono;
     juce::AudioBuffer<float> dynamicRuntimeOutput;
 
+    // Phase 9: measurement queues/aggregation/snapshot. dynamicMeasurementCaptureQueue
+    // and dynamicMeasurementScoreQueue are the two bounded audio<->worker SPSC
+    // queues (Section 15). dynamicVerifiedAggregation and dynamicSnapshotPublisher
+    // are audio-thread-owned; dynamicMeasurementWorker is a dedicated background
+    // thread (never the audio thread) that pops captures, scores them with
+    // DynamicMeasurementScorer, and pushes results back.
+    DynamicMeasurementCaptureQueue dynamicMeasurementCaptureQueue;
+    // Persistent scratch reused every drainDynamicMeasurementCaptures() call;
+    // sized once in prepareToPlay() so draining never allocates.
+    DynamicRuntimeMeasurementCaptureResult dynamicMeasurementDrainScratch;
+    DynamicMeasurementScoreQueue dynamicMeasurementScoreQueue;
+    DynamicVerifiedAggregation dynamicVerifiedAggregation;
+    DynamicSnapshotPublisher dynamicSnapshotPublisher;
+    std::unique_ptr<DynamicMeasurementWorker> dynamicMeasurementWorker;
+    std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> activeDynamicPredictedMeasurements {};
+    int64_t dynamicSnapshotBlockCounter = 0;
+
+    // Predicted-measurement sidecar publication, mirrored on
+    // messageOwnedDynamicStateMap / activeDynamicStateMap: the message thread
+    // publishes through dynamicPredictedMeasurementQueue (guarded by
+    // mapMutex, reused from the map's own lock so both stay coherent under
+    // one critical section at the Apply call site); the audio thread drains
+    // it at the same block boundary as drainDynamicMapUpdates().
+    DynamicBoundedSpscQueue<std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates>>
+        dynamicPredictedMeasurementQueue;
+    std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> messageOwnedDynamicPredictedMeasurements {};
+
     std::atomic<bool> learnActive { false };
     std::atomic<LearnState> learnState { LearnState::Idle };
     std::atomic<uint64_t> learnSessionCounter { 0 };
@@ -543,6 +616,10 @@ private:
     mutable std::mutex learnMutex;
     mutable std::mutex learnProgressMutex;
     PendingLearnCandidate pendingLearnCandidate;
+    // Phase 9: predicted-measurement sidecar for pendingLearnCandidate, guarded
+    // by the same learnMutex and kept coherent by sessionId.
+    uint64_t pendingDynamicMeasurementSessionId = 0;
+    std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> pendingDynamicPredictedMeasurements {};
     LearnProgressSnapshot learnProgress;
     mutable std::mutex mapMutex;
     NotePhaseMapSnapshot messageOwnedNoteMap = NoteMap::makeEmptyNoteMap();
@@ -552,6 +629,8 @@ private:
     bool hasPendingMapPublication = false;
     DynamicStateMap pendingDynamicMapPublication = makeEmptyDynamicStateMap();
     bool hasPendingDynamicMapPublication = false;
+    std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates> pendingDynamicPredictedMeasurementPublication {};
+    bool hasPendingDynamicPredictedMeasurementPublication = false;
     std::shared_ptr<std::atomic<int>> mapPublicationRetryObserver;
     std::shared_ptr<CallbackPauseControlForTesting> mapTimerCallbackPauseControlForTesting =
         std::make_shared<CallbackPauseControlForTesting>();
@@ -629,6 +708,11 @@ private:
     void drainPendingMapUpdates() noexcept;
     // Phase 7 New Dynamic runtime helpers (audio-thread, allocation-free).
     void drainDynamicMapUpdates() noexcept;
+    // Phase 9 measurement helpers (audio-thread, allocation-free).
+    void drainDynamicMeasurementCaptures() noexcept;
+    void drainDynamicMeasurementScores() noexcept;
+    void publishDynamicRuntimeSnapshot (bool sidechainPresent, bool bypassActive) noexcept;
+    bool serviceDynamicMeasurementWorkerStep();
     void classifyDynamicTransportForNewRuntime (int numSamples) noexcept;
     void fillRawDynamicFingerprintInputs (const juce::AudioBuffer<float>& mainBuffer,
                                           const juce::AudioBuffer<float>& sidechainBuffer,
@@ -649,6 +733,9 @@ private:
     bool retryMapPublication();
     void requestDynamicMapPublication (const DynamicStateMap& map);
     bool retryDynamicMapPublication();
+    void requestDynamicPredictedMeasurementPublication (
+        const std::array<DynamicMeasurementSummary, DynamicMeasurementContract::kMaxRetainedStates>& predicted);
+    bool retryDynamicPredictedMeasurementPublication();
     bool pauseLearnWorkerForTesting (LearnState state, uint64_t sessionId);
     void clearPendingLearnCandidate();
     void cancelLearnLocked();
