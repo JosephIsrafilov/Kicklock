@@ -298,6 +298,18 @@ components); `PluginProcessor` stays a thin integration layer.
   formation, source priority, persistence format, service behavior, latency, or
   audio-thread contract.
 
+## Phase 11 Release Readiness
+
+- Phase 11 adds deterministic validation fixtures, lifecycle/serialization/
+  queue/allocation/performance gates, and release-artifact checks only.
+- It does not change DynamicStateMap v1, fingerprints, package math, runtime
+  selection, Service, Hold, fades, APVTS, latency, or persistence schema.
+- The deterministic fixture is synthetic and must never be labelled recorded
+  audio. Recorded-material validation remains separately optional and explicit.
+- Callback allocation and sanitization failures are release blockers. Timed
+  assertions may be skipped only under `KICKLOCK_SKIP_TIMED_ASSERTS=1`; their
+  non-timed safety assertions still execute.
+
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.

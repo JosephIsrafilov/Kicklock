@@ -1,5 +1,6 @@
 #include "TestCommon.h"
 
+
 //============================================================================//
 // Real-audio plugin integration: exercises the FULL PluginProcessor lifecycle
 // (Learn -> Stop -> Apply -> processBlock) against genuine recorded kick and
@@ -136,10 +137,8 @@ namespace
         if (! kickFile.existsAsFile() || ! bassFile.existsAsFile())
         {
             material.unavailableReason =
-                "tests/assets/real_kick.wav and/or tests/assets/real_bass.wav not found. "
-                "Real-audio plugin integration tests are skipped (0 assertions, not a "
-                "failure) until both real stems are supplied. See the asset-spec comment "
-                "on loadRealLoop() in this file for what to bounce.";
+                "Missing required real-audio fixtures: tests/assets/real_kick.wav and/or "
+                "tests/assets/real_bass.wav.";
             return material;
         }
 
@@ -147,7 +146,7 @@ namespace
         auto kick = loadMonoAtRate (kickFile, sampleRate);
         if (bass.empty() || kick.empty())
         {
-            material.unavailableReason = "real_kick.wav / real_bass.wav exist but could not be decoded.";
+            material.unavailableReason = "Undecodable real-audio fixtures: tests/assets/real_kick.wav and/or tests/assets/real_bass.wav.";
             return material;
         }
 
@@ -225,6 +224,11 @@ namespace
             peak = std::max (peak, std::abs (v));
         return peak;
     }
+
+    bool requireRealAudioFixtures() noexcept
+    {
+        return juce::SystemStats::getEnvironmentVariable ("KICKLOCK_REQUIRE_REAL_AUDIO_FIXTURES", {}) == "1";
+    }
 }
 
 class RealAudioPluginIntegrationTests : public juce::UnitTest
@@ -235,14 +239,18 @@ public:
     void runTest() override
     {
         const auto material = loadRealLoop (kSampleRate);
+        const bool fixturesRequired = requireRealAudioFixtures();
 
         beginTest ("Real kick/bass stems are present");
         if (! material.available)
         {
-            logMessage (material.unavailableReason);
+            logMessage ("REAL_AUDIO_STATUS: UNVERIFIED. " + material.unavailableReason);
+            if (fixturesRequired)
+                expect (false, "KICKLOCK_REQUIRE_REAL_AUDIO_FIXTURES=1 requires decodable tests/assets/real_kick.wav and tests/assets/real_bass.wav.");
             return; // Explicit skip: no expect() calls, so this reports as
                     // 0 assertions rather than a false pass or a build break.
         }
+        logMessage ("REAL_AUDIO_STATUS: VERIFIED. Using supplied recorded kick/bass stems.");
         expect (material.bass.size() == material.kick.size());
         expectGreaterThan ((int) material.bass.size(), (int) (kSampleRate * 1.0),
                            "loop should be at least ~1s of real material");
@@ -278,10 +286,25 @@ public:
             if (state == LearnState::ResultReady)
             {
                 const auto pending = p.getPendingLearnResult();
-                int learned = 0;
-                for (const auto& entry : pending.map.notes)
-                    learned += NoteMap::isValidNoteEntry (entry) ? 1 : 0;
-                expectGreaterOrEqual (learned, 1, "at least one learned state from real material");
+                expect (pending.hasDynamicStateMap, "New Dynamic Learn must return dynamicMap, not a legacy note map");
+                expect (isStructurallyValidDynamicStateMap (pending.dynamicMap));
+                expectGreaterOrEqual (getOccupiedDynamicStateCount (pending.dynamicMap), 1,
+                                      "at least one occupied Dynamic State from real material");
+                int stable = 0;
+                int candidate = 0;
+                int globalOnly = 0;
+                for (const auto& dynamicState : pending.dynamicMap.states)
+                {
+                    if (! dynamicState.occupied)
+                        continue;
+                    stable += dynamicState.evidence == DynamicStateEvidence::Stable ? 1 : 0;
+                    candidate += dynamicState.evidence == DynamicStateEvidence::Candidate ? 1 : 0;
+                    globalOnly += ! dynamicState.hasLearnedPackage ? 1 : 0;
+                }
+                expect (stable + candidate > 0);
+                logMessage ("Dynamic States: stable=" + juce::String (stable)
+                            + " candidate=" + juce::String (candidate)
+                            + " recognized-global=" + juce::String (globalOnly));
             }
         }
 
@@ -313,6 +336,12 @@ public:
                 std::vector<float> output;
                 output.reserve (material.bass.size());
                 feedRealMaterial (p, material.bass, material.kick, 512, &output);
+
+                expect (p.getActiveDynamicMapSourceForTesting() == DynamicMapSource::NewDynamicStateMap,
+                        "Apply must activate New Dynamic source");
+                const auto snapshot = p.getDynamicRuntimeSnapshotForTesting();
+                expect (snapshot.source == DynamicMapSource::NewDynamicStateMap && snapshot.mapValid,
+                        "runtime snapshot must describe the active New map");
 
                 expect (allFinite (output), "processed real material must stay finite (no NaN/Inf)");
                 expectLessThan (peakAbs (output), 8.0f, "processed output should not blow up in level");
@@ -370,6 +399,7 @@ public:
 
                 std::vector<float> firstPass;
                 feedRealMaterial (p, material.bass, material.kick, 512, &firstPass);
+                expect (p.getActiveDynamicMapSourceForTesting() == DynamicMapSource::NewDynamicStateMap);
 
                 // Clone the learned/applied state onto an independent instance
                 // via the normal save/reload path, instead of re-running Learn,
@@ -385,6 +415,9 @@ public:
 
                 std::vector<float> secondPass;
                 feedRealMaterial (p2, material.bass, material.kick, 512, &secondPass);
+
+                expect (p2.getActiveDynamicMapSourceForTesting() == DynamicMapSource::NewDynamicStateMap,
+                        "save/reload keeps New Dynamic ahead of legacy compatibility");
 
                 expect (firstPass.size() == secondPass.size());
                 const size_t compareLength = std::min (firstPass.size(), secondPass.size());

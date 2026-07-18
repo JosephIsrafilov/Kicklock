@@ -3,8 +3,8 @@
 #include "LearnHitQueue.h"
 #include "NoteMapUpdateQueue.h"
 #include "NotePhaseMap.h"
+#include "TestAllocationCounter.h"
 
-#include <cstdlib>
 #include <thread>
 
 // =============================================================================
@@ -13,39 +13,6 @@
 //   T10 - NoteMapUpdateQueue (SPSC map publication)
 //   plus concurrent stress and processor plumbing integration.
 // =============================================================================
-
-// Flag-gated global allocation counter. It only counts while g_allocTracking is
-// set (off by default), so it never perturbs the rest of the binary; the tracked
-// regions are the tight audio-thread queue operations.
-namespace
-{
-    std::atomic<long> g_allocCount { 0 };
-    std::atomic<bool> g_allocTracking { false };
-}
-
-// Override only the scalar operators (std::vector / std::string / std::allocator
-// route through ::operator new(size_t)); leaving the array forms at their
-// defaults keeps new[]/delete[] matched. GCC's -Wmismatched-new-delete is a
-// false positive here: replacing the global operator new/delete with malloc/free
-// is a correctly matched pair, but the heuristic flags the free() calls.
-#if defined(__GNUC__) && ! defined(__clang__)
- #pragma GCC diagnostic push
- #pragma GCC diagnostic ignored "-Wmismatched-new-delete"
-#endif
-void* operator new (std::size_t n)
-{
-    if (g_allocTracking.load (std::memory_order_relaxed))
-        g_allocCount.fetch_add (1, std::memory_order_relaxed);
-    if (n == 0) n = 1;
-    void* p = std::malloc (n);
-    if (p == nullptr) throw std::bad_alloc();
-    return p;
-}
-void operator delete (void* p) noexcept { std::free (p); }
-void operator delete (void* p, std::size_t) noexcept { std::free (p); }
-#if defined(__GNUC__) && ! defined(__clang__)
- #pragma GCC diagnostic pop
-#endif
 
 namespace
 {
@@ -254,16 +221,16 @@ public:
             for (int i = 0; i < q.getPreRollSamples(); ++i)
                 q.pushSample (0.0f, 0.0f, false, 0.0f);   // warm
 
-            g_allocCount.store (0);
-            g_allocTracking.store (true);
-            for (int i = 0; i < 200000; ++i)
             {
-                const bool trig = (i % 9000 == 0);       // spaced > window, no overlap
-                q.pushSample ((float) i, (float) i, trig, 55.0f);
+                ScopedTestAllocationCounter allocations;
+                for (int i = 0; i < 200000; ++i)
+                {
+                    const bool trig = (i % 9000 == 0);       // spaced > window, no overlap
+                    q.pushSample ((float) i, (float) i, trig, 55.0f);
+                }
+                const auto result = allocations.snapshot();
+                expectEquals ((int) result.count, 0, "no allocation in pushSample");
             }
-            g_allocTracking.store (false);
-
-            expectEquals ((int) g_allocCount.load(), 0, "no allocation in pushSample");
             expectGreaterThan (q.getAcceptedHitCount(), 0);   // it really did work
         }
     }
@@ -346,15 +313,16 @@ public:
             const auto m = makeValidMap();
             NotePhaseMapSnapshot out;
 
-            g_allocCount.store (0);
-            g_allocTracking.store (true);
-            for (int round = 0; round < 1000; ++round)
             {
-                q.push (m);
-                q.pop (out);
+                ScopedTestAllocationCounter allocations;
+                for (int round = 0; round < 1000; ++round)
+                {
+                    q.push (m);
+                    q.pop (out);
+                }
+                const auto result = allocations.snapshot();
+                expectEquals ((int) result.count, 0, "no allocation in push/pop");
             }
-            g_allocTracking.store (false);
-            expectEquals ((int) g_allocCount.load(), 0, "no allocation in push/pop");
         }
     }
 };

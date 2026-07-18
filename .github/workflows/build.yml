@@ -33,10 +33,10 @@ jobs:
         shell: pwsh
         run: |
           $timer = [Diagnostics.Stopwatch]::StartNew()
-          & "build/tests/KickLockFastTests.exe" Phase10 Phase9 Phase8 Phase7 Processor "UI Helpers"
+          & "build/tests/KickLockFastTests.exe" Phase11 Phase10 Phase9 Phase8 Phase7 Processor "UI Helpers"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $timer.Stop()
-          @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase10 Phase9 Phase8 Phase7 Processor UI Helpers", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
+          @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase11 Phase10 Phase9 Phase8 Phase7 Processor UI Helpers", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
 
   windows-full:
     name: ${{ github.event_name != 'pull_request' && 'Windows Release (build, tests, pluginval)' || 'Windows Full Internal' }}
@@ -63,9 +63,19 @@ jobs:
           ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $timer.Stop()
-          @("## FULL", "- Build target: all", "- Categories: all", "- pluginval executed: yes", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
+          @("## FULL", "- Build target: all", "- Categories: all (including Phase11, Performance, and RealAudio)", "- Phase11 fixture: executed", "- Performance gate: executed", "- Real-audio fixtures: UNVERIFIED unless private stems are supplied", "- pluginval executed: yes", "- AU validation: NOT APPLICABLE on Windows", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Zip VST3
         run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
+      - name: Verify Windows VST3 artifact
+        shell: pwsh
+        run: |
+          $extract = Join-Path $env:RUNNER_TEMP "kicklock-windows-artifact"
+          Expand-Archive -Path "KickLock-Windows-VST3.zip" -DestinationPath $extract -Force
+          $bundles = @(Get-ChildItem -Path $extract -Recurse -Directory -Filter "KickLock.vst3")
+          if ($bundles.Count -ne 1) { throw "Expected exactly one KickLock.vst3 bundle; found $($bundles.Count)." }
+          $module = Join-Path $bundles[0].FullName "Contents/x86_64-win/KickLock.vst3"
+          if (-not (Test-Path -LiteralPath $module) -or (Get-Item -LiteralPath $module).Length -le 0) { throw "Windows VST3 module is missing or empty: $module" }
+          "- Artifact smoke: VERIFIED (Windows VST3 ZIP extracts to one non-empty bundle)" | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -86,12 +96,12 @@ jobs:
       - name: Run fast tests
         run: |
           start=$SECONDS
-          build/tests/KickLockFastTests Phase10 Phase9 Phase8 Phase7 Processor "UI Helpers"
+          build/tests/KickLockFastTests Phase11 Phase10 Phase9 Phase8 Phase7 Processor "UI Helpers"
           elapsed=$((SECONDS - start))
           {
             echo "## PR FAST"
             echo "- Build target: KickLockFastTests"
-            echo "- Categories: Phase10 Phase9 Phase8 Phase7 Processor UI Helpers"
+            echo "- Categories: Phase11 Phase10 Phase9 Phase8 Phase7 Processor UI Helpers"
             echo "- pluginval executed: no"
             echo "- Universal build: no (arm64 only)"
             echo "- Test elapsed: ${elapsed}s"
@@ -116,8 +126,12 @@ jobs:
           {
             echo "## FULL"
             echo "- Build target: KickLock + KickLockDspTests"
-            echo "- Categories: all"
+            echo "- Categories: all (including Phase11, Performance, and RealAudio)"
+            echo "- Phase11 fixture: executed"
+            echo "- Performance gate: executed"
+            echo "- Real-audio fixtures: UNVERIFIED unless private stems are supplied"
             echo "- pluginval executed: yes"
+            echo "- AU validation: UNVERIFIED (hosted registration is documented as an external/manual gate)"
             echo "- Universal build: yes"
             echo "- Test elapsed: ${elapsed}s"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -125,6 +139,26 @@ jobs:
         run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "KickLock-Mac-VST3.zip"
       - name: Zip AU
         run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/AU/KickLock.component" "KickLock-Mac-AU.zip"
+      - name: Verify macOS universal artifacts
+        run: |
+          set -euo pipefail
+          vst_extract="$(mktemp -d)"
+          au_extract="$(mktemp -d)"
+          unzip -q "KickLock-Mac-VST3.zip" -d "$vst_extract"
+          unzip -q "KickLock-Mac-AU.zip" -d "$au_extract"
+          vst_bundles=( $(find "$vst_extract" -type d -name KickLock.vst3 -print) )
+          au_bundles=( $(find "$au_extract" -type d -name KickLock.component -print) )
+          test "${#vst_bundles[@]}" -eq 1
+          test "${#au_bundles[@]}" -eq 1
+          test -f "${vst_bundles[0]}/Contents/Info.plist"
+          test -f "${au_bundles[0]}/Contents/Info.plist"
+          test -f "${vst_bundles[0]}/Contents/MacOS/KickLock"
+          test -f "${au_bundles[0]}/Contents/MacOS/KickLock"
+          vst_architectures="$(lipo -archs "${vst_bundles[0]}/Contents/MacOS/KickLock")"
+          au_architectures="$(lipo -archs "${au_bundles[0]}/Contents/MacOS/KickLock")"
+          [[ "$vst_architectures" == *arm64* && "$vst_architectures" == *x86_64* ]]
+          [[ "$au_architectures" == *arm64* && "$au_architectures" == *x86_64* ]]
+          echo "- Artifact smoke: VERIFIED (VST3/AU ZIPs extract to one universal bundle each)" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload Mac Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -153,12 +187,12 @@ jobs:
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: |
           start=$SECONDS
-          build/tests/KickLockFastTests Phase10 Phase9 Phase8 Phase7 DSP Processor "UI Helpers"
+          build/tests/KickLockFastTests Phase11 Phase10 Phase9 Phase8 Phase7 DSP Processor "UI Helpers"
           elapsed=$((SECONDS - start))
           {
             echo "## PR FAST"
             echo "- Build target: KickLockFastTests"
-            echo "- Categories: Phase10 Phase9 Phase8 Phase7 DSP Processor UI Helpers"
+            echo "- Categories: Phase11 Phase10 Phase9 Phase8 Phase7 DSP Processor UI Helpers"
             echo "- pluginval executed: no"
             echo "- Universal build: no"
             echo "- Test elapsed: ${elapsed}s"
@@ -183,13 +217,17 @@ jobs:
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: |
           start=$SECONDS
-          build/tests/KickLockDspTests DSP Phase1 Phase2 Phase3 Phase4 Phase7 Phase8 Phase9 Phase10 P10 Processor Stabilization "UI Helpers"
+          build/tests/KickLockDspTests DSP Phase1 Phase2 Phase3 Phase4 Phase7 Phase8 Phase9 Phase10 Phase11 P10 Processor Stabilization "UI Helpers"
           elapsed=$((SECONDS - start))
           {
             echo "## FULL"
             echo "- Build target: KickLockDspTests"
-            echo "- Categories: sanitizer-safe full set including Phase7 Phase8 Phase9 Phase10"
+            echo "- Categories: sanitizer-safe full set including Phase7 Phase8 Phase9 Phase10 Phase11"
+            echo "- Phase11 fixture: executed"
+            echo "- Performance gate: NOT APPLICABLE (KICKLOCK_SKIP_TIMED_ASSERTS=1)"
+            echo "- Real-audio fixtures: UNVERIFIED unless private stems are supplied"
             echo "- pluginval executed: no"
+            echo "- AU validation: NOT APPLICABLE on Linux"
             echo "- Universal build: no"
             echo "- Test elapsed: ${elapsed}s"
           } >> "$GITHUB_STEP_SUMMARY"
