@@ -32,6 +32,10 @@ add_executable(KickLockDspTests
     DynamicReleaseFixture.cpp
     DynamicReleaseGateTests.cpp
     DynamicPerformanceGateTests.cpp
+    DynamicStateEditTransactionTests.cpp
+    DynamicStateEditProcessorTests.cpp
+    DynamicStateEditAuditionTests.cpp
+    DynamicRecentUnknownEventsTests.cpp
     TestAllocationCounter.cpp
 )
 
@@ -89,6 +93,10 @@ add_executable(KickLockFastTests
     DynamicWorkspaceTests.cpp
     DynamicReleaseFixture.cpp
     DynamicReleaseGateTests.cpp
+    DynamicStateEditTransactionTests.cpp
+    DynamicStateEditProcessorTests.cpp
+    DynamicStateEditAuditionTests.cpp
+    DynamicRecentUnknownEventsTests.cpp
     TestAllocationCounter.cpp
 )
 

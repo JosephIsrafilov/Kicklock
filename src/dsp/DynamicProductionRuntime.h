@@ -18,6 +18,7 @@
 #include "DynamicContinuityMixer.h"
 #include "TransientDetector.h"
 #include "DynamicRuntimeMeasurementCapture.h"
+#include "DynamicRecentUnknownEvents.h"
 
 // =============================================================================
 // Phase 7: production runtime coordinator.
@@ -61,6 +62,7 @@ struct DynamicProductionDiagnostics
     uint64_t servicePrimes = 0;
     uint64_t configurationFailures = 0;
     uint64_t sourceTransitions = 0;
+    uint64_t recentUnknownStagingDropped = 0;
 
     // Mirrors of the selection outcome for the processor's public atomics.
     DynamicSelectorDiagnostic lastSelectorDecision = DynamicSelectorDiagnostic::None;
@@ -116,6 +118,12 @@ public:
         activeMap = makeEmptyDynamicStateMap();
         mapGeneration = 0;
 
+        stateEditAudition.fill (StateEditAudition {});
+        forceHiddenSlot.fill (false);
+        lastAttemptedStatePackage.fill (DynamicPackageResolution {});
+        hasLastAttemptedStatePackage.fill (false);
+        serviceOwnedByEditAuditionForId = 0;
+
         prepared = true;
         reset();
         return true;
@@ -155,6 +163,15 @@ public:
         activeMap = map;
         ++mapGeneration;
         clearServiceBinding();
+        // Phase 12: abandon any in-flight edit audition rather than letting it
+        // act on a now-superseded package. configurePackagesIfNeeded() will
+        // re-detect exactly what (if anything) actually changed against the
+        // new map on the very next process() call, by comparing each slot's
+        // freshly-resolved package to lastAttemptedStatePackage[] - a
+        // content comparison, not a generation counter, so an unrelated
+        // State whose resolved package didn't change is correctly left
+        // alone even though the map as a whole was just republished.
+        cancelAllStateEditAuditions();
         invalidateConfigurationCache();
     }
 
@@ -302,6 +319,17 @@ public:
     uint64_t getMeasurementCaptureExhaustedCount() const noexcept { return measurementCapture.getExhaustedRequestCount(); }
     uint64_t getMeasurementCaptureDroppedForTransportCount() const noexcept { return measurementCapture.getDroppedForTransportCount(); }
 
+    // Section 15: pops the oldest staged Unknown/Ambiguous match event, if
+    // any. Same-thread hand-off (audio thread produces via processChunk() and
+    // consumes via this call, both within the same processBlock) - the
+    // caller (PluginProcessor) is responsible for then publishing it across
+    // to the message thread through its own SPSC queue.
+    bool takeRecentUnknownEvent (DynamicRecentUnknownRawEvent& out) noexcept
+    {
+        return recentUnknownStaging.pop (out);
+    }
+    uint64_t getRecentUnknownStagingDroppedCount() const noexcept { return diagnostics.recentUnknownStagingDropped; }
+
     // ---- test-only accessors (never used by production UI) ----
     DynamicHotBranchEngine& getEngineForTesting() noexcept { return engine; }
     DynamicSelectorScheduler& getSchedulerForTesting() noexcept { return scheduler; }
@@ -320,6 +348,7 @@ private:
         kickTrigger.reset();
         runtimeSamplePos = 0;
         clearServiceBinding();
+        cancelAllStateEditAuditions();
         measurementCapture.discardInFlight (measurementDiscardReason);
     }
 
@@ -330,6 +359,13 @@ private:
         serviceBindingValid = false;
         serviceBoundStableStateId = 0;
         serviceConfigured = false;
+        serviceOwnedByEditAuditionForId = 0;
+    }
+
+    void cancelAllStateEditAuditions() noexcept
+    {
+        for (int slot = 0; slot < DynamicHotBranchContract::kStateSlots; ++slot)
+            cancelStateEditAudition (slot);
     }
 
     void invalidateConfigurationCache() noexcept
@@ -345,6 +381,20 @@ private:
     // application. Identical inputs skip reconfiguration entirely (the engine's
     // own configsEqual guard additionally protects branch identity and shared
     // delay history against any redundant same-identity update).
+    //
+    // Section 12 safety: DynamicHotBranchEngine applies a reconfigured
+    // package's coefficients and delay tap immediately against whatever filter
+    // memory a branch already has (see AllpassStageState::process()/
+    // FractionalInterpolator::process() - there is no ramp). Silently calling
+    // configureStateSlot() for a slot whose *content* changed while that exact
+    // identity is currently audible (DynamicSelectorScheduler::
+    // isSemanticStateReferenced()) would therefore click. A brand-new
+    // occupant (identity change) or a state that isn't correction-eligible
+    // right now is still reconfigured/cleared directly - the engine's own
+    // resetRuntime() on identity change, or simply not being selectable,
+    // already makes those cases safe exactly as before this change. Only a
+    // genuine same-identity content edit while referenced is routed through
+    // beginOrRefreshEditAudition() instead of engine.configureFromPackage().
     bool configurePackagesIfNeeded (double strength) noexcept
     {
         if (hasConfigured
@@ -364,23 +414,45 @@ private:
             if (! state.occupied)
             {
                 engine.clearStateSlot (slot);
+                cancelStateEditAudition (slot);
+                hasLastAttemptedStatePackage[(size_t) slot] = false;
                 continue;
             }
 
             const auto package = resolveDynamicPackage (activeMap, state.stableStateId, strength, sampleRate);
-            if (package.valid && package.decision == DynamicPackageDecision::StateCorrection)
-            {
-                if (! engine.configureFromPackage (DynamicHotBranchKind::State, slot, package))
-                    engine.clearStateSlot (slot);
-            }
-            else
+            if (! package.valid || package.decision != DynamicPackageDecision::StateCorrection)
             {
                 // Disabled / Auto Candidate / recognized-no-correction / bypassed
                 // / invalid-for-runtime: no persistent correction branch. The
                 // matcher still receives the whole map so the state is
                 // recognizable and correctly routes to Global.
                 engine.clearStateSlot (slot);
+                cancelStateEditAudition (slot);
+                hasLastAttemptedStatePackage[(size_t) slot] = false;
+                continue;
             }
+
+            const bool contentUnchanged = hasLastAttemptedStatePackage[(size_t) slot]
+                && dspPackagesEqual (lastAttemptedStatePackage[(size_t) slot], package);
+            if (contentUnchanged)
+                continue; // engine.configureFromPackage would itself no-op; nothing to do
+
+            if (! scheduler.isSemanticStateReferenced (state.stableStateId))
+            {
+                // Silent right now (or a brand-new/identity-changed occupant):
+                // safe to commit directly, exactly as before this change.
+                if (! engine.configureFromPackage (DynamicHotBranchKind::State, slot, package))
+                    engine.clearStateSlot (slot);
+                lastAttemptedStatePackage[(size_t) slot] = package;
+                hasLastAttemptedStatePackage[(size_t) slot] = true;
+                cancelStateEditAudition (slot);
+                continue;
+            }
+
+            // A genuine edit to the package of a State that is currently
+            // audible. Route through the Service-mediated safe retune instead
+            // of touching the live branch.
+            beginOrRefreshEditAudition (slot, state.stableStateId, package);
         }
 
         configuredGeneration = mapGeneration;
@@ -388,6 +460,140 @@ private:
         configuredSampleRate = sampleRate;
         hasConfigured = true;
         return true;
+    }
+
+    enum class EditAuditionPhase : uint8_t
+    {
+        ClaimingService = 0,
+        WaitingForSilence,
+        Settling
+    };
+
+    struct StateEditAudition
+    {
+        bool active = false;
+        uint64_t stableStateId = 0;
+        DynamicPackageResolution pendingPackage;
+        EditAuditionPhase phase = EditAuditionPhase::ClaimingService;
+        int64_t settleSamplesRemaining = 0;
+    };
+
+    static bool dspPackagesEqual (const DynamicPackageResolution& a, const DynamicPackageResolution& b) noexcept
+    {
+        return a.selectedStableStateId == b.selectedStableStateId
+            && a.effectiveAbsoluteDelayMs == b.effectiveAbsoluteDelayMs
+            && a.polarityInvert == b.polarityInvert
+            && a.allpassStages == b.allpassStages
+            && a.crossoverEnabled == b.crossoverEnabled
+            && a.crossoverHz == b.crossoverHz
+            && a.allpassEnabled == b.allpassEnabled
+            && a.delayInterpolationIndex == b.delayInterpolationIndex
+            && a.allpassCoefficients.b0 == b.allpassCoefficients.b0
+            && a.allpassCoefficients.b1 == b.allpassCoefficients.b1
+            && a.allpassCoefficients.b2 == b.allpassCoefficients.b2
+            && a.allpassCoefficients.a1 == b.allpassCoefficients.a1
+            && a.allpassCoefficients.a2 == b.allpassCoefficients.a2;
+    }
+
+    void beginOrRefreshEditAudition (int slot, uint64_t stableStateId,
+                                     const DynamicPackageResolution& package) noexcept
+    {
+        auto& audition = stateEditAudition[(size_t) slot];
+        audition.active = true;
+        audition.stableStateId = stableStateId;
+        audition.pendingPackage = package;
+        audition.phase = EditAuditionPhase::ClaimingService;
+        audition.settleSamplesRemaining = 0;
+    }
+
+    void cancelStateEditAudition (int slot) noexcept
+    {
+        auto& audition = stateEditAudition[(size_t) slot];
+        if (! audition.active)
+            return;
+        if (serviceOwnedByEditAuditionForId == audition.stableStateId)
+            serviceOwnedByEditAuditionForId = 0;
+        forceHiddenSlot[(size_t) slot] = false;
+        audition = StateEditAudition {};
+    }
+
+    // Progresses every in-flight edit audition by exactly one chunk. Called
+    // unconditionally every process() call (unlike configurePackagesIfNeeded(),
+    // which can skip whole chunks when nothing changed) because "has the
+    // referenced identity gone silent yet" must be re-checked every chunk.
+    void advanceStateEditAuditions (int numSamplesThisChunk) noexcept
+    {
+        for (int slot = 0; slot < DynamicHotBranchContract::kStateSlots; ++slot)
+        {
+            auto& audition = stateEditAudition[(size_t) slot];
+            if (! audition.active)
+                continue;
+
+            switch (audition.phase)
+            {
+                case EditAuditionPhase::ClaimingService:
+                {
+                    const bool serviceLiveForAnotherId = serviceBindingValid && serviceBoundStableStateId != 0
+                        && serviceBoundStableStateId != audition.stableStateId
+                        && scheduler.isSemanticStateReferenced (serviceBoundStableStateId);
+                    const bool serviceLiveForThisIdAlready = serviceBindingValid
+                        && serviceBoundStableStateId == audition.stableStateId
+                        && scheduler.isSemanticStateReferenced (audition.stableStateId);
+                    if (serviceLiveForAnotherId || serviceLiveForThisIdAlready)
+                        break; // Service is busy and audible; retry next chunk
+
+                    if (! engine.configureFromPackage (DynamicHotBranchKind::Service, -1, audition.pendingPackage))
+                        break; // retry next chunk
+
+                    const int primeSamples = (int) std::ceil (sampleRate
+                        * DynamicHotBranchContract::kServiceWarmupMs / 1000.0);
+                    engine.primeService (primeSamples);
+                    ++diagnostics.servicePrimes;
+                    serviceConfigured = true;
+                    serviceBoundStableStateId = audition.stableStateId;
+                    serviceBindingValid = true;
+                    ++diagnostics.serviceBindings;
+                    serviceOwnedByEditAuditionForId = audition.stableStateId;
+                    audition.phase = EditAuditionPhase::WaitingForSilence;
+                    break;
+                }
+                case EditAuditionPhase::WaitingForSilence:
+                {
+                    if (scheduler.isSemanticStateReferenced (audition.stableStateId))
+                        break; // still audible (old package via State, or already via Service); wait
+
+                    if (! engine.configureFromPackage (DynamicHotBranchKind::State, slot, audition.pendingPackage))
+                        engine.clearStateSlot (slot);
+                    lastAttemptedStatePackage[(size_t) slot] = audition.pendingPackage;
+                    hasLastAttemptedStatePackage[(size_t) slot] = true;
+                    forceHiddenSlot[(size_t) slot] = true;
+
+                    const double physicalTap = (double) reportedLatencySamples
+                        + audition.pendingPackage.effectiveAbsoluteDelayMs * sampleRate / 1000.0;
+                    audition.settleSamplesRemaining = DynamicHotBranchDetail::warmFramesRequired (physicalTap);
+                    audition.phase = EditAuditionPhase::Settling;
+                    break;
+                }
+                case EditAuditionPhase::Settling:
+                {
+                    audition.settleSamplesRemaining -= numSamplesThisChunk;
+                    if (audition.settleSamplesRemaining <= 0)
+                    {
+                        // Un-hide; the existing, unmodified updateServiceBinding()
+                        // auto-drop-back logic (via the now-corrected
+                        // warmPersistentSlotFor()) hands ownership back from
+                        // Service to this now-fully-settled persistent slot on
+                        // its own, exactly as it already does for ordinary
+                        // cold-start Service usage.
+                        forceHiddenSlot[(size_t) slot] = false;
+                        if (serviceOwnedByEditAuditionForId == audition.stableStateId)
+                            serviceOwnedByEditAuditionForId = 0;
+                        audition = StateEditAudition {};
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     bool processChunk (const juce::AudioBuffer<float>& bassInput,
@@ -448,6 +654,21 @@ private:
 
                 const DynamicMatchResult match = matchDynamicFingerprint (observation, activeMap);
 
+                if (match.decision == DynamicMatchDecision::Unknown
+                    || match.decision == DynamicMatchDecision::Ambiguous)
+                {
+                    DynamicRecentUnknownRawEvent unknownEvent;
+                    unknownEvent.valid = true;
+                    unknownEvent.fingerprint = observation.fingerprint.toPrototype();
+                    unknownEvent.outcome = match.decision == DynamicMatchDecision::Ambiguous
+                        ? DynamicRecentUnknownOutcome::Ambiguous : DynamicRecentUnknownOutcome::Unknown;
+                    unknownEvent.nearestDistance = match.nearestDistance;
+                    unknownEvent.triggerSample = observation.triggerSample;
+                    unknownEvent.mapGeneration = mapGeneration;
+                    if (! recentUnknownStaging.push (unknownEvent))
+                        ++diagnostics.recentUnknownStagingDropped;
+                }
+
                 DynamicSelectorEvent event;
                 event.triggerSample = observation.triggerSample;
                 event.readySample = observation.readySample;
@@ -487,6 +708,7 @@ private:
             }
         }
 
+        advanceStateEditAuditions (n);
         updateServiceBinding (pendingConfidentId);
 
         DynamicSelectorBranchRoster roster;
@@ -529,6 +751,13 @@ private:
     // ordinary per-sample loop.
     void updateServiceBinding (uint64_t confidentId) noexcept
     {
+        // Phase 12: an in-flight edit audition owns Service exclusively until
+        // it finishes (bounded by Settling's warm-frame countdown, or by
+        // WaitingForSilence resolving) - never steal it out from under a
+        // safe retune in progress.
+        if (serviceOwnedByEditAuditionForId != 0)
+            return;
+
         // A warm persistent branch always wins: drop a Service binding whose
         // identity is now available as a warm persistent State branch.
         if (serviceBindingValid && warmPersistentSlotFor (serviceBoundStableStateId) >= 0)
@@ -567,6 +796,12 @@ private:
             return -1;
         for (int slot = 0; slot < DynamicHotBranchContract::kStateSlots; ++slot)
         {
+            // Phase 12: a slot mid edit-audition settle is deliberately not
+            // considered "available" even though the engine itself still
+            // reports it active+warm - its recursive filter/interpolator
+            // state has not settled onto the newly-committed package yet.
+            if (forceHiddenSlot[(size_t) slot])
+                continue;
             const auto info = engine.getStateInfo (slot);
             if (info.active && info.warm && info.stableStateId == stableStateId)
                 return slot;
@@ -578,7 +813,13 @@ private:
     {
         roster.global = engine.getGlobalInfo();
         for (int slot = 0; slot < DynamicSelectorContract::kStateSlotCount; ++slot)
+        {
             roster.states[(size_t) slot] = engine.getStateInfo (slot);
+            // Phase 12: hide a slot mid edit-audition settle from the
+            // scheduler's selection entirely, for the same reason as above.
+            if (forceHiddenSlot[(size_t) slot])
+                roster.states[(size_t) slot].active = false;
+        }
         roster.service = engine.getServiceInfo();
         roster.serviceBoundStableStateId = serviceBoundStableStateId;
         roster.serviceBindingValid = serviceBindingValid;
@@ -635,6 +876,18 @@ private:
     bool serviceConfigured = false;
     uint64_t serviceBoundStableStateId = 0;
 
+    // Phase 12: safe per-state edit retune bookkeeping. All audio-thread-only,
+    // non-persistent, fixed-size (no allocation). See configurePackagesIfNeeded()/
+    // advanceStateEditAuditions() for the state machine this drives.
+    std::array<StateEditAudition, DynamicHotBranchContract::kStateSlots> stateEditAudition {};
+    std::array<bool, DynamicHotBranchContract::kStateSlots> forceHiddenSlot {};
+    std::array<DynamicPackageResolution, DynamicHotBranchContract::kStateSlots> lastAttemptedStatePackage {};
+    std::array<bool, DynamicHotBranchContract::kStateSlots> hasLastAttemptedStatePackage {};
+    // Nonzero while an edit audition holds Service exclusively, so the
+    // ordinary confident-match-driven updateServiceBinding() path cannot
+    // steal it mid-retune.
+    uint64_t serviceOwnedByEditAuditionForId = 0;
+
     bool hasConfigured = false;
     uint64_t configuredGeneration = 0;
     double configuredStrength = std::numeric_limits<double>::quiet_NaN();
@@ -655,6 +908,10 @@ private:
     // Persistent scratch for takeCompletedMeasurementCapture(); sized once in
     // prepare() so the hand-off never allocates.
     DynamicRuntimeMeasurementCaptureResult measurementHandoffScratch;
+
+    // Phase 12, Section 15: same-thread staging ring for Unknown/Ambiguous
+    // match events (see takeRecentUnknownEvent()).
+    DynamicRecentUnknownStagingRing recentUnknownStaging;
 
     DynamicProductionDiagnostics diagnostics;
 };
