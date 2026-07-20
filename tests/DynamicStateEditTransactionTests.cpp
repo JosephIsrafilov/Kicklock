@@ -53,7 +53,11 @@ namespace
         map.globalBase.globalBaseDelayMs = -4.0f;
         map.globalBase.globalAllpassFreqHz = 100.0f;
         map.globalBase.globalAllpassQ = 0.7f;
-        map.nextStateId = 1;
+        // Comfortably above every hardcoded stableStateId used in this file's
+        // tests (isStructurallyValidDynamicStateMap requires nextStateId to
+        // exceed the maximum occupied stableStateId). Tests that care about
+        // an exact nextStateId override it explicitly after calling this.
+        map.nextStateId = 1000;
         return map;
     }
 
@@ -222,11 +226,22 @@ public:
 
         beginTest ("promoteToManual rejects insufficient evidence, invalid fingerprint, and already-Manual");
         {
+            // kCandidateMinimumRepeatableHits and kManualMinimumRepeatableHits
+            // are both 3, so a hitCount below 3 (or an invalid fingerprint)
+            // is already rejected one layer earlier by
+            // isStructurallyValidDynamicStateMap() - the input map itself is
+            // never valid to begin with, so promoteToManual() correctly
+            // reports MapNotStructurallyValid rather than reaching its own
+            // (still-present, defensive) InsufficientEvidence/
+            // InvalidFingerprint checks. Those checks remain meaningful for
+            // createManualState(), whose fingerprint/hitCount come from
+            // external request data that the map has not already validated
+            // (see the createManualState tests below).
             auto map = baseMap();
             map.states[0] = autoState (1, 2, DynamicStateEvidence::Candidate);
             const auto tooFewHits = promoteToManual (map, 1);
             expect (! tooFewHits.success);
-            expect (tooFewHits.reason == DynamicStateEditRejectionReason::InsufficientEvidence);
+            expect (tooFewHits.reason == DynamicStateEditRejectionReason::MapNotStructurallyValid);
 
             auto badFingerprintMap = baseMap();
             auto badState = autoState (1, 5, DynamicStateEvidence::Stable);
@@ -234,7 +249,7 @@ public:
             badFingerprintMap.states[0] = badState;
             const auto badFingerprint = promoteToManual (badFingerprintMap, 1);
             expect (! badFingerprint.success);
-            expect (badFingerprint.reason == DynamicStateEditRejectionReason::InvalidFingerprint);
+            expect (badFingerprint.reason == DynamicStateEditRejectionReason::MapNotStructurallyValid);
 
             auto alreadyManualMap = baseMap();
             alreadyManualMap.states[0] = manualState (1);

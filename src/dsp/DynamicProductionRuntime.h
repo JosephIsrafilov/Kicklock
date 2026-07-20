@@ -432,15 +432,34 @@ private:
                 continue;
             }
 
+            // Cross-check the engine's actual current state, not just this
+            // cache: the cache only records what THIS function last wrote,
+            // and cannot by itself detect the engine's slot having been
+            // cleared/changed out from under it (e.g. by a lower-level reset
+            // path). Skipping reconfiguration must never leave a slot the
+            // engine itself no longer reports as active+matching silently
+            // un-repaired.
+            const auto engineSlotInfo = engine.getStateInfo (slot);
+            const bool engineSlotMatchesExpectation =
+                engineSlotInfo.active && engineSlotInfo.stableStateId == state.stableStateId;
             const bool contentUnchanged = hasLastAttemptedStatePackage[(size_t) slot]
-                && dspPackagesEqual (lastAttemptedStatePackage[(size_t) slot], package);
+                && dspPackagesEqual (lastAttemptedStatePackage[(size_t) slot], package)
+                && engineSlotMatchesExpectation;
             if (contentUnchanged)
                 continue; // engine.configureFromPackage would itself no-op; nothing to do
 
-            if (! scheduler.isSemanticStateReferenced (state.stableStateId))
+            // Gate on whether THIS PERSISTENT SLOT specifically is currently
+            // audible - not whether the identity is referenced anywhere
+            // (isSemanticStateReferenced also considers Service). A slot the
+            // engine reports as inactive (cleared, or not yet configured -
+            // including after an out-of-band engine reset/self-heal path)
+            // has no live filter/interpolator state to protect, even if the
+            // same identity happens to be simultaneously live via Service:
+            // configureFromPackage() will itself resetRuntime() on this
+            // identity-changed/first-activation case, exactly as it did
+            // before this phase's changes.
+            if (! scheduler.isStateSlotReferenced (slot))
             {
-                // Silent right now (or a brand-new/identity-changed occupant):
-                // safe to commit directly, exactly as before this change.
                 if (! engine.configureFromPackage (DynamicHotBranchKind::State, slot, package))
                     engine.clearStateSlot (slot);
                 lastAttemptedStatePackage[(size_t) slot] = package;
@@ -559,8 +578,13 @@ private:
                 }
                 case EditAuditionPhase::WaitingForSilence:
                 {
-                    if (scheduler.isSemanticStateReferenced (audition.stableStateId))
-                        break; // still audible (old package via State, or already via Service); wait
+                    // Only this persistent slot's own liveness matters here -
+                    // we are about to reconfigure the slot, not Service. If
+                    // Service already carries this identity (a normal, safe
+                    // state for this phase), that alone must not block
+                    // committing the slot once IT is silent.
+                    if (scheduler.isStateSlotReferenced (slot))
+                        break; // this slot's old package is still audible; wait
 
                     if (! engine.configureFromPackage (DynamicHotBranchKind::State, slot, audition.pendingPackage))
                         engine.clearStateSlot (slot);

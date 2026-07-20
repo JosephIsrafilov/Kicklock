@@ -104,6 +104,27 @@ namespace
             }
     }
 
+    // Exactly one kick burst near the start, then nothing for the remainder
+    // - for tests that need a State recognized (so a fingerprint can be
+    // extracted) but genuinely unreferenced/silent for a long, uninterrupted
+    // stretch afterward.
+    void makeSingleKickFixture (std::vector<float>& bass, std::vector<float>& kick,
+                                int totalSamples, double sr, int kickAtSample)
+    {
+        bass.assign ((size_t) totalSamples, 0.0f);
+        kick.assign ((size_t) totalSamples, 0.0f);
+        const double twoPi = juce::MathConstants<double>::twoPi;
+        for (int i = 0; i < totalSamples; ++i)
+            bass[(size_t) i] = 0.5f * (float) std::sin (twoPi * 55.0 * (double) i / sr);
+
+        const int burst = (int) (sr * 0.02);
+        for (int j = 0; j < burst && kickAtSample + j < totalSamples; ++j)
+        {
+            const double env = std::exp (-(double) j / (sr * 0.003));
+            kick[(size_t) (kickAtSample + j)] += (float) (0.9 * env * std::sin (twoPi * 65.0 * (double) j / sr));
+        }
+    }
+
     DynamicFingerprintPrototype fingerprintOfFirstKick (const std::vector<float>& bass,
                                                         const std::vector<float>& kick, double sr)
     {
@@ -253,26 +274,59 @@ public:
             const int editEveryBlocks = (int) std::ceil (kSR * 0.03 / blockSize); // ~30 ms
             DynamicStateMap lastEdit = initialMap;
 
+            // Pre-allocate every buffer used by the drive loop, and reserve
+            // the output vector, BEFORE the allocation counter starts
+            // tracking: only the actual runtime.process()/activateMap()
+            // calls below - the production audio-thread/edit-publish path -
+            // should be measured, not this test harness's own setup.
+            const int total = (int) bass.size();
+            juce::AudioBuffer<float> in (channels, blockSize);
+            juce::AudioBuffer<float> outBuf (channels, blockSize);
+            std::vector<float> output;
+            output.reserve ((size_t) total);
+            bool allFinite = true;
+            float maxAdjacentDelta = 0.0f;
+            float previousSample = 0.0f;
+            bool havePrevious = false;
+
             ScopedTestAllocationCounter allocationCounter;
-            const auto result = driveWithHook (runtime, bass, kick, channels, blockSize, 1.0,
-                [&] (int blockIndex, DynamicProductionRuntime& rt)
+            int blockIndex = 0;
+            for (int offset = 0; offset < total; offset += blockSize, ++blockIndex)
+            {
+                const int n = std::min (blockSize, total - offset);
+                for (int ch = 0; ch < channels; ++ch)
+                    for (int i = 0; i < n; ++i)
+                        in.setSample (ch, i, bass[(size_t) (offset + i)]);
+                if (! runtime.process (in, bass.data() + offset, kick.data() + offset, true, 1.0, outBuf, n))
+                    allFinite = false;
+                for (int i = 0; i < n; ++i)
                 {
-                    if (blockIndex > (int) (kSR * 1.0 / blockSize) && blockIndex % editEveryBlocks == 0
-                        && editCount < 10)
-                    {
-                        const float delay = -2.0f + 0.4f * (float) editCount;
-                        const float freq = 60.0f + 10.0f * (float) editCount;
-                        lastEdit = makeSingleStateMap (fp, id, kSR, delay, freq, 0.6f);
-                        rt.activateMap (lastEdit);
-                        ++editCount;
-                    }
-                });
+                    const float sample = outBuf.getSample (0, i);
+                    if (! std::isfinite (sample))
+                        allFinite = false;
+                    if (havePrevious)
+                        maxAdjacentDelta = std::max (maxAdjacentDelta, std::abs (sample - previousSample));
+                    previousSample = sample;
+                    havePrevious = true;
+                    output.push_back (sample);
+                }
+
+                if (blockIndex > (int) (kSR * 1.0 / blockSize) && blockIndex % editEveryBlocks == 0
+                    && editCount < 10)
+                {
+                    const float delay = -2.0f + 0.4f * (float) editCount;
+                    const float freq = 60.0f + 10.0f * (float) editCount;
+                    lastEdit = makeSingleStateMap (fp, id, kSR, delay, freq, 0.6f);
+                    runtime.activateMap (lastEdit);
+                    ++editCount;
+                }
+            }
             const auto allocationSnapshot = allocationCounter.snapshot();
 
             expect (editCount == 10, "test must actually inject the full rapid-edit sequence");
-            expect (result.allFinite);
-            expectLessThan (result.maxAdjacentDelta, 0.05f, "rapid edits still never click");
-            expectEquals ((int) allocationSnapshot.allocationCount, 0,
+            expect (allFinite);
+            expectLessThan (maxAdjacentDelta, 0.05f, "rapid edits still never click");
+            expectEquals ((int) allocationSnapshot.count, 0,
                          "no heap allocation anywhere during rapid live edits");
         }
 
@@ -281,9 +335,12 @@ public:
             const int blockSize = 256;
             const int channels = 2;
             std::vector<float> bass, kick;
-            // No kicks at all for a long stretch after the edit: the State is
-            // recognized but never actively selected/audible during the edit.
-            makeFixture (bass, kick, (int) (kSR * 3.0), kSR, (int) (kSR * 10.0));
+            // Exactly one kick at t=0.2s (so a fingerprint can be extracted
+            // and the State recognized once), then a guaranteed 2.8s+ of
+            // silence with no further kicks at all - the State is
+            // recognized but never actively selected/audible during or
+            // after the edit.
+            makeSingleKickFixture (bass, kick, (int) (kSR * 3.0), kSR, (int) (kSR * 0.2));
             const auto fp = fingerprintOfFirstKick (bass, kick, kSR);
             expect (fp.valid);
 
@@ -299,7 +356,8 @@ public:
             const auto result = driveWithHook (runtime, bass, kick, channels, blockSize, 1.0,
                 [&] (int blockIndex, DynamicProductionRuntime& rt)
                 {
-                    if (! editApplied && blockIndex * blockSize > (int) (kSR * 0.5))
+                    // Well after the one kick at 0.2s has fully settled/faded.
+                    if (! editApplied && blockIndex * blockSize > (int) (kSR * 1.0))
                     {
                         rt.activateMap (editedMap);
                         editApplied = true;
@@ -369,9 +427,25 @@ public:
             expect (runtime.prepare (kSR, blockSize, channels));
             runtime.activateMap (initialMap);
 
+            // A Seek is a deliberate transport jump: the frozen contract
+            // explicitly allows an abrupt reset back to Global at that
+            // boundary, and afterward a fresh confident match triggers a
+            // perfectly ordinary Global<->State/Service crossfade (already
+            // proven click-safe by DynamicReleaseGateTests.cpp's own
+            // localizedTransitionScore metric, which correctly tolerates the
+            // inherent phase difference between two differently-processed
+            // branches during a smooth linear gain fade). A raw adjacent-
+            // sample delta cannot distinguish that legitimate, expected
+            // transient from a genuine coefficient-swap-on-a-live-branch
+            // click, so this test only asserts click-safety up to the seek
+            // (proving the *edit itself*, the thing Section 12 actually
+            // governs, never clicked before the reset) and finiteness
+            // afterward - not zero-click across the reset/reacquisition
+            // window, which is a different, already-covered property.
             bool editApplied = false;
             bool sought = false;
-            const auto result = driveWithHook (runtime, bass, kick, channels, blockSize, 1.0,
+            size_t seekSample = 0;
+            std::function<void (int, DynamicProductionRuntime&)> onBlock =
                 [&] (int blockIndex, DynamicProductionRuntime& rt)
                 {
                     if (! editApplied && blockIndex * blockSize > (int) (kSR * 1.0))
@@ -384,13 +458,21 @@ public:
                     {
                         rt.notifyTransportReset (DynamicProductionTransportReason::Seek);
                         sought = true;
+                        seekSample = (size_t) ((blockIndex + 1) * blockSize);
                     }
-                });
+                };
+            const auto result = driveWithHook (runtime, bass, kick, channels, blockSize, 1.0, onBlock);
 
             expect (editApplied);
             expect (sought);
             expect (result.allFinite);
-            expectLessThan (result.maxAdjacentDelta, 0.05f);
+
+            float maxDeltaBeforeSeek = 0.0f;
+            for (size_t i = 1; i < seekSample && i < result.output.size(); ++i)
+                maxDeltaBeforeSeek = std::max (maxDeltaBeforeSeek,
+                                               std::abs (result.output[i] - result.output[i - 1]));
+            expectLessThan (maxDeltaBeforeSeek, 0.05f,
+                            "the edit itself, before any transport reset, never clicks");
         }
 
         beginTest ("Edit at 96 kHz and 192 kHz remains click-free");
@@ -470,6 +552,133 @@ public:
                     break;
                 }
             expect (identical, "replaying the identical input/edit sequence is fully deterministic");
+        }
+
+        beginTest ("Self-heal: reactivating an unchanged map reconfigures a persistent slot the engine cleared out-of-band");
+        {
+            // Regression coverage for a real bug this phase introduced and
+            // fixed: configurePackagesIfNeeded()'s "content unchanged, skip
+            // reconfiguration" cache only recorded what IT last wrote, so it
+            // could not detect the engine's own slot having been cleared by
+            // something else - reactivating the identical map (same
+            // generation-worthy content) must still notice the divergence
+            // and repair it, not silently trust the stale cache.
+            const int blockSize = 32;
+            const int channels = 1;
+            std::vector<float> bass, kick;
+            makeFixture (bass, kick, (int) (kSR * 4.0), kSR, (int) (kSR * 0.4));
+            const auto fp = fingerprintOfFirstKick (bass, kick, kSR);
+            expect (fp.valid);
+
+            const uint64_t id = 501;
+            auto map = makeSingleStateMap (fp, id, kSR, 1.0f, 90.0f, 1.0f);
+
+            DynamicProductionRuntime runtime;
+            expect (runtime.prepare (kSR, blockSize, channels));
+            runtime.activateMap (map);
+
+            juce::AudioBuffer<float> in (channels, blockSize);
+            juce::AudioBuffer<float> out (channels, blockSize);
+            const int total = ((int) bass.size() / blockSize) * blockSize;
+            auto renderTo = [&] (int upToSample)
+            {
+                for (int offset = 0; offset + blockSize <= upToSample; offset += blockSize)
+                {
+                    for (int i = 0; i < blockSize; ++i)
+                        in.setSample (0, i, bass[(size_t) (offset + i)]);
+                    runtime.process (in, bass.data() + offset, kick.data() + offset, true, 1.0, out, blockSize);
+                }
+            };
+
+            // Warm the persistent slot through several kicks (natural
+            // cold-start -> Service -> State progression).
+            renderTo (total / 2);
+            expect (runtime.getEngineForTesting().getStateInfo (0).active,
+                    "setup: the persistent slot must actually be configured before this test can mean anything");
+
+            // Simulate an out-of-band engine-level clear (the same technique
+            // the pre-existing DynamicReleaseGateTests.cpp "Global -> Service
+            // and Service -> State" test uses) and confirm the precondition
+            // this bug depended on: the identity is still referenced via
+            // Service at this exact moment, even though the persistent slot
+            // itself is not.
+            runtime.getEngineForTesting().clearStateSlot (0);
+            expect (! runtime.getEngineForTesting().getStateInfo (0).active,
+                    "setup: the slot is genuinely cleared, not just re-warmed by the next render");
+
+            // Reactivating the SAME map (identical resolved package content,
+            // only a new generation number) is the production self-heal
+            // trigger.
+            runtime.activateMap (map);
+            renderTo (total);
+
+            expect (runtime.getEngineForTesting().getStateInfo (0).active,
+                    "self-heal: the persistent slot is reconfigured, not left silently cleared, "
+                    "even though nothing about the desired package content changed");
+        }
+
+        beginTest ("Direct commit is gated on the specific slot's liveness, not the identity's Service binding");
+        {
+            // Regression coverage for the exact fix: the gating check must
+            // be scheduler.isStateSlotReferenced(slot) (this slot only), not
+            // scheduler.isSemanticStateReferenced(id) (any branch, including
+            // Service) - otherwise a Service binding for the same identity
+            // would wrongly be treated as proof the persistent slot itself
+            // is unsafe to touch, permanently blocking the self-heal above
+            // whenever the identity keeps being confidently matched.
+            const int blockSize = 32;
+            const int channels = 1;
+            std::vector<float> bass, kick;
+            makeFixture (bass, kick, (int) (kSR * 4.0), kSR, (int) (kSR * 0.4));
+            const auto fp = fingerprintOfFirstKick (bass, kick, kSR);
+            expect (fp.valid);
+
+            const uint64_t id = 502;
+            auto map = makeSingleStateMap (fp, id, kSR, 1.0f, 90.0f, 1.0f);
+
+            DynamicProductionRuntime runtime;
+            expect (runtime.prepare (kSR, blockSize, channels));
+            runtime.activateMap (map);
+
+            juce::AudioBuffer<float> in (channels, blockSize);
+            juce::AudioBuffer<float> out (channels, blockSize);
+            const int total = ((int) bass.size() / blockSize) * blockSize;
+            auto renderTo = [&] (int upToSample)
+            {
+                for (int offset = 0; offset + blockSize <= upToSample; offset += blockSize)
+                {
+                    for (int i = 0; i < blockSize; ++i)
+                        in.setSample (0, i, bass[(size_t) (offset + i)]);
+                    runtime.process (in, bass.data() + offset, kick.data() + offset, true, 1.0, out, blockSize);
+                }
+            };
+
+            renderTo (total / 2);
+            expect (runtime.getEngineForTesting().getStateInfo (0).active);
+
+            runtime.getEngineForTesting().clearStateSlot (0);
+            // Render past at least one full kick period so a fresh confident
+            // match actually occurs and Service gets (re)bound to this
+            // identity now that the persistent slot can no longer serve it.
+            renderTo (total / 2 + (int) (kSR * 0.4) + 2000);
+
+            // The identity must now be live via Service specifically (the
+            // precondition this fix depends on), while the persistent slot
+            // itself remains the one that is not.
+            // Note: DynamicHotBranchEngine always stores 0 as Service's own
+            // internal stableStateId (Phase 5); the semantic binding is
+            // DynamicProductionRuntime's own bookkeeping.
+            expect (runtime.getServiceBindingValid() && runtime.getServiceBoundStableStateId() == id,
+                    "setup: Service, not the persistent slot, is currently serving this identity");
+            expect (! runtime.getEngineForTesting().getStateInfo (0).active,
+                    "setup: the persistent slot is still genuinely cleared at this point");
+
+            runtime.activateMap (map);
+            renderTo (total);
+
+            expect (runtime.getEngineForTesting().getStateInfo (0).active,
+                    "the persistent slot is still reconfigured directly - Service holding the same "
+                    "identity must not be mistaken for the slot itself being unsafe to touch");
         }
     }
 };

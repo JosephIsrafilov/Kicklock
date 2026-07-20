@@ -226,6 +226,47 @@ public:
         return dynamicSnapshotPublisher.read();
     }
 
+    // ---- Phase 12: per-state edit transaction API (message thread only) ----
+    // Targets a single stableStateId within the currently-applied New
+    // DynamicStateMap. Never mutates by slot. Copies the applied map, runs the
+    // matching pure DynamicStateEditTransaction.h function, and on success
+    // publishes atomically through the same lock sequence and SPSC queue
+    // Apply already uses (see applyLatestLearnResult()); on failure the
+    // applied map is left completely untouched and a specific rejection
+    // reason is returned - never a silent no-op.
+    enum class DynamicStateEditKind : uint8_t
+    {
+        SetManualTrim = 0,
+        ResetManualTrim,
+        ResetToLearned,
+        ResetToGlobal,
+        SetEnabled,
+        SetBypassed,
+        PromoteToManual,
+        RemoveManualState,
+        CreateManualState
+    };
+
+    struct DynamicStateEditRequest
+    {
+        DynamicStateEditKind kind = DynamicStateEditKind::SetManualTrim;
+        uint64_t stableStateId = 0; // ignored for CreateManualState
+        DynamicManualTrim trim;
+        bool boolValue = false;    // SetEnabled/SetBypassed
+        DynamicManualStateCreationRequest creation;
+    };
+
+    struct DynamicStateEditOutcome
+    {
+        bool success = false;
+        DynamicStateEditRejectionReason reason = DynamicStateEditRejectionReason::None;
+        // Echoes request.stableStateId, or the newly-allocated id for
+        // CreateManualState on success.
+        uint64_t stableStateId = 0;
+    };
+
+    DynamicStateEditOutcome applyDynamicStateEdit (const DynamicStateEditRequest& request);
+
     // ---- Phase 12: Focus (Section 13) ----
     // Selects which stableStateId the focused-scope trace below tracks. Does
     // not change runtime selection/audio in any way - purely gates which
@@ -336,47 +377,6 @@ public:
     bool discardLatestLearnResult();
     bool clearLearnedDynamicData();
     bool clearNoteMap();
-
-    // ---- Phase 12: per-state edit transaction API (message thread only) ----
-    // Targets a single stableStateId within the currently-applied New
-    // DynamicStateMap. Never mutates by slot. Copies the applied map, runs the
-    // matching pure DynamicStateEditTransaction.h function, and on success
-    // publishes atomically through the same lock sequence and SPSC queue
-    // Apply already uses (see applyLatestLearnResult()); on failure the
-    // applied map is left completely untouched and a specific rejection
-    // reason is returned - never a silent no-op.
-    enum class DynamicStateEditKind : uint8_t
-    {
-        SetManualTrim = 0,
-        ResetManualTrim,
-        ResetToLearned,
-        ResetToGlobal,
-        SetEnabled,
-        SetBypassed,
-        PromoteToManual,
-        RemoveManualState,
-        CreateManualState
-    };
-
-    struct DynamicStateEditRequest
-    {
-        DynamicStateEditKind kind = DynamicStateEditKind::SetManualTrim;
-        uint64_t stableStateId = 0; // ignored for CreateManualState
-        DynamicManualTrim trim;
-        bool boolValue = false;    // SetEnabled/SetBypassed
-        DynamicManualStateCreationRequest creation;
-    };
-
-    struct DynamicStateEditOutcome
-    {
-        bool success = false;
-        DynamicStateEditRejectionReason reason = DynamicStateEditRejectionReason::None;
-        // Echoes request.stableStateId, or the newly-allocated id for
-        // CreateManualState on success.
-        uint64_t stableStateId = 0;
-    };
-
-    DynamicStateEditOutcome applyDynamicStateEdit (const DynamicStateEditRequest& request);
 
     // Message-thread read of a single State by id from the currently-applied
     // map, for the Inspector. Returns a default-constructed (unoccupied)
