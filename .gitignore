@@ -44,6 +44,12 @@ build_*/
 Builds/
 *.vst3/
 
+# Real-audio acceptance harness: generated fixture WAVs/manifest and per-run
+# results (metrics/CSV/WAV artifacts). Always produced under a build dir, but
+# ignored explicitly in case a test binary is ever run from elsewhere.
+audio-test-fixtures/
+audio-test-results/
+
 # AI Agents and Skills
 .agents/
 skills-lock.json

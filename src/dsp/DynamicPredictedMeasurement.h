@@ -272,10 +272,94 @@ inline DynamicPredictedMeasurementResult computeDynamicPredictedMeasurement (
         const bool hasCorrectionPackage = (state.origin == DynamicStateOrigin::Auto && state.hasLearnedPackage)
             || (state.origin == DynamicStateOrigin::Manual && state.hasManualBasePackage);
 
+        if (! hasCorrectionPackage && isRecognizedNoCorrection)
+        {
+            // The ONE place Global's real, shared package is rendered against
+            // this identity's actual retained material. A recognized identity
+            // with no State-level package always falls through to the Global
+            // branch at runtime (DynamicPackageDecision::GlobalRecognizedNoCorrection),
+            // so if Global itself is harmful for it, that harm must be caught
+            // and gated here rather than only logged: the harmful package
+            // must never reach accepted audible output for this identity.
+            const auto globalPackage = resolveDynamicPackage (out.map, 0, 1.0, sampleRate);
+            if (! globalPackage.valid)
+            {
+                summary.availability = DynamicMeasurementAvailability::Invalid;
+                summary.rejectionReason = DynamicCorrectionRejectionReason::InvalidPackage;
+                continue;
+            }
+
+            std::vector<float> beforeScores, afterScores, improvements;
+            beforeScores.reserve (windows.size());
+            afterScores.reserve (windows.size());
+            improvements.reserve (windows.size());
+            uint32_t rejected = 0;
+            for (const auto& w : windows)
+            {
+                const int n = (int) std::min (w.bass.size(), w.kick.size());
+                if (n <= 8) { ++rejected; continue; }
+                const auto scored = DynamicMeasurementScorer::score (
+                    w.bass.data(), w.kick.data(), n, sampleRate, globalPackage, scratch);
+                if (! scored.valid) { ++rejected; continue; }
+                beforeScores.push_back (scored.beforeScore);
+                afterScores.push_back (scored.afterScore);
+                improvements.push_back (scored.improvementPoints);
+            }
+
+            if (improvements.empty())
+            {
+                summary.availability = DynamicMeasurementAvailability::Invalid;
+                summary.rejectionReason = DynamicCorrectionRejectionReason::InvalidFingerprint;
+                continue;
+            }
+
+            const float medianImprovement = DynamicPredictedMeasurementDetail::medianOf (improvements);
+            const float worst = *std::min_element (improvements.begin(), improvements.end());
+            const int improvedCount = (int) std::count_if (improvements.begin(), improvements.end(),
+                [] (float v) { return v > 0.0f; });
+
+            summary.availability = (int) improvements.size() >= kMinPredictedWindows
+                ? DynamicMeasurementAvailability::Available : DynamicMeasurementAvailability::InsufficientMaterial;
+            summary.validWindowCount = (uint32_t) improvements.size();
+            summary.rejectedWindowCount = rejected;
+            summary.beforeScore = DynamicPredictedMeasurementDetail::medianOf (beforeScores);
+            summary.afterScore = DynamicPredictedMeasurementDetail::medianOf (afterScores);
+            summary.improvementPoints = medianImprovement;
+            summary.medianImprovementPoints = medianImprovement;
+            summary.lowerQuantileImprovementPoints = DynamicPredictedMeasurementDetail::lowerQuantileOf (improvements);
+            summary.worstImprovementPoints = worst;
+            summary.improvedWindowRatio = (float) improvedCount / (float) improvements.size();
+            summary.confidence = sanitizeUnit ((float) improvements.size() / (float) (improvements.size() + rejected + 1u));
+
+            // Dual gate: either the median or the single worst-case regression
+            // exceeding the bound is enough - never accepted on average alone.
+            const bool globalExcessivelyHarmful = summary.availability == DynamicMeasurementAvailability::Available
+                && (medianImprovement < -kMaxAcceptableWorstRegressionPoints
+                    || worst < -kMaxAcceptableWorstRegressionPoints);
+
+            if (globalExcessivelyHarmful)
+            {
+                state.correctionPolicy = DynamicCorrectionPolicy::NeutralSafe;
+                state.policyRejectionReason = DynamicPolicyRejectionReason::GlobalPackageExcessiveRegression;
+                summary.assessment = DynamicCorrectionAssessment::Regressed;
+                summary.rejectionReason = DynamicCorrectionRejectionReason::ExcessiveWorstRegression;
+            }
+            else
+            {
+                state.correctionPolicy = DynamicCorrectionPolicy::GlobalFallback;
+                state.policyRejectionReason = DynamicPolicyRejectionReason::None;
+                summary.assessment = DynamicCorrectionAssessment::RecognizedNoCorrection;
+                summary.rejectionReason = DynamicCorrectionRejectionReason::None;
+            }
+            continue;
+        }
+
         if (! hasCorrectionPackage)
         {
-            // Identity-only measurement: before/after are the same score, no
-            // fabricated improvement.
+            // Candidate (not yet correction-eligible at runtime): identity-only
+            // measurement, before/after are the same score, no fabricated
+            // improvement and no policy gating (Candidates are never routed
+            // through Global-vs-Neutral at runtime until promoted to Stable).
             std::vector<float> scores;
             scores.reserve (windows.size());
             uint32_t rejected = 0;
@@ -295,16 +379,13 @@ inline DynamicPredictedMeasurementResult computeDynamicPredictedMeasurement (
             }
             const float med = DynamicPredictedMeasurementDetail::medianOf (scores);
             summary.availability = DynamicMeasurementAvailability::Available;
-            summary.assessment = isCandidate ? DynamicCorrectionAssessment::CandidateOnly
-                                             : DynamicCorrectionAssessment::RecognizedNoCorrection;
-            summary.rejectionReason = isCandidate ? DynamicCorrectionRejectionReason::CandidateEvidence
-                                                  : DynamicCorrectionRejectionReason::None;
+            summary.assessment = DynamicCorrectionAssessment::CandidateOnly;
+            summary.rejectionReason = DynamicCorrectionRejectionReason::CandidateEvidence;
             summary.validWindowCount = (uint32_t) scores.size();
             summary.rejectedWindowCount = rejected;
             summary.beforeScore = med;
             summary.afterScore = med;
             summary.confidence = sanitizeUnit ((float) scores.size() / (float) (scores.size() + rejected));
-            (void) isRecognizedNoCorrection;
             continue;
         }
 
@@ -401,6 +482,8 @@ inline DynamicPredictedMeasurementResult computeDynamicPredictedMeasurement (
         {
             summary.assessment = DynamicCorrectionAssessment::PredictedImprovement;
             summary.rejectionReason = DynamicCorrectionRejectionReason::None;
+            state.correctionPolicy = DynamicCorrectionPolicy::LearnedState;
+            state.policyRejectionReason = DynamicPolicyRejectionReason::None;
         }
         else if (state.origin == DynamicStateOrigin::Manual)
         {
@@ -409,6 +492,9 @@ inline DynamicPredictedMeasurementResult computeDynamicPredictedMeasurement (
             summary.rejectionReason = medianImprovement < kMinimumMeaningfulGainPoints
                 ? DynamicCorrectionRejectionReason::NonBeneficial
                 : DynamicCorrectionRejectionReason::InconsistentAcrossHits;
+            // Manual packages are never silently withdrawn (see comment
+            // above), so this identity still carries its own package.
+            state.correctionPolicy = DynamicCorrectionPolicy::LearnedState;
         }
         else if (state.origin == DynamicStateOrigin::Auto)
         {
@@ -416,6 +502,8 @@ inline DynamicPredictedMeasurementResult computeDynamicPredictedMeasurement (
             // only the automatic correction is withdrawn.
             state.hasLearnedPackage = false;
             state.manualTrim = makeZeroDynamicManualTrim();
+            state.correctionPolicy = DynamicCorrectionPolicy::GlobalFallback;
+            state.policyRejectionReason = DynamicPolicyRejectionReason::None;
 
             summary.assessment = worst < -kMaxAcceptableWorstRegressionPoints
                 ? DynamicCorrectionAssessment::Unstable : DynamicCorrectionAssessment::RecognizedNoCorrection;

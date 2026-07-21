@@ -56,6 +56,9 @@ namespace
         roster.serviceBoundStableStateId = serviceBoundId;
         roster.serviceBindingValid = serviceBindingValid;
 
+        // Neutral is always hot in production, exactly like Global.
+        roster.neutral = makeBranchInfo (true, DynamicHotBranchKind::Neutral, 0, 0.0, true);
+
         juce::ignoreUnused (sampleRate);
         return roster;
     }
@@ -684,11 +687,13 @@ public:
 
             juce::AudioBuffer<float> globalLow (channels, numSamples);
             juce::AudioBuffer<float> serviceLow (channels, numSamples);
+            juce::AudioBuffer<float> neutralLow (channels, numSamples);
             juce::AudioBuffer<float> highBand (channels, numSamples);
             std::array<juce::AudioBuffer<float>, DynamicSelectorContract::kStateSlotCount> stateBuffers;
             for (auto& buf : stateBuffers)
                 buf.setSize (channels, numSamples);
 
+            neutralLow.clear();
             for (int ch = 0; ch < channels; ++ch)
             {
                 for (int i = 0; i < numSamples; ++i)
@@ -703,6 +708,7 @@ public:
             DynamicContinuityMixerInputs inputs;
             inputs.globalLow = &globalLow;
             inputs.serviceLow = &serviceLow;
+            inputs.neutralLow = &neutralLow;
             inputs.commonHigh = &highBand;
             for (int i = 0; i < DynamicSelectorContract::kStateSlotCount; ++i)
                 inputs.stateLow[(size_t) i] = &stateBuffers[(size_t) i];
@@ -925,6 +931,7 @@ public:
         const int numSamples = 8;
         juce::AudioBuffer<float> globalLow (1, numSamples);
         juce::AudioBuffer<float> serviceLow (1, numSamples);
+        juce::AudioBuffer<float> neutralLow (1, numSamples);
         juce::AudioBuffer<float> highBand (1, numSamples);
         std::array<juce::AudioBuffer<float>, DynamicSelectorContract::kStateSlotCount> stateBuffers;
         for (auto& buf : stateBuffers)
@@ -932,6 +939,7 @@ public:
 
         globalLow.clear();
         serviceLow.clear();
+        neutralLow.clear();
         highBand.clear();
         for (auto& buf : stateBuffers)
             buf.clear();
@@ -944,6 +952,7 @@ public:
         DynamicContinuityMixerInputs inputs;
         inputs.globalLow = &globalLow;
         inputs.serviceLow = &serviceLow;
+        inputs.neutralLow = &neutralLow;
         inputs.commonHigh = &highBand;
         for (int i = 0; i < DynamicSelectorContract::kStateSlotCount; ++i)
             inputs.stateLow[(size_t) i] = &stateBuffers[(size_t) i];
@@ -983,16 +992,18 @@ public:
         const int numSamples = 32;
         juce::AudioBuffer<float> globalLow (2, numSamples);
         juce::AudioBuffer<float> serviceLow (2, numSamples);
+        juce::AudioBuffer<float> neutralLow (2, numSamples);
         juce::AudioBuffer<float> highBand (2, numSamples);
         std::array<juce::AudioBuffer<float>, DynamicSelectorContract::kStateSlotCount> stateBuffers;
         for (auto& buf : stateBuffers)
             buf.setSize (2, numSamples);
-        globalLow.clear(); serviceLow.clear(); highBand.clear();
+        globalLow.clear(); serviceLow.clear(); neutralLow.clear(); highBand.clear();
         for (auto& buf : stateBuffers) buf.clear();
 
         DynamicContinuityMixerInputs inputs;
         inputs.globalLow = &globalLow;
         inputs.serviceLow = &serviceLow;
+        inputs.neutralLow = &neutralLow;
         inputs.commonHigh = &highBand;
         for (int i = 0; i < DynamicSelectorContract::kStateSlotCount; ++i)
             inputs.stateLow[(size_t) i] = &stateBuffers[(size_t) i];
@@ -1243,16 +1254,18 @@ public:
             const int numSamples = 5; // touches kMaxI64-2 .. kMaxI64+2: must be rejected wholesale.
             juce::AudioBuffer<float> globalLow (1, numSamples);
             juce::AudioBuffer<float> serviceLow (1, numSamples);
+            juce::AudioBuffer<float> neutralLow (1, numSamples);
             juce::AudioBuffer<float> highBand (1, numSamples);
             std::array<juce::AudioBuffer<float>, DynamicSelectorContract::kStateSlotCount> stateBuffers;
             for (auto& buf : stateBuffers)
                 buf.setSize (1, numSamples);
-            globalLow.clear(); serviceLow.clear(); highBand.clear();
+            globalLow.clear(); serviceLow.clear(); neutralLow.clear(); highBand.clear();
             for (auto& buf : stateBuffers) buf.clear();
 
             DynamicContinuityMixerInputs inputs;
             inputs.globalLow = &globalLow;
             inputs.serviceLow = &serviceLow;
+            inputs.neutralLow = &neutralLow;
             inputs.commonHigh = &highBand;
             for (int i = 0; i < DynamicSelectorContract::kStateSlotCount; ++i)
                 inputs.stateLow[(size_t) i] = &stateBuffers[(size_t) i];

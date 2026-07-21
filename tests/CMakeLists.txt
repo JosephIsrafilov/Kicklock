@@ -10,6 +10,7 @@ add_executable(KickLockDspTests
     DynamicProductionRuntimeTests.cpp
     DynamicLearnFormationTests.cpp
     DynamicStateMeasurementTests.cpp
+    DynamicNeutralSafeTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     DynamicRuntimeTests.cpp
     LearnCoreTests.cpp
@@ -32,6 +33,17 @@ add_executable(KickLockDspTests
     DynamicReleaseFixture.cpp
     DynamicReleaseGateTests.cpp
     DynamicPerformanceGateTests.cpp
+    DynamicStateEditTransactionTests.cpp
+    DynamicStateEditProcessorTests.cpp
+    DynamicStateEditAuditionTests.cpp
+    DynamicRecentUnknownEventsTests.cpp
+    DynamicManualTrimConversionTests.cpp
+    DynamicStateEditThrottleTests.cpp
+    DynamicStateInspectorHelpersTests.cpp
+    DynamicFocusAndRecentUnknownsTests.cpp
+    DynamicStateEditPersistenceTests.cpp
+    DynamicStateEditRevertTests.cpp
+    DynamicManualWorkflowE2ETests.cpp
     TestAllocationCounter.cpp
 )
 
@@ -83,12 +95,24 @@ add_executable(KickLockFastTests
     DynamicProductionRuntimeTests.cpp
     DynamicLearnFormationTests.cpp
     DynamicStateMeasurementTests.cpp
+    DynamicNeutralSafeTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     ProcessorTests.cpp
     UiHelperTests.cpp
     DynamicWorkspaceTests.cpp
     DynamicReleaseFixture.cpp
     DynamicReleaseGateTests.cpp
+    DynamicStateEditTransactionTests.cpp
+    DynamicStateEditProcessorTests.cpp
+    DynamicStateEditAuditionTests.cpp
+    DynamicRecentUnknownEventsTests.cpp
+    DynamicManualTrimConversionTests.cpp
+    DynamicStateEditThrottleTests.cpp
+    DynamicStateInspectorHelpersTests.cpp
+    DynamicFocusAndRecentUnknownsTests.cpp
+    DynamicStateEditPersistenceTests.cpp
+    DynamicStateEditRevertTests.cpp
+    DynamicManualWorkflowE2ETests.cpp
     TestAllocationCounter.cpp
 )
 
@@ -114,3 +138,54 @@ if(MSVC)
     target_link_options(KickLockFastTests PRIVATE "/STACK:8388608")
     target_compile_options(KickLockFastTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
 endif()
+
+# =============================================================================
+# Real-audio acceptance harness: three dedicated executables (Smoke / Acceptance
+# / Stress). These are deliberately NOT part of KickLockFastTests / the fast
+# checkpoint suite - the full sample-rate/block-size stress matrix in particular
+# is long-running. Each drives the actual production processor over WAV fixtures
+# through a real injected AudioPlayHead; nothing about the selector or DSP is
+# mocked.
+# =============================================================================
+
+set(KICKLOCK_AUDIO_HARNESS_SOURCES
+    DspTestMain.cpp
+    audio/AudioTestHarness.cpp
+    audio/AudioFixtureGenerators.cpp
+    DynamicReleaseFixture.cpp
+    TestAllocationCounter.cpp
+)
+
+function(kicklock_add_audio_test target)
+    add_executable(${target} ${KICKLOCK_AUDIO_HARNESS_SOURCES} ${ARGN})
+    target_include_directories(${target}
+        PRIVATE
+            .
+            ../src
+            ../src/dsp
+            ../src/util
+            ${CMAKE_BINARY_DIR}/KickLock_artefacts/JuceLibraryCode
+    )
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    set_target_properties(${target} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    target_link_libraries(${target}
+        PRIVATE
+            KickLock
+            juce::juce_core
+            juce::juce_dsp
+            juce::juce_audio_utils
+            juce::juce_audio_formats
+    )
+    if(MSVC)
+        target_link_options(${target} PRIVATE "/STACK:8388608")
+        target_compile_options(${target} PRIVATE "$<$<CONFIG:Debug>:/O2>")
+    endif()
+endfunction()
+
+kicklock_add_audio_test(KickLockAudioSmokeTests AudioSmokeTests.cpp)
+kicklock_add_audio_test(KickLockAudioAcceptanceTests AudioAcceptanceTests.cpp)
+kicklock_add_audio_test(KickLockAudioStressTests AudioStressTests.cpp)
+
+add_test(NAME KickLockAudioSmokeTests COMMAND KickLockAudioSmokeTests)
+add_test(NAME KickLockAudioAcceptanceTests COMMAND KickLockAudioAcceptanceTests)
+# Stress is intentionally not registered as a default ctest; run it explicitly.
