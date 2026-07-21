@@ -147,10 +147,18 @@ inline std::vector<FixtureManifestEntry> audioFixtureManifest()
         e.expectedEventCount = 8;
         e.expectedStateMin = 0; e.expectedStateMax = 4;
         e.expectedDiagnosis = ExpectedDiagnosis::HasStableStates;
-        // Extreme timbre: global-base phase rotation degrades it substantially
-        // (measured ~ -35% low-band). Safety + recognition validated; degradation
-        // recorded and logged, not gated. See MetricThresholds docs.
-        e.thresholds.gateDegradation = false;
+        // Extreme timbre: the shared Global package alone would degrade this
+        // identity substantially (measured ~ -35% low-band before the Safe
+        // Neutral Override fix). This is now a real product safety gate, not
+        // only a logged finding: the measurement gate detects the harm at
+        // Learn time and assigns DynamicCorrectionPolicy::NeutralSafe, so the
+        // harmful package never reaches audible output for it. See
+        // neutralSafeGateProtectsHarmfulIdentities() in AudioAcceptanceTests.cpp
+        // for the dedicated proof; this entry's own gate below now enforces
+        // the same bound every other gated fixture uses.
+        e.thresholds.gateDegradation = true;
+        e.thresholds.minMedianLowBandImprovementPercent = -8.0;
+        e.thresholds.maxWorstCaseDegradationPercent = 8.0;
         add (e);
     }
     {
@@ -169,9 +177,11 @@ inline std::vector<FixtureManifestEntry> audioFixtureManifest()
         e.expectedEventCount = 8;
         e.expectedStateMin = 0; e.expectedStateMax = 4;
         e.expectedDiagnosis = ExpectedDiagnosis::HasStableStates;
-        // Extreme detuned/vibrato timbre: same recorded global-base degradation
-        // finding as distorted_bass. Safety-only gate; degradation logged.
-        e.thresholds.gateDegradation = false;
+        // Extreme detuned/vibrato timbre: same Safe Neutral Override product
+        // fix as distorted_bass above - see that entry's comment.
+        e.thresholds.gateDegradation = true;
+        e.thresholds.minMedianLowBandImprovementPercent = -8.0;
+        e.thresholds.maxWorstCaseDegradationPercent = 8.0;
         add (e);
     }
     {
@@ -217,6 +227,21 @@ inline std::vector<FixtureManifestEntry> audioFixtureManifest()
         // real Learn, so needsRealLearn is false.
         e.needsRealLearn = false;
         e.thresholds.gateDegradation = false;
+        add (e);
+    }
+    {
+        FixtureManifestEntry e;
+        e.name = "genuine_corrective_learn";
+        e.expectedEventCount = 6;
+        // Must independently form at least one non-Global-only (hasLearnedPackage)
+        // State - not just be recognized. See AudioFixtureGenerators.cpp's
+        // genGenuineCorrective() for how this is calibrated directly against
+        // FixedTimingRotatorSearch::kMinGainPoints (3.0).
+        e.expectedStateMin = 1; e.expectedStateMax = 4;
+        e.expectedDiagnosis = ExpectedDiagnosis::HasStableStates;
+        e.thresholds.gateDegradation = true;
+        e.thresholds.minMedianLowBandImprovementPercent = 3.0;
+        e.thresholds.maxWorstCaseDegradationPercent = 10.0;
         add (e);
     }
     {

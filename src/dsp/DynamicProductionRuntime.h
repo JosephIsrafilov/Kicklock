@@ -408,6 +408,14 @@ private:
             || ! engine.configureFromPackage (DynamicHotBranchKind::Global, -1, globalPackage))
             return false;
 
+        // Neutral is always hot, exactly like Global: configured from the
+        // same shared crossover/interpolation fields every time Global is
+        // (re)configured, with the per-identity delay/allpass stripped by
+        // configureNeutral() itself. Identity-agnostic, so it never needs a
+        // per-state resolution and is never cleared.
+        if (! engine.configureFromPackage (DynamicHotBranchKind::Neutral, -1, globalPackage))
+            return false;
+
         for (int slot = 0; slot < DynamicHotBranchContract::kStateSlots; ++slot)
         {
             const DynamicState& state = activeMap.states[(size_t) slot];
@@ -743,6 +751,7 @@ private:
         for (int slot = 0; slot < DynamicSelectorContract::kStateSlotCount; ++slot)
             inputs.stateLow[(size_t) slot] = &engine.getStateLowOutput (slot);
         inputs.serviceLow = &engine.getServiceLowOutput();
+        inputs.neutralLow = &engine.getNeutralLowOutput();
         inputs.commonHigh = &engine.getHighOutput();
 
         if (! mixer.renderBlock (scheduler, roster, inputs, n, chunkOutput))
@@ -847,6 +856,7 @@ private:
         roster.service = engine.getServiceInfo();
         roster.serviceBoundStableStateId = serviceBoundStableStateId;
         roster.serviceBindingValid = serviceBindingValid;
+        roster.neutral = engine.getNeutralInfo();
     }
 
     void updateSelectionDiagnostics() noexcept

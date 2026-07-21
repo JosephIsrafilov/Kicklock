@@ -228,6 +228,45 @@ inline constexpr bool isValidDynamicMapDiagnostic (DynamicMapDiagnostic diagnost
         || diagnostic == DynamicMapDiagnostic::NoConfidentAutoFix;
 }
 
+// Per-identity persisted correction policy (product safety contract).
+// GlobalFallback is the historical default: the identity is recognized but has
+// no State-level package, so the shared Global package (delay + optional
+// allpass) is applied to it, exactly as before this policy field existed.
+// LearnedState means a real State package (learned or manual) is applied.
+// NeutralSafe is assigned only when the measurement gate proves the Global
+// package itself causes excessive degradation for a recognized, no-correction
+// identity: that identity is routed to a shared, always-hot, zero-delay,
+// no-allpass Neutral branch instead of Global, so the harmful package never
+// reaches audible output for it.
+enum class DynamicCorrectionPolicy : uint8_t
+{
+    LearnedState = 0,
+    GlobalFallback = 1,
+    NeutralSafe = 2
+};
+
+inline constexpr bool isValidDynamicCorrectionPolicy (DynamicCorrectionPolicy policy) noexcept
+{
+    return policy == DynamicCorrectionPolicy::LearnedState
+        || policy == DynamicCorrectionPolicy::GlobalFallback
+        || policy == DynamicCorrectionPolicy::NeutralSafe;
+}
+
+// Precise, persisted reason a policy other than the identity's natural choice
+// was assigned. Currently only populated when NeutralSafe was forced by the
+// measurement gate; None otherwise.
+enum class DynamicPolicyRejectionReason : uint8_t
+{
+    None = 0,
+    GlobalPackageExcessiveRegression = 1
+};
+
+inline constexpr bool isValidDynamicPolicyRejectionReason (DynamicPolicyRejectionReason reason) noexcept
+{
+    return reason == DynamicPolicyRejectionReason::None
+        || reason == DynamicPolicyRejectionReason::GlobalPackageExcessiveRegression;
+}
+
 struct DynamicState
 {
     bool occupied = false;
@@ -249,6 +288,8 @@ struct DynamicState
     int likelyMidi = 0;
     bool hasLikelyPitchHz = false;
     float likelyPitchHz = 0.0f;
+    DynamicCorrectionPolicy correctionPolicy = DynamicCorrectionPolicy::GlobalFallback;
+    DynamicPolicyRejectionReason policyRejectionReason = DynamicPolicyRejectionReason::None;
 };
 
 inline bool getEffectiveStoredDynamicStateDelayDeltaMs (const DynamicState& state,
@@ -305,6 +346,21 @@ inline bool isValidDynamicState (const DynamicState& state) noexcept
         || ! isInRange (state.repeatability, 0.0f, 1.0f)
         || ! isInRange (state.ambiguity, 0.0f, 1.0f)
         || (! state.enabled && state.bypassed))
+        return false;
+
+    if (! isValidDynamicCorrectionPolicy (state.correctionPolicy)
+        || ! isValidDynamicPolicyRejectionReason (state.policyRejectionReason))
+        return false;
+    // NeutralSafe exists only to shield a no-correction identity from a
+    // harmful Global package; a State that already carries its own package
+    // should use it (LearnedState), never be routed around it as Neutral.
+    if (state.correctionPolicy == DynamicCorrectionPolicy::NeutralSafe && state.hasLearnedPackage)
+        return false;
+    if (state.correctionPolicy != DynamicCorrectionPolicy::NeutralSafe
+        && state.policyRejectionReason != DynamicPolicyRejectionReason::None)
+        return false;
+    if (state.correctionPolicy == DynamicCorrectionPolicy::LearnedState
+        && ! state.hasLearnedPackage && ! state.hasManualBasePackage)
         return false;
 
     if (state.hasLearnedPackage && ! isValidDynamicZonePackage (state.learnedPackage))

@@ -66,6 +66,8 @@ namespace DynamicStateMapKeys
     inline constexpr const char* likelyMidi = "likelyMidi";
     inline constexpr const char* hasLikelyPitchHz = "hasLikelyPitchHz";
     inline constexpr const char* likelyPitchHz = "likelyPitchHz";
+    inline constexpr const char* correctionPolicy = "correctionPolicy";
+    inline constexpr const char* policyRejectionReason = "policyRejectionReason";
 }
 
 namespace DynamicStateSerializationDetail
@@ -467,6 +469,8 @@ inline juce::ValueTree dynamicStateMapToValueTree (const DynamicStateMap& map)
         child.setProperty (id (DynamicStateMapKeys::hasLikelyPitchHz), sourceState.hasLikelyPitchHz, nullptr);
         if (sourceState.hasLikelyPitchHz)
             child.setProperty (id (DynamicStateMapKeys::likelyPitchHz), sourceState.likelyPitchHz, nullptr);
+        child.setProperty (id (DynamicStateMapKeys::correctionPolicy), (int) sourceState.correctionPolicy, nullptr);
+        child.setProperty (id (DynamicStateMapKeys::policyRejectionReason), (int) sourceState.policyRejectionReason, nullptr);
         valueTree.appendChild (child, nullptr);
         writtenStates[(size_t) sourceIndex] = true;
     }
@@ -587,6 +591,29 @@ inline DynamicStateMap dynamicStateMapFromValueTree (const juce::ValueTree& tree
             if (parsed.hasLikelyPitchHz
                 && ! readFiniteFloat (child, DynamicStateMapKeys::likelyPitchHz, parsed.likelyPitchHz))
                 return makeEmptyDynamicStateMap();
+
+            // Optional fields (absent in presets saved before this policy
+            // existed): default to the historical always-Global behavior
+            // rather than failing the whole map.
+            int correctionPolicyValue = (int) DynamicCorrectionPolicy::GlobalFallback;
+            if (child.hasProperty (id (DynamicStateMapKeys::correctionPolicy)))
+            {
+                if (! readInt (child, DynamicStateMapKeys::correctionPolicy, correctionPolicyValue)
+                    || correctionPolicyValue < (int) DynamicCorrectionPolicy::LearnedState
+                    || correctionPolicyValue > (int) DynamicCorrectionPolicy::NeutralSafe)
+                    return makeEmptyDynamicStateMap();
+            }
+            parsed.correctionPolicy = (DynamicCorrectionPolicy) correctionPolicyValue;
+
+            int policyRejectionReasonValue = (int) DynamicPolicyRejectionReason::None;
+            if (child.hasProperty (id (DynamicStateMapKeys::policyRejectionReason)))
+            {
+                if (! readInt (child, DynamicStateMapKeys::policyRejectionReason, policyRejectionReasonValue)
+                    || policyRejectionReasonValue < (int) DynamicPolicyRejectionReason::None
+                    || policyRejectionReasonValue > (int) DynamicPolicyRejectionReason::GlobalPackageExcessiveRegression)
+                    return makeEmptyDynamicStateMap();
+            }
+            parsed.policyRejectionReason = (DynamicPolicyRejectionReason) policyRejectionReasonValue;
 
             map.states[(size_t) (stateCount - 1)] = parsed;
         }

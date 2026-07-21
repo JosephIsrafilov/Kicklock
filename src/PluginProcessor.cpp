@@ -3339,6 +3339,8 @@ void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresen
     card.likelyMidi = state.hasLikelyMidi ? state.likelyMidi : -1;
     card.hasLikelyPitchHz = state.hasLikelyPitchHz;
     card.likelyPitchHz = state.likelyPitchHz;
+    card.correctionPolicy = state.correctionPolicy;
+    card.policyRejectionReason = state.policyRejectionReason;
 
     card.selected = selectorDiag.selectedSemanticStateId == state.stableStateId;
     card.active = snapshot.activeSemanticStateId == state.stableStateId;

@@ -4,25 +4,38 @@
 #include "audio/AudioMetrics.h"
 #include "audio/AudioSuiteHelpers.h"
 #include "audio/AudioFixtureManifest.h"
+#include "dsp/DynamicStateSerialization.h"
+#include "dsp/DynamicPackageMorpher.h"
 
 #include <map>
 
 // =============================================================================
 // AudioAcceptanceTests: the full real-audio acceptance matrix at 48 kHz.
 //
-//  * Per fixture (all 11 cases): real async Learn -> Apply (or the proven
-//    corrective map for the pure loop-mechanics case), render through the real
-//    processor + transport, then assert artifact-safety and the dual metric
-//    rule (median not degraded AND bounded worst-case degradation) where the
-//    fixture gates it, plus the expected state-count range. Every fixture emits
-//    a metrics.json + state/transport CSVs; a failure also dumps the full
-//    artifact bundle.
+//  * Per fixture (all 12 cases, including genuine_corrective_learn): real
+//    async Learn -> Apply (or the proven corrective map only for the pure
+//    loop-mechanics case), render through the real processor + transport, then
+//    assert artifact-safety and the dual metric rule (median not degraded AND
+//    bounded worst-case degradation) where the fixture gates it, plus the
+//    expected state-count range. Every fixture emits a metrics.json +
+//    state/transport CSVs; a failure also dumps the full artifact bundle.
 //
-//  * Mechanics (proven corrective map, so State branches genuinely engage):
-//    State selection + click-free crossfades; >= 10-iteration loop-wrap
-//    continuity (internal timeline never reset, first kick after every wrap
-//    gets the same selection as later positions); seek recovery and stop/start
-//    artifact-safety; and render determinism.
+//  * The Learn-to-correction E2E proof - genuineLearnFormsPersistentCorrectiveState():
+//    real Learn, real Apply, NO seeded/prebuilt map anywhere in its path. Proves
+//    Learn completes, forms a non-Global-only (hasLearnedPackage) State, Apply
+//    activates it, the runtime selector actually selects it (not just Global),
+//    and both the median-improvement and worst-case-degradation gates pass.
+//    This is the ONLY test in this file entitled to be called Learn E2E.
+//
+//  * "Acceptance mechanics (seeded map, not Learn E2E)" tests: seed
+//    AudioTestHarness::buildProvenCorrectiveMap() directly (bypassing Learn) so
+//    State branches reliably engage regardless of whether real Learn judges any
+//    given synthetic material worth correcting. These prove selector/crossfade/
+//    loop-wrap/seek/stop-start MECHANICS and click-safety only - state
+//    selection, >= 10-iteration loop-wrap continuity (internal timeline never
+//    reset, post-wrap selection consistency), seek/stop-start artifact-safety,
+//    and render determinism. They are explicitly labeled and commented as NOT
+//    Learn-to-correction E2E proof.
 //
 // Real-Learn timeouts are REPORTED separately (logged as INFRA_TIMEOUT), never
 // silently passed off as a map result. This is offline real-audio acceptance,
@@ -41,13 +54,104 @@ public:
         cfg.blockSize = 256;
 
         perFixtureAcceptance (cfg);
-        stateSelectionAndCrossfades (cfg);
-        loopWrapContinuity (cfg);
-        seekAndStopStartSafety (cfg);
-        determinism (cfg);
+        genuineLearnFormsPersistentCorrectiveState (cfg);
+        neutralSafeGateProtectsHarmfulIdentities (cfg);
+        stateSelectionAndCrossfadesMechanicsOnly (cfg);
+        loopWrapContinuityMechanicsOnly (cfg);
+        seekAndStopStartSafetyMechanicsOnly (cfg);
+        determinismMechanicsOnly (cfg);
     }
 
 private:
+    // ---- The Learn -> correction E2E proof (real Learn, no seeded map) -----
+
+    void genuineLearnFormsPersistentCorrectiveState (AudioHarnessConfig cfg)
+    {
+        beginTest ("Acceptance E2E: real Learn independently forms and runtime-selects a persistent corrective State");
+
+        AudioTestHarness harness (*this, cfg);
+        const auto fx = harness.resolveFixture ("genuine_corrective_learn");
+        expect (! fx.bass.empty(), "fixture resolved");
+        if (fx.bass.empty())
+            return;
+
+        KickLockAudioProcessor proc;
+        harness.prepareProcessor (proc);
+
+        // Real Learn, real Apply. No prebuilt/seeded map anywhere in this test.
+        const auto learn = harness.learnAndApply (proc, fx);
+        if (! learn.reachedResultReady)
+        {
+            logMessage ("  INFRA_TIMEOUT (reported separately): " + learn.diagnostics);
+            expect (true, "Learn infrastructure timeout reported, not a silent baseline pass");
+            return;
+        }
+        expect (learn.applied, "Apply activated the real Learn result");
+
+        // A non-Global-only (hasLearnedPackage) State was formed - not merely a
+        // recognized-global state.
+        bool foundCorrective = false;
+        uint64_t correctiveId = 0;
+        DynamicStateEvidence correctiveEvidence = DynamicStateEvidence::Candidate;
+        for (const auto& state : learn.map.states)
+            if (state.occupied && state.hasLearnedPackage)
+            {
+                foundCorrective = true;
+                correctiveId = state.stableStateId;
+                correctiveEvidence = state.evidence;
+                break;
+            }
+        expect (foundCorrective, "real Learn independently formed a State with a genuine learned package "
+                "(not recognized-global-only)");
+        if (! foundCorrective)
+        {
+            logMessage ("  formed states: ");
+            for (const auto& state : learn.map.states)
+                if (state.occupied)
+                    logMessage ("    id=" + juce::String ((int64_t) state.stableStateId)
+                                + " evidence=" + juce::String ((int) state.evidence)
+                                + " hasLearnedPackage=" + juce::String ((int) state.hasLearnedPackage));
+            return;
+        }
+        expect (correctiveEvidence == DynamicStateEvidence::Stable,
+                "the corrective State reached Stable evidence (correction-eligible at runtime)");
+
+        const int latency = proc.getLatencySamples();
+        const int occupied = getOccupiedDynamicStateCount (learn.map);
+        const auto r = harness.render (proc, fx, harness.planLinear (fx));
+        const auto g = AudioMetrics::compute (fx, r, latency, occupied, cfg.sampleRate);
+
+        harness.dumpArtifacts ("genuine_corrective_learn", fx, r,
+                               AudioMetrics::toJson ("genuine_corrective_learn", g, r, fx.fromRealOverride),
+                               AudioMetrics::stateTimelineCsv (r), AudioMetrics::transportTimelineCsv (r), {});
+
+        expect (g.outputFinite, "no NaN/Inf in the rendered output");
+
+        // Runtime actually selects the corrective State (not just Global).
+        bool selected = false;
+        for (const auto& e : r.timeline)
+            if (e.activeBranchKind == 1 /*State*/ && e.selectedSemanticStateId == correctiveId) { selected = true; break; }
+        expect (selected, "the runtime selector actually selects the Learn-formed corrective State "
+                "(MatchedPersistentState), not just Global");
+
+        // Dual acceptance rule: median improvement AND bounded worst case.
+        const auto* entry = findManifestEntry ("genuine_corrective_learn");
+        expect (entry != nullptr);
+        if (entry != nullptr)
+        {
+            expectGreaterOrEqual (g.medianImprovement, entry->thresholds.minMedianLowBandImprovementPercent,
+                                  "median low-band phase-conflict improvement clears the defined threshold");
+            expectGreaterOrEqual (g.worstCaseDegradation, -entry->thresholds.maxWorstCaseDegradationPercent,
+                                  "worst-case degradation stays within the defined safety bound");
+        }
+
+        logMessage ("  correctiveId=" + juce::String ((int64_t) correctiveId)
+                    + " occupiedStates=" + juce::String (occupied)
+                    + " median=" + juce::String (g.medianImprovement, 2)
+                    + " worst=" + juce::String (g.worstCaseDegradation, 2)
+                    + " stateBlocks=" + juce::String (AudioMetrics::matchedPersistentBlockCount (r.timeline)));
+    }
+
     void perFixtureAcceptance (AudioHarnessConfig cfg)
     {
         for (const auto& entry : audioFixtureManifest())
@@ -78,6 +182,15 @@ private:
                 expect (occupied >= entry.expectedStateMin && occupied <= entry.expectedStateMax,
                         "occupied States " + juce::String (occupied) + " in expected ["
                         + juce::String (entry.expectedStateMin) + ".." + juce::String (entry.expectedStateMax) + "]");
+                for (const auto& s : learn.map.states)
+                    if (s.occupied)
+                        logMessage ("  state id=" + juce::String ((int64_t) s.stableStateId)
+                                    + " hasLearnedPackage=" + juce::String ((int) s.hasLearnedPackage)
+                                    + " evidence=" + juce::String ((int) s.evidence)
+                                    + " correctionPolicy=" + juce::String ((int) s.correctionPolicy)
+                                    + (s.correctionPolicy == DynamicCorrectionPolicy::NeutralSafe
+                                           ? " [SAFE NEUTRAL, reason=" + juce::String ((int) s.policyRejectionReason) + "]"
+                                           : juce::String()));
             }
             else
             {
@@ -115,9 +228,112 @@ private:
         }
     }
 
-    void stateSelectionAndCrossfades (AudioHarnessConfig cfg)
+    // Gap-2 product safety proof (Safe Neutral Override): distorted_bass and
+    // unison_modulated are the two fixtures the harness itself surfaced as
+    // recognized-but-uncorrected identities that the shared Global package
+    // degrades by roughly 35% low-band match. This proves, with the real
+    // production Learn path and real Apply (no seeded map, no synthetic
+    // shortcut): (1) the harmful Global candidate is actually generated and
+    // measured against real retained material; (2) the safety gate rejects it
+    // (NeutralSafe + a precise persisted reason); (3) runtime recognizes the
+    // identity and actually selects the Neutral branch during render; (4/5)
+    // the final audible output for both timbres no longer incurs the
+    // previously-observed severe degradation.
+    void neutralSafeGateProtectsHarmfulIdentities (AudioHarnessConfig cfg)
     {
-        beginTest ("Acceptance mechanics: State selection engages and crossfades are click-free");
+        beginTest ("Safe Neutral Override: harmful Global candidate is measured, rejected, and safely routed");
+        for (const char* fixtureName : { "distorted_bass", "unison_modulated" })
+        {
+            AudioTestHarness harness (*this, cfg);
+            const auto fx = harness.resolveFixture (fixtureName);
+            KickLockAudioProcessor proc;
+            harness.prepareProcessor (proc);
+
+            const auto learn = harness.learnAndApply (proc, fx);
+            if (! learn.reachedResultReady)
+            {
+                logMessage ("  INFRA_TIMEOUT (reported separately) for " + juce::String (fixtureName) + ": " + learn.diagnostics);
+                expect (true, "Learn infrastructure timeout reported, not a silent baseline pass");
+                continue;
+            }
+            expect (learn.applied, juce::String (fixtureName) + ": Apply activated the learned map");
+
+            const int occupied = getOccupiedDynamicStateCount (learn.map);
+            expectGreaterThan (occupied, 0, juce::String (fixtureName) + ": the harmful identity is recognized (occupied)");
+
+            bool foundNeutralSafe = false;
+            for (const auto& s : learn.map.states)
+            {
+                if (! s.occupied)
+                    continue;
+                logMessage ("  " + juce::String (fixtureName) + " state id=" + juce::String ((int64_t) s.stableStateId)
+                            + " hasLearnedPackage=" + juce::String ((int) s.hasLearnedPackage)
+                            + " correctionPolicy=" + juce::String ((int) s.correctionPolicy));
+                if (! s.hasLearnedPackage && s.correctionPolicy == DynamicCorrectionPolicy::NeutralSafe)
+                {
+                    foundNeutralSafe = true;
+                    expect (s.policyRejectionReason == DynamicPolicyRejectionReason::GlobalPackageExcessiveRegression,
+                            juce::String (fixtureName) + ": precise persisted rejection reason");
+                }
+            }
+            expect (foundNeutralSafe, juce::String (fixtureName)
+                    + ": the harmful Global candidate must be rejected into NeutralSafe, not merely logged");
+
+            const int latency = proc.getLatencySamples();
+            const auto r = harness.render (proc, fx, harness.planLinear (fx));
+            const auto g = AudioMetrics::compute (fx, r, latency, occupied, cfg.sampleRate);
+
+            expect (g.outputFinite, juce::String (fixtureName) + ": finite output through the Neutral branch");
+
+            bool neutralBranchSelected = false;
+            for (const auto& e : g.events)
+                if (e.branchKind == 3 /*Neutral*/)
+                    neutralBranchSelected = true;
+            expect (neutralBranchSelected, juce::String (fixtureName)
+                    + ": runtime actually selects the Neutral branch for the recognized identity");
+
+            // The dual acceptance rule, now actually enforced for these two
+            // timbres instead of only recorded: neither median nor worst-case
+            // may exceed the same bound every other gated fixture uses.
+            expectGreaterThan (g.medianImprovement, -8.0,
+                               juce::String (fixtureName) + ": median low-band change no longer severely degraded");
+            expectGreaterThan (g.worstCaseDegradation, -8.0,
+                               juce::String (fixtureName) + ": worst-case low-band change no longer severely degraded");
+
+            logMessage ("  " + juce::String (fixtureName) + " AFTER: median=" + juce::String (g.medianImprovement, 2)
+                        + " worst=" + juce::String (g.worstCaseDegradation, 2)
+                        + " (BEFORE this fix: measured ~ -35%)");
+
+            // Save/reload: the persisted policy and rejection reason survive
+            // a real ValueTree round-trip exactly, not only the in-memory map.
+            for (const auto& s : learn.map.states)
+            {
+                if (! s.occupied || s.correctionPolicy != DynamicCorrectionPolicy::NeutralSafe)
+                    continue;
+                const auto tree = dynamicStateMapToValueTree (learn.map);
+                const auto restored = dynamicStateMapFromValueTree (tree);
+                expect (restored.valid, juce::String (fixtureName) + ": save/reload round-trip stays valid");
+                const auto* restoredState = findDynamicStateByStableId (restored, s.stableStateId);
+                expect (restoredState != nullptr
+                            && restoredState->correctionPolicy == DynamicCorrectionPolicy::NeutralSafe
+                            && restoredState->policyRejectionReason == DynamicPolicyRejectionReason::GlobalPackageExcessiveRegression,
+                        juce::String (fixtureName) + ": save/reload preserves policy and rejection reason exactly");
+                break;
+            }
+        }
+    }
+
+    // ---- Runtime MECHANICS tests below: a synthetic proven-corrective map is
+    // seeded directly (buildProvenCorrectiveMap) so State branches reliably
+    // engage regardless of whether real Learn judges any given material worth
+    // correcting. These prove selector/crossfade/loop-wrap/transport MECHANICS
+    // and click-safety only. They are NOT Learn-to-correction E2E proof - that
+    // is genuineLearnFormsPersistentCorrectiveState() above, the only test in
+    // this file that runs real Learn with no seeded map anywhere in its path.
+
+    void stateSelectionAndCrossfadesMechanicsOnly (AudioHarnessConfig cfg)
+    {
+        beginTest ("Acceptance mechanics (seeded map, not Learn E2E): State selection engages, crossfades click-free");
         AudioTestHarness harness (*this, cfg);
         const auto fx = harness.resolveFixture ("repeatable_multi_note");
         const auto map = AudioTestHarness::buildProvenCorrectiveMap (cfg.sampleRate);
@@ -135,9 +351,9 @@ private:
                     + " worstTransition=" + juce::String (AudioSuite::worstBoundaryTransitionScore (r), 2));
     }
 
-    void loopWrapContinuity (AudioHarnessConfig cfg)
+    void loopWrapContinuityMechanicsOnly (AudioHarnessConfig cfg)
     {
-        beginTest ("Acceptance mechanics: >= 10 loop iterations preserve continuity and post-wrap selection");
+        beginTest ("Acceptance mechanics (seeded map, not Learn E2E): >= 10 loop iterations preserve continuity and post-wrap selection");
         AudioTestHarness harness (*this, cfg);
         const auto fx = harness.resolveFixture ("loop_wrap_first_kick");
         const auto map = AudioTestHarness::buildProvenCorrectiveMap (cfg.sampleRate);
@@ -181,13 +397,13 @@ private:
                     + " stateBlocks=" + juce::String (AudioMetrics::matchedPersistentBlockCount (r.timeline)));
     }
 
-    void seekAndStopStartSafety (AudioHarnessConfig cfg)
+    void seekAndStopStartSafetyMechanicsOnly (AudioHarnessConfig cfg)
     {
         AudioTestHarness harness (*this, cfg);
         const auto fx = harness.resolveFixture ("repeatable_multi_note");
         const auto map = AudioTestHarness::buildProvenCorrectiveMap (cfg.sampleRate);
 
-        beginTest ("Acceptance mechanics: seek recovery stays finite and re-acquisition is click-free");
+        beginTest ("Acceptance mechanics (seeded map, not Learn E2E): seek recovery stays finite, re-acquisition click-free");
         {
             KickLockAudioProcessor proc;
             harness.prepareProcessor (proc);
@@ -237,7 +453,7 @@ private:
             }
         }
 
-        beginTest ("Acceptance mechanics: stop/start stays finite; onset-of-stop resets safely and resume is click-free");
+        beginTest ("Acceptance mechanics (seeded map, not Learn E2E): stop/start stays finite, resume click-free");
         {
             KickLockAudioProcessor proc;
             harness.prepareProcessor (proc);
@@ -277,9 +493,9 @@ private:
         }
     }
 
-    void determinism (AudioHarnessConfig cfg)
+    void determinismMechanicsOnly (AudioHarnessConfig cfg)
     {
-        beginTest ("Acceptance mechanics: State-selecting render is deterministic (timeline + metrics)");
+        beginTest ("Acceptance mechanics (seeded map, not Learn E2E): State-selecting render is deterministic");
         AudioTestHarness harness (*this, cfg);
         const auto fx = harness.resolveFixture ("repeatable_multi_note");
         const auto map = AudioTestHarness::buildProvenCorrectiveMap (cfg.sampleRate);

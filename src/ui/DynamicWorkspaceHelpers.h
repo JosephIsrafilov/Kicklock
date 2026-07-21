@@ -36,8 +36,32 @@ inline juce::String dynamicBranchLabel (DynamicSelectorBranchKind branch)
         case DynamicSelectorBranchKind::Global:  return "GLOBAL";
         case DynamicSelectorBranchKind::State:   return "STATE";
         case DynamicSelectorBranchKind::Service: return "SERVICE";
+        case DynamicSelectorBranchKind::Neutral: return "SAFE NEUTRAL";
     }
     return "GLOBAL";
+}
+
+inline juce::String dynamicCorrectionPolicyLabel (DynamicCorrectionPolicy policy)
+{
+    switch (policy)
+    {
+        case DynamicCorrectionPolicy::LearnedState:   return "LEARNED";
+        case DynamicCorrectionPolicy::GlobalFallback: return "GLOBAL FALLBACK";
+        case DynamicCorrectionPolicy::NeutralSafe:    return "SAFE NEUTRAL";
+    }
+    return "GLOBAL FALLBACK";
+}
+
+inline juce::String dynamicPolicyRejectionReasonLabel (DynamicPolicyRejectionReason reason)
+{
+    switch (reason)
+    {
+        case DynamicPolicyRejectionReason::None:
+            return "";
+        case DynamicPolicyRejectionReason::GlobalPackageExcessiveRegression:
+            return "Global package caused excessive degradation for this identity";
+    }
+    return "";
 }
 
 inline juce::String dynamicStateOriginLabel (DynamicStateOrigin origin)

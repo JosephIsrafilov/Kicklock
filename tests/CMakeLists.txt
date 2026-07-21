@@ -10,6 +10,7 @@ add_executable(KickLockDspTests
     DynamicProductionRuntimeTests.cpp
     DynamicLearnFormationTests.cpp
     DynamicStateMeasurementTests.cpp
+    DynamicNeutralSafeTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     DynamicRuntimeTests.cpp
     LearnCoreTests.cpp
@@ -94,6 +95,7 @@ add_executable(KickLockFastTests
     DynamicProductionRuntimeTests.cpp
     DynamicLearnFormationTests.cpp
     DynamicStateMeasurementTests.cpp
+    DynamicNeutralSafeTests.cpp
     LegacyDynamicCompatibilityTests.cpp
     ProcessorTests.cpp
     UiHelperTests.cpp
@@ -154,8 +156,8 @@ set(KICKLOCK_AUDIO_HARNESS_SOURCES
     TestAllocationCounter.cpp
 )
 
-function(kicklock_add_audio_test target sourceFile)
-    add_executable(${target} ${KICKLOCK_AUDIO_HARNESS_SOURCES} ${sourceFile})
+function(kicklock_add_audio_test target)
+    add_executable(${target} ${KICKLOCK_AUDIO_HARNESS_SOURCES} ${ARGN})
     target_include_directories(${target}
         PRIVATE
             .

@@ -69,7 +69,9 @@ namespace
             && measurementsEqual (left.predicted, right.predicted)
             && measurementsEqual (left.verified, right.verified)
             && left.assessment == right.assessment
-            && left.rejectionReason == right.rejectionReason;
+            && left.rejectionReason == right.rejectionReason
+            && left.correctionPolicy == right.correctionPolicy
+            && left.policyRejectionReason == right.policyRejectionReason;
     }
 }
 
@@ -185,6 +187,12 @@ public:
         auto assessment = dynamicCorrectionAssessmentLabel (card.assessment);
         const auto reason = dynamicCorrectionRejectionLabel (card.rejectionReason);
         if (reason.isNotEmpty()) assessment << " - " << reason;
+        if (card.correctionPolicy == DynamicCorrectionPolicy::NeutralSafe)
+        {
+            assessment << "  [" << dynamicCorrectionPolicyLabel (card.correctionPolicy) << "]";
+            const auto policyReason = dynamicPolicyRejectionReasonLabel (card.policyRejectionReason);
+            if (policyReason.isNotEmpty()) assessment << ": " << policyReason;
+        }
         g.drawText (assessment, footer, juce::Justification::centredLeft, true);
     }
 

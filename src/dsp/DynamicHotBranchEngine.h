@@ -38,7 +38,13 @@ enum class DynamicHotBranchKind : uint8_t
 {
     Global = 0,
     State,
-    Service
+    Service,
+    // Shared, always-hot, zero-delay, no-allpass branch: identities whose
+    // Global fallback was proven harmful by the measurement gate are routed
+    // here instead of Global. Configured once (like Global), never bound to a
+    // per-identity claim/release cycle (unlike Service), so it is warm within
+    // the same startup window as Global and stays warm indefinitely.
+    Neutral
 };
 
 struct DynamicHotBranchConfig
@@ -317,6 +323,7 @@ public:
         highScratch.setSize (numChannels, maxBlock, false, true, true);
         globalLowOut.setSize (numChannels, maxBlock, false, true, true);
         serviceLowOut.setSize (numChannels, maxBlock, false, true, true);
+        neutralLowOut.setSize (numChannels, maxBlock, false, true, true);
         highOut.setSize (numChannels, maxBlock, false, true, true);
         for (auto& stateOut : stateLowOut)
             stateOut.setSize (numChannels, maxBlock, false, true, true);
@@ -330,10 +337,12 @@ public:
 
         globalBranch.clear();
         serviceBranch.clear();
+        neutralBranch.clear();
         for (auto& state : stateBranches)
             state.clear();
         globalConfigured = false;
         serviceConfigured = false;
+        neutralConfigured = false;
 
         prepared = true;
         return true;
@@ -354,6 +363,7 @@ public:
         crossover.reset();
         globalBranch.resetRuntime();
         serviceBranch.resetRuntime();
+        neutralBranch.resetRuntime();
         for (auto& state : stateBranches)
             state.resetRuntime();
         inputScratch.clear();
@@ -361,6 +371,7 @@ public:
         highScratch.clear();
         globalLowOut.clear();
         serviceLowOut.clear();
+        neutralLowOut.clear();
         highOut.clear();
         for (auto& stateOut : stateLowOut)
             stateOut.clear();
@@ -503,6 +514,60 @@ public:
         serviceConfigured = false;
     }
 
+    // Mirrors configureGlobal(): a single, identity-agnostic, always-active
+    // branch. Unlike Service it is never claimed/released per identity, so it
+    // has no separate "clear" call in production use - it is reconfigured
+    // (in place, guarded by configsEqual) whenever the shared crossover/
+    // interpolation fields change, exactly like Global.
+    bool configureNeutral (const DynamicHotBranchConfig& config) noexcept
+    {
+        if (! prepared || ! globalConfigured
+            || ! DynamicHotBranchDetail::isValidBranchConfig (config, DynamicHotBranchKind::Neutral, sampleRate))
+            return false;
+
+        DynamicHotBranchConfig normalized = config;
+        normalized.stableStateId = 0;
+        copyGlobalOnlyFields (normalized, globalBranch.config);
+        // Neutral's entire purpose is to carry NO Global correction at all -
+        // no delay delta, no allpass, and no polarity flip, since a polarity
+        // inversion is itself a correction decision exactly like delay/allpass
+        // (only the shared crossover/channel-alignment/interpolation fields
+        // copied above are genuinely identity-agnostic plumbing, not
+        // correction). Leaving polarityInvert copied from Global would let a
+        // harmful package's polarity choice still reach this identity.
+        normalized.effectiveAbsoluteDelayMs = 0.0;
+        normalized.allpassEnabled = false;
+        normalized.polarityInvert = false;
+
+        if (neutralConfigured && DynamicHotBranchDetail::configsEqual (neutralBranch.config, normalized))
+            return true;
+
+        const bool wasActive = neutralBranch.config.active;
+        const int previousInterp = neutralBranch.config.delayInterpolationIndex;
+        neutralBranch.config = normalized;
+        neutralBranch.physicalTapSamples = normalized.active
+            ? physicalTapSamplesFor (normalized.effectiveAbsoluteDelayMs) : 0.0;
+        neutralBranch.warmFramesNeeded = normalized.active
+            ? DynamicHotBranchDetail::warmFramesRequired (neutralBranch.physicalTapSamples) : 0;
+        if (! wasActive || ! normalized.active)
+            neutralBranch.resetRuntime();
+        else
+        {
+            if (previousInterp != normalized.delayInterpolationIndex)
+                for (auto& interpolator : neutralBranch.interpolators)
+                    interpolator.reset();
+            neutralBranch.warm = neutralBranch.processedFrames >= neutralBranch.warmFramesNeeded;
+        }
+        neutralConfigured = true;
+        return true;
+    }
+
+    void clearNeutral() noexcept
+    {
+        neutralBranch.clear();
+        neutralConfigured = false;
+    }
+
     bool configureFromPackage (DynamicHotBranchKind kind,
                                int stateSlot,
                                const DynamicPackageResolution& package) noexcept
@@ -534,6 +599,13 @@ public:
             return configureService (config);
         }
 
+        if (kind == DynamicHotBranchKind::Neutral)
+        {
+            config.active = true;
+            config.stableStateId = 0;
+            return configureNeutral (config);
+        }
+
         if (package.decision != DynamicPackageDecision::StateCorrection
             || package.selectedStableStateId == 0)
             return false;
@@ -557,6 +629,11 @@ public:
     DynamicHotBranchInfo getServiceInfo() const noexcept
     {
         return makeInfo (serviceBranch, DynamicHotBranchKind::Service);
+    }
+
+    DynamicHotBranchInfo getNeutralInfo() const noexcept
+    {
+        return makeInfo (neutralBranch, DynamicHotBranchKind::Neutral);
     }
 
     DynamicServicePrimeResult primeService (int requestedSamples) noexcept
@@ -689,6 +766,16 @@ public:
                     serviceLowOut.setSample (ch, i, 0.0f);
                 }
 
+                if (neutralBranch.config.active)
+                {
+                    const float delayed = readBranchTap (neutralBranch, ch);
+                    neutralLowOut.setSample (ch, i, processBranchSample (neutralBranch, ch, delayed));
+                }
+                else
+                {
+                    neutralLowOut.setSample (ch, i, 0.0f);
+                }
+
                 highOut.setSample (ch, i, readHighTap (ch));
             }
 
@@ -700,6 +787,8 @@ public:
                     stateBranches[(size_t) slot].noteLiveFrame();
             if (serviceBranch.config.active)
                 serviceBranch.noteLiveFrame();
+            if (neutralBranch.config.active)
+                neutralBranch.noteLiveFrame();
         }
 
         result.valid = true;
@@ -717,6 +806,7 @@ public:
         return stateLowOut[(size_t) slot];
     }
     const juce::AudioBuffer<float>& getServiceLowOutput() const noexcept { return serviceLowOut; }
+    const juce::AudioBuffer<float>& getNeutralLowOutput() const noexcept { return neutralLowOut; }
     const juce::AudioBuffer<float>& getHighOutput() const noexcept { return highOut; }
 
     // Independent TDF-II reference for tests and external verification.
@@ -918,6 +1008,7 @@ private:
     bool prepared = false;
     bool globalConfigured = false;
     bool serviceConfigured = false;
+    bool neutralConfigured = false;
     double sampleRate = 0.0;
     int maxBlock = 0;
     int numChannels = 0;
@@ -938,10 +1029,12 @@ private:
     juce::AudioBuffer<float> highScratch;
     juce::AudioBuffer<float> globalLowOut;
     juce::AudioBuffer<float> serviceLowOut;
+    juce::AudioBuffer<float> neutralLowOut;
     juce::AudioBuffer<float> highOut;
     std::array<juce::AudioBuffer<float>, DynamicHotBranchContract::kStateSlots> stateLowOut {};
 
     DynamicHotBranchDetail::BranchDspState globalBranch;
     DynamicHotBranchDetail::BranchDspState serviceBranch;
+    DynamicHotBranchDetail::BranchDspState neutralBranch;
     std::array<DynamicHotBranchDetail::BranchDspState, DynamicHotBranchContract::kStateSlots> stateBranches {};
 };

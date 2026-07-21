@@ -533,6 +533,7 @@ public:
             DynamicSelectorBranchRoster roster;
             const double globalTap = std::ceil (48000.0 * 0.020);
             roster.global = { true, DynamicHotBranchKind::Global, 0, 0.0, globalTap, true, true };
+            roster.neutral = { true, DynamicHotBranchKind::Neutral, 0, 0.0, globalTap, true, true };
             roster.states[0] = { true, DynamicHotBranchKind::State, ambiguityMap.states[0].stableStateId,
                                  0.0, globalTap + 400.0, true, true };
             const auto matched = matchDynamicFingerprint (observationFor (ambiguityMap.states[0].fingerprint), ambiguityMap);
