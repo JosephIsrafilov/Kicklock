@@ -19,10 +19,14 @@ public:
         addAndMakeVisible (label);
 
         createButton.setButtonText ("Create Manual State");
+        createButton.setName ("Create Manual State from this Unknown cluster");
+        createButton.setDescription ("Forms a new Manual State from this repeatable Unknown/Ambiguous cluster.");
         createButton.onClick = [this] { if (owner.onCreateManualState) owner.onCreateManualState (cluster.eventId); };
         addAndMakeVisible (createButton);
 
         ignoreButton.setButtonText ("Ignore");
+        ignoreButton.setName ("Ignore this Unknown cluster");
+        ignoreButton.setDescription ("Removes this cluster from the Recent Unknowns list without creating a State.");
         ignoreButton.onClick = [this] { if (owner.onIgnore) owner.onIgnore (cluster.eventId); };
         addAndMakeVisible (ignoreButton);
     }
@@ -108,6 +112,11 @@ void DynamicRecentUnknownsPanel::setModel (const DynamicWorkspaceViewModel& newM
         else
             rows[(size_t) i]->setVisible (false);
     }
+    // resized() only positions rows that are currently visible; the parent's
+    // setBounds() only re-triggers this when its size actually changes, so a
+    // row becoming visible/hidden with no accompanying container resize
+    // would otherwise keep stale or empty (0,0,0,0) bounds.
+    resized();
     repaint();
 }
 

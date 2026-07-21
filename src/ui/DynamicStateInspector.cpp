@@ -223,6 +223,12 @@ void DynamicStateInspector::setModel (const DynamicWorkspaceViewModel& newModel)
     }
     updateSlidersFromModel();
     updateControlEnablement();
+    // resized() lays out the sliders/buttons from model.selectedState (it
+    // returns early with everything unlaid-out when there is no selection).
+    // The parent's own setBounds() only re-triggers this when its size
+    // actually changes, so a first-time selection with no accompanying
+    // container resize would otherwise leave every control at (0,0,0,0).
+    resized();
     repaint();
 }
 
