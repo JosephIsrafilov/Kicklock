@@ -116,6 +116,39 @@ DynamicStateInspector::DynamicStateInspector()
     };
     addAndMakeVisible (resetGlobalButton);
 
+    promoteButton.setName ("Promote to Manual");
+    promoteButton.setDescription ("Finishes a recognized State that has no automatic correction, so it can be edited manually.");
+    promoteButton.onClick = [this]
+    {
+        if (! model.hasSelectedState || ! onEdit) return;
+        trimThrottle.cancel();
+        onEdit ({ DynamicStateInspectorAction::PromoteToManual, model.selectedStableStateId, {}, false });
+    };
+    addAndMakeVisible (promoteButton);
+
+    removeManualButton.setName ("Remove Manual State");
+    removeManualButton.setDescription ("Permanently removes this Manual State. Requires a second click to confirm.");
+    removeManualButton.onClick = [this]
+    {
+        if (! model.hasSelectedState || ! onEdit) return;
+        if (removeConfirmArmed && removeConfirmArmedForStableStateId == model.selectedStableStateId)
+        {
+            trimThrottle.cancel();
+            onEdit ({ DynamicStateInspectorAction::RemoveManualState, model.selectedStableStateId, {}, false });
+            removeConfirmArmed = false;
+            removeConfirmArmedForStableStateId = 0;
+        }
+        else
+        {
+            // First click only arms confirmation - no accidental one-click
+            // destructive removal (Section 9).
+            removeConfirmArmed = true;
+            removeConfirmArmedForStableStateId = model.selectedStableStateId;
+        }
+        updateControlEnablement();
+    };
+    addAndMakeVisible (removeManualButton);
+
     startTimer (kThrottleIntervalMs);
 }
 
@@ -177,9 +210,17 @@ DynamicManualTrim DynamicStateInspector::currentTrimFromSliders() const noexcept
 
 void DynamicStateInspector::setModel (const DynamicWorkspaceViewModel& newModel)
 {
+    const bool selectionChanged = model.selectedStableStateId != newModel.selectedStableStateId;
     model = newModel;
     effective = dynamicEffectivePackageDisplay (model.selectedState, model.sampleRate);
     eligibility = dynamicStateControlEligibility (model);
+    if (selectionChanged)
+    {
+        // A destructive-removal confirmation must never carry over to a
+        // different State than the one it was armed for.
+        removeConfirmArmed = false;
+        removeConfirmArmedForStableStateId = 0;
+    }
     updateSlidersFromModel();
     updateControlEnablement();
     repaint();
@@ -231,6 +272,16 @@ void DynamicStateInspector::updateControlEnablement()
         && model.selectedState.origin == DynamicStateOrigin::Auto);
     resetGlobalButton.setEnabled (eligibility.controlsEnabled && model.hasSelectedState
         && model.selectedState.origin == DynamicStateOrigin::Auto);
+
+    promoteButton.setEnabled (eligibility.canPromote);
+    promoteButton.setTooltip (eligibility.canPromote ? juce::String() : eligibility.promoteDisabledReason);
+    removeManualButton.setEnabled (eligibility.canRemoveManual);
+    removeManualButton.setButtonText (
+        removeConfirmArmed && removeConfirmArmedForStableStateId == model.selectedStableStateId
+            ? "Confirm Remove?" : "Remove Manual State");
+    removeManualButton.setTooltip (eligibility.canRemoveManual
+        ? juce::String ("Click again to confirm - this cannot be undone.")
+        : eligibility.promoteDisabledReason);
 
     if (model.hasSelectedState)
     {
@@ -333,4 +384,11 @@ void DynamicStateInspector::resized()
     resetLearnedButton.setBounds (buttonRow.removeFromLeft (buttonWidth));
     buttonRow.removeFromLeft (gap);
     resetGlobalButton.setBounds (buttonRow);
+
+    area.removeFromTop (4);
+    auto secondButtonRow = area.removeFromTop (26);
+    const int secondButtonWidth = (secondButtonRow.getWidth() - gap) / 2;
+    promoteButton.setBounds (secondButtonRow.removeFromLeft (secondButtonWidth));
+    secondButtonRow.removeFromLeft (gap);
+    removeManualButton.setBounds (secondButtonRow);
 }

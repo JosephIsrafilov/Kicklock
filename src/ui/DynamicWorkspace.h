@@ -5,6 +5,8 @@
 
 #include "DynamicWorkspaceHelpers.h"
 #include "DynamicStateInspector.h"
+#include "DynamicFocusStatus.h"
+#include "DynamicRecentUnknownsPanel.h"
 
 class DynamicWorkspace : public juce::Component
 {
@@ -22,6 +24,10 @@ public:
     std::function<void()> onRevert;
     std::function<void()> onApply;
     std::function<void (const DynamicStateInspectorEditRequest&)> onEdit;
+    std::function<void (bool)> onFocusToggle;
+    std::function<void (uint64_t)> onCreateManualState;
+    std::function<void (uint64_t)> onIgnoreRecentUnknown;
+    std::function<void()> onClearRecentUnknowns;
 
     int getVisibleCardCount() const noexcept;
     int getCardColumnCount() const noexcept { return cardColumns; }
@@ -53,6 +59,8 @@ private:
     juce::String headerDetail;
     juce::String headerSummary;
     DynamicStateInspector inspector;
+    DynamicFocusStatus focusStatus;
+    DynamicRecentUnknownsPanel recentUnknownsPanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DynamicWorkspace)
 };

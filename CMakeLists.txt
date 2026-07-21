@@ -47,6 +47,8 @@ target_sources(KickLock
         src/PluginEditor.cpp
         src/ui/DynamicWorkspace.cpp
         src/ui/DynamicStateInspector.cpp
+        src/ui/DynamicFocusStatus.cpp
+        src/ui/DynamicRecentUnknownsPanel.cpp
         src/ui/Oscilloscope.cpp
         src/ui/SpectrumAnalyzer.cpp
 )

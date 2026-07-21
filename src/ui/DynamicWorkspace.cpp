@@ -246,6 +246,20 @@ DynamicWorkspace::DynamicWorkspace()
         if (onEdit) onEdit (request);
     };
     addAndMakeVisible (inspector);
+
+    focusStatus.onFocusToggle = [this] (bool enabled) { if (onFocusToggle) onFocusToggle (enabled); };
+    addAndMakeVisible (focusStatus);
+
+    recentUnknownsPanel.onCreateManualState = [this] (uint64_t eventId)
+    {
+        if (onCreateManualState) onCreateManualState (eventId);
+    };
+    recentUnknownsPanel.onIgnore = [this] (uint64_t eventId)
+    {
+        if (onIgnoreRecentUnknown) onIgnoreRecentUnknown (eventId);
+    };
+    recentUnknownsPanel.onClear = [this] { if (onClearRecentUnknowns) onClearRecentUnknowns(); };
+    addAndMakeVisible (recentUnknownsPanel);
 }
 
 DynamicWorkspace::~DynamicWorkspace() = default;
@@ -320,6 +334,8 @@ void DynamicWorkspace::setModel (const DynamicWorkspaceViewModel& next)
         + " · " + juce::String (summary.manualCount) + " Manual";
 
     inspector.setModel (model);
+    focusStatus.setModel (model);
+    recentUnknownsPanel.setModel (model);
 
     if (headerChanged)
         repaint (getLocalBounds().removeFromTop (62));
@@ -374,7 +390,16 @@ void DynamicWorkspace::resized()
     }
 
     area.removeFromTop (6);
-    inspector.setBounds (area.removeFromBottom (juce::jmin (200, area.getHeight() / 2)));
+    // Reserve the bottom band for Inspector / Focus / Recent Unknowns, stacked
+    // vertically; the State card grid gets whatever remains above. This is a
+    // functional layout, not yet the final responsive pass (Checkpoint 3).
+    const int bottomBandHeight = juce::jmin (360, (area.getHeight() * 2) / 3);
+    auto bottomBand = area.removeFromBottom (bottomBandHeight);
+    inspector.setBounds (bottomBand.removeFromTop (juce::jmax (120, bottomBandHeight - 200)));
+    bottomBand.removeFromTop (6);
+    focusStatus.setBounds (bottomBand.removeFromTop (90));
+    bottomBand.removeFromTop (6);
+    recentUnknownsPanel.setBounds (bottomBand);
     area.removeFromBottom (6);
     const int minCardWidth = 185;
     cardColumns = juce::jlimit (1, 4, juce::jmax (1, (area.getWidth() + 8) / (minCardWidth + 8)));

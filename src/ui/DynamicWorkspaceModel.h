@@ -20,6 +20,7 @@ struct DynamicFocusedTraceViewModel
 {
     bool available = false;
     uint64_t stableStateId = 0;
+    uint64_t mapGeneration = 0;
     DynamicSelectorBranchKind branchKind = DynamicSelectorBranchKind::Global;
     double sampleRate = 0.0;
     int windowSamples = 0;

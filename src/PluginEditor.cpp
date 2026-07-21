@@ -623,11 +623,32 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
             case DynamicStateInspectorAction::ResetToGlobal:   processorRequest.kind = Kind::ResetToGlobal; break;
             case DynamicStateInspectorAction::SetEnabled:      processorRequest.kind = Kind::SetEnabled; break;
             case DynamicStateInspectorAction::SetBypassed:     processorRequest.kind = Kind::SetBypassed; break;
+            case DynamicStateInspectorAction::PromoteToManual: processorRequest.kind = Kind::PromoteToManual; break;
+            case DynamicStateInspectorAction::RemoveManualState: processorRequest.kind = Kind::RemoveManualState; break;
         }
         const auto outcome = audioProcessor.applyDynamicStateEdit (processorRequest);
         lastDynamicEditFailed = ! outcome.success;
         lastDynamicEditFailureReason = outcome.success ? juce::String()
             : dynamicStateEditRejectionLabel (outcome.reason);
+    };
+    dynamicWorkspace.onFocusToggle = [this] (bool enabled)
+    {
+        audioProcessor.setFocusedStableStateId (enabled ? dynamicWorkspace.getSelectedDetailStableStateId() : 0);
+    };
+    dynamicWorkspace.onCreateManualState = [this] (uint64_t eventId)
+    {
+        const auto outcome = audioProcessor.createManualStateFromRecentUnknown (eventId);
+        lastDynamicEditFailed = ! outcome.success;
+        lastDynamicEditFailureReason = outcome.success ? juce::String()
+            : dynamicStateEditRejectionLabel (outcome.reason);
+    };
+    dynamicWorkspace.onIgnoreRecentUnknown = [this] (uint64_t eventId)
+    {
+        audioProcessor.ignoreRecentUnknownCluster (eventId);
+    };
+    dynamicWorkspace.onClearRecentUnknowns = [this]
+    {
+        audioProcessor.clearRecentUnknownEvents();
     };
 
 
@@ -1394,6 +1415,42 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
     model.hasSelectedState = model.selectedState.occupied;
     model.lastEditFailed = lastDynamicEditFailed;
     model.lastEditFailureReason = lastDynamicEditFailureReason;
+
+    // Phase 12, Section 13: Focus. focusedStableStateId == 0 means Focus is
+    // off; never serialized, never changes runtime selection/audio.
+    const uint64_t focusedId = audioProcessor.getFocusedStableStateId();
+    model.focusEnabled = focusedId != 0;
+    model.focusedStableStateId = focusedId;
+    if (focusedId != latestFocusedTraceForStableStateId)
+    {
+        latestFocusedTrace = DynamicFocusedTraceViewModel {};
+        latestFocusedTraceForStableStateId = focusedId;
+    }
+    if (focusedId != 0)
+    {
+        const auto trace = audioProcessor.drainFocusedTraceForUi();
+        if (trace.available)
+        {
+            latestFocusedTrace.available = true;
+            latestFocusedTrace.stableStateId = trace.stableStateId;
+            latestFocusedTrace.mapGeneration = trace.mapGeneration;
+            latestFocusedTrace.branchKind = trace.branchKind;
+            latestFocusedTrace.sampleRate = trace.sampleRate;
+            latestFocusedTrace.windowSamples = trace.windowSamples;
+            latestFocusedTrace.beforeBass = trace.beforeBass;
+            latestFocusedTrace.beforeKick = trace.beforeKick;
+            latestFocusedTrace.afterBass = trace.afterBass;
+            latestFocusedTrace.afterKick = trace.afterKick;
+        }
+    }
+    model.focusedTrace = latestFocusedTrace;
+
+    // Phase 12, Section 15: Recent Unknown Events.
+    audioProcessor.drainRecentUnknownEventsForUi();
+    model.recentUnknownClusters.clear();
+    for (int i = 0; i < audioProcessor.getRecentUnknownClusterCount(); ++i)
+        model.recentUnknownClusters.push_back (audioProcessor.getRecentUnknownCluster (i));
+    model.recentUnknownOverflowCount = audioProcessor.getRecentUnknownOverflowCount();
 
     dynamicWorkspace.setModel (model);
     dynamicWorkspace.setVisible (workflowVisibility.workspace);

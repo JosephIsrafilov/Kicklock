@@ -22,7 +22,9 @@ enum class DynamicStateInspectorAction
     ResetToLearned,
     ResetToGlobal,
     SetEnabled,
-    SetBypassed
+    SetBypassed,
+    PromoteToManual,
+    RemoveManualState
 };
 
 struct DynamicStateInspectorEditRequest
@@ -75,6 +77,10 @@ private:
     juce::TextButton resetTrimButton { "Reset Trim" };
     juce::TextButton resetLearnedButton { "Reset to Learned" };
     juce::TextButton resetGlobalButton { "Reset to Global" };
+    juce::TextButton promoteButton { "Promote to Manual" };
+    juce::TextButton removeManualButton { "Remove Manual State" };
+    bool removeConfirmArmed = false;
+    uint64_t removeConfirmArmedForStableStateId = 0;
 
     // One throttle for the whole trim: setManualTrim() publishes all three
     // fields atomically, so a Delay drag and a Frequency drag both update the
