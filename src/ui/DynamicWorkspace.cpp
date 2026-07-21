@@ -240,6 +240,12 @@ DynamicWorkspace::DynamicWorkspace()
     revertButton.setWantsKeyboardFocus (true);
     revertButton.onClick = [this] { if (onRevert) onRevert(); };
     addAndMakeVisible (revertButton);
+
+    inspector.onEdit = [this] (const DynamicStateInspectorEditRequest& request)
+    {
+        if (onEdit) onEdit (request);
+    };
+    addAndMakeVisible (inspector);
 }
 
 DynamicWorkspace::~DynamicWorkspace() = default;
@@ -306,6 +312,15 @@ void DynamicWorkspace::setModel (const DynamicWorkspaceViewModel& next)
     headerStatus = header.status;
     headerDetail = header.detail;
 
+    const auto summary = dynamicWorkspaceSummary (model);
+    headerSummary = juce::String (summary.recognizedStateCount) + " recognized State"
+        + (summary.recognizedStateCount == 1 ? juce::String() : juce::String ("s"))
+        + " · " + juce::String (summary.correctionCount) + " correction"
+        + (summary.correctionCount == 1 ? juce::String() : juce::String ("s"))
+        + " · " + juce::String (summary.manualCount) + " Manual";
+
+    inspector.setModel (model);
+
     if (headerChanged)
         repaint (getLocalBounds().removeFromTop (62));
     resized();
@@ -345,7 +360,7 @@ void DynamicWorkspace::selectDetailState (uint64_t stableStateId)
 void DynamicWorkspace::resized()
 {
     auto area = getLocalBounds().reduced (12, 10);
-    auto header = area.removeFromTop (52);
+    auto header = area.removeFromTop (62);
     auto actions = header.removeFromRight (150);
     clearButton.setBounds (actions.removeFromLeft (72).reduced (1, 8));
     revertButton.setBounds (actions.reduced (1, 8));
@@ -359,6 +374,8 @@ void DynamicWorkspace::resized()
     }
 
     area.removeFromTop (6);
+    inspector.setBounds (area.removeFromBottom (juce::jmin (200, area.getHeight() / 2)));
+    area.removeFromBottom (6);
     const int minCardWidth = 185;
     cardColumns = juce::jlimit (1, 4, juce::jmax (1, (area.getWidth() + 8) / (minCardWidth + 8)));
     const int rows = (int) std::ceil ((double) cards.size() / (double) cardColumns);
@@ -389,7 +406,7 @@ void DynamicWorkspace::paint (juce::Graphics& g)
     g.setColour (kBorder);
     g.drawRoundedRectangle (bounds, 7.0f, 1.0f);
 
-    auto header = getLocalBounds().reduced (14, 10).removeFromTop (48);
+    auto header = getLocalBounds().reduced (14, 10).removeFromTop (62);
     g.setColour (model.previewActive ? kAmber : kTeal);
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
     g.drawText (headerSource, header.removeFromTop (15), juce::Justification::centredLeft, true);
@@ -398,5 +415,7 @@ void DynamicWorkspace::paint (juce::Graphics& g)
     g.drawText (headerStatus, header.removeFromTop (18), juce::Justification::centredLeft, true);
     g.setColour (kMuted);
     g.setFont (juce::Font (juce::FontOptions (9.5f)));
+    if (headerSummary.isNotEmpty())
+        g.drawText (headerSummary, header.removeFromTop (14), juce::Justification::centredLeft, true);
     g.drawText (headerDetail, header, juce::Justification::centredLeft, true);
 }

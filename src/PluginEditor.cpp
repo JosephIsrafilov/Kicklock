@@ -608,6 +608,27 @@ KickLockAudioProcessorEditor::KickLockAudioProcessorEditor (KickLockAudioProcess
     dynamicWorkspace.setDynamicStrengthControls (&dynamicStrengthLabel, &dynamicStrengthSlider);
     dynamicWorkspace.onClear = [this] { audioProcessor.clearLearnedDynamicData(); };
     dynamicWorkspace.onRevert = [this] { audioProcessor.revertLatestFix(); };
+    dynamicWorkspace.onEdit = [this] (const DynamicStateInspectorEditRequest& request)
+    {
+        using Kind = KickLockAudioProcessor::DynamicStateEditKind;
+        KickLockAudioProcessor::DynamicStateEditRequest processorRequest;
+        processorRequest.stableStateId = request.stableStateId;
+        processorRequest.trim = request.trim;
+        processorRequest.boolValue = request.boolValue;
+        switch (request.action)
+        {
+            case DynamicStateInspectorAction::SetManualTrim:   processorRequest.kind = Kind::SetManualTrim; break;
+            case DynamicStateInspectorAction::ResetManualTrim: processorRequest.kind = Kind::ResetManualTrim; break;
+            case DynamicStateInspectorAction::ResetToLearned:  processorRequest.kind = Kind::ResetToLearned; break;
+            case DynamicStateInspectorAction::ResetToGlobal:   processorRequest.kind = Kind::ResetToGlobal; break;
+            case DynamicStateInspectorAction::SetEnabled:      processorRequest.kind = Kind::SetEnabled; break;
+            case DynamicStateInspectorAction::SetBypassed:     processorRequest.kind = Kind::SetBypassed; break;
+        }
+        const auto outcome = audioProcessor.applyDynamicStateEdit (processorRequest);
+        lastDynamicEditFailed = ! outcome.success;
+        lastDynamicEditFailureReason = outcome.success ? juce::String()
+            : dynamicStateEditRejectionLabel (outcome.reason);
+    };
 
 
 
@@ -1361,6 +1382,19 @@ void KickLockAudioProcessorEditor::refreshDynamicWorkflow()
         model.learnStatusMessage = formatLearnFailureBody (pendingResult);
     model.clearAvailable = ! learnBusy && audioProcessor.hasLearnedDynamicData();
     model.revertAvailable = ! learnBusy && audioProcessor.hasRevertSnapshot();
+
+    // Phase 12: selected State detail. The workspace already tracks which
+    // card was clicked (inspection-only selection, never runtime); this
+    // editor fetches the full raw State for that id fresh every update so
+    // the Inspector always reflects the currently-applied map.
+    model.sampleRate = audioProcessor.getSampleRate() > 0.0 ? audioProcessor.getSampleRate() : 48000.0;
+    model.selectedStableStateId = dynamicWorkspace.getSelectedDetailStableStateId();
+    model.selectedState = model.selectedStableStateId != 0
+        ? audioProcessor.getDynamicStateForUi (model.selectedStableStateId) : DynamicState {};
+    model.hasSelectedState = model.selectedState.occupied;
+    model.lastEditFailed = lastDynamicEditFailed;
+    model.lastEditFailureReason = lastDynamicEditFailureReason;
+
     dynamicWorkspace.setModel (model);
     dynamicWorkspace.setVisible (workflowVisibility.workspace);
     dynamicStrengthSlider.setVisible (workflowVisibility.dynamicStrength);

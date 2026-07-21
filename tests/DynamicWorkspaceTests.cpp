@@ -384,13 +384,15 @@ public:
         {
             static_assert (! std::is_constructible_v<DynamicWorkspace, KickLockAudioProcessor&>);
             DynamicWorkspace workspace;
-            expectEquals (workspace.getNumChildComponents(), 10);
+            // 8 State cards + Clear + Revert + the Phase 12 State Inspector
+            // (a real, permanent child - not conditionally created).
+            expectEquals (workspace.getNumChildComponents(), 11);
             for (int i = 0; i < 12; ++i)
             {
                 workspace.setSize (900 + i * 10, 360 + i * 5);
                 workspace.setModel (runtimeModel (i % 2 == 0 ? 1 : 8));
             }
-            expectEquals (workspace.getNumChildComponents(), 10);
+            expectEquals (workspace.getNumChildComponents(), 11);
         }
 
         beginTest ("Editor and workspace survive Dynamic construction, resizing, and close/reopen");

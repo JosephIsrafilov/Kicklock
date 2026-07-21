@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "DynamicWorkspaceHelpers.h"
+#include "DynamicStateInspector.h"
 
 class DynamicWorkspace : public juce::Component
 {
@@ -20,6 +21,7 @@ public:
     std::function<void()> onClear;
     std::function<void()> onRevert;
     std::function<void()> onApply;
+    std::function<void (const DynamicStateInspectorEditRequest&)> onEdit;
 
     int getVisibleCardCount() const noexcept;
     int getCardColumnCount() const noexcept { return cardColumns; }
@@ -49,6 +51,8 @@ private:
     juce::String headerSource;
     juce::String headerStatus;
     juce::String headerDetail;
+    juce::String headerSummary;
+    DynamicStateInspector inspector;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DynamicWorkspace)
 };

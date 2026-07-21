@@ -296,6 +296,11 @@ private:
     NotePhaseMapSnapshot latestNoteMap;
     int selectedLearnMidi = -1;
 
+    // Phase 12: last per-state edit-transaction outcome, surfaced to the
+    // Inspector so a rejected edit explains why rather than failing silently.
+    bool lastDynamicEditFailed = false;
+    juce::String lastDynamicEditFailureReason;
+
     // Panel backgrounds computed in resized(), painted behind the child
     // controls in paint() so the geometry lives in one place.
     juce::Rectangle<int> manualPanelBounds;
