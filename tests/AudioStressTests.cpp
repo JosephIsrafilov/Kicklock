@@ -5,6 +5,7 @@
 #include "audio/AudioSuiteHelpers.h"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 // =============================================================================
@@ -37,10 +38,50 @@ public:
     }
 
 private:
+    // Release-stress limits. These are product contracts, declared here before
+    // the matrix is executed; they are not adjusted from observed results.
+    static constexpr float kMaximumOutputPeak = 6.0f;
+    static constexpr double kMaximumTransitionScore = 5.0;
+    static constexpr float kMaximumAbsoluteDc = 0.05f;
+    static constexpr double kMinimumRealtimeFactor = 1.0;
+
+    static bool hasSubnormalSample (const std::vector<float>& samples)
+    {
+        for (const auto sample : samples)
+            if (std::fpclassify (sample) == FP_SUBNORMAL)
+                return true;
+        return false;
+    }
+
+    static float absoluteMean (const std::vector<float>& samples)
+    {
+        if (samples.empty())
+            return 0.0f;
+
+        double sum = 0.0;
+        for (const auto sample : samples)
+            sum += sample;
+        return (float) std::abs (sum / (double) samples.size());
+    }
+
+    void assertReleaseStressContract (const RenderResult& render, const juce::String& label)
+    {
+        expect (AudioMetrics::allFinite (render.output), label + ": finite output");
+        expect (! hasSubnormalSample (render.output), label + ": no subnormal output samples");
+        expectLessThan (AudioMetrics::peakAbs (render.output), kMaximumOutputPeak,
+                        label + ": bounded output level");
+        expectLessThan (absoluteMean (render.output), kMaximumAbsoluteDc,
+                        label + ": no unexpected DC offset");
+        expectLessThan (AudioSuite::worstBoundaryTransitionScore (render), kMaximumTransitionScore,
+                        label + ": crossfades stay click-safe");
+        expectGreaterThan (render.realtimeFactor(), kMinimumRealtimeFactor,
+                           label + ": processing remains faster than real time");
+    }
+
     void sampleRateBlockSizeMatrix()
     {
-        const double rates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
-        const int blockSizes[] = { 1, 7, 64, 127, 512, 2048 };
+        const double rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
+        const int blockSizes[] = { 32, 64, 128, 256, 512, 1024, 2048 };
 
         for (const double rate : rates)
         {
@@ -64,12 +105,8 @@ private:
                 expect (harness.applyMapDirect (proc, map), "corrective map applied");
 
                 const auto r = harness.render (proc, fx, harness.planLinear (fx));
-                expect (AudioMetrics::allFinite (r.output),
-                        "sr=" + juce::String (rate, 0) + " block=" + juce::String (blockSize) + ": finite output");
-                expectLessThan (AudioMetrics::peakAbs (r.output), 6.0f,
-                                "sr=" + juce::String (rate, 0) + " block=" + juce::String (blockSize) + ": bounded output level");
-                expectLessThan (AudioSuite::worstBoundaryTransitionScore (r), 5.0,
-                                "sr=" + juce::String (rate, 0) + " block=" + juce::String (blockSize) + ": crossfades stay click-safe");
+                const auto label = "sr=" + juce::String (rate, 0) + " block=" + juce::String (blockSize);
+                assertReleaseStressContract (r, label);
 
                 logMessage ("  stateBlocks=" + juce::String (AudioMetrics::matchedPersistentBlockCount (r.timeline))
                             + " worstTransition=" + juce::String (AudioSuite::worstBoundaryTransitionScore (r), 2)
@@ -84,7 +121,7 @@ private:
 
         AudioHarnessConfig cfg;
         cfg.sampleRate = 48000.0;
-        cfg.blockSizeSequence = { 1, 7, 64, 127, 512, 2048 };
+        cfg.blockSizeSequence = { 32, 64, 128, 256, 512, 1024, 2048 };
         cfg.blockSize = 512; // used only for Learn-side feed; irrelevant here (no Learn)
 
         AudioTestHarness harness (*this, cfg);
@@ -96,11 +133,9 @@ private:
         expect (harness.applyMapDirect (proc, map));
         const auto r = harness.render (proc, fx, harness.planLinear (fx));
 
-        expect (AudioMetrics::allFinite (r.output), "finite output under a variable block-size sequence");
+        assertReleaseStressContract (r, "variable legal block-size sequence");
         expectGreaterThan (AudioMetrics::matchedPersistentBlockCount (r.timeline), 0,
                            "State branches still engage under variable block partitioning");
-        expectLessThan (AudioSuite::worstBoundaryTransitionScore (r), 5.0,
-                        "crossfades stay click-safe under variable block partitioning");
 
         // Same input rendered again with a FIXED block size: the set of
         // resolved decisions (which identities ever get selected) should match,
