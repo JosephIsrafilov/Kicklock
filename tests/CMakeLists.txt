@@ -186,6 +186,28 @@ kicklock_add_audio_test(KickLockAudioSmokeTests AudioSmokeTests.cpp)
 kicklock_add_audio_test(KickLockAudioAcceptanceTests AudioAcceptanceTests.cpp)
 kicklock_add_audio_test(KickLockAudioStressTests AudioStressTests.cpp)
 
+# Compiled-plugin acceptance: this executable loads the generated VST3 through
+# JUCE's VST3 host implementation. It must never substitute a direct processor.
+add_executable(KickLockHostAcceptanceTests
+    DspTestMain.cpp
+    HostAcceptanceTests.cpp
+    audio/AudioTestHarness.cpp
+    audio/AudioFixtureGenerators.cpp
+    DynamicReleaseFixture.cpp
+    TestAllocationCounter.cpp
+)
+target_include_directories(KickLockHostAcceptanceTests PRIVATE . ../src ../src/dsp ../src/util
+    ${CMAKE_BINARY_DIR}/KickLock_artefacts/JuceLibraryCode)
+target_compile_features(KickLockHostAcceptanceTests PRIVATE cxx_std_20)
+target_compile_definitions(KickLockHostAcceptanceTests PRIVATE JUCE_PLUGINHOST_VST3=1
+    KICKLOCK_HOST_VST3_PATH="$<TARGET_FILE_DIR:KickLock_VST3>")
+target_link_libraries(KickLockHostAcceptanceTests PRIVATE KickLock juce::juce_core juce::juce_dsp
+    juce::juce_audio_utils juce::juce_audio_formats juce::juce_audio_processors)
+if(MSVC)
+    target_link_options(KickLockHostAcceptanceTests PRIVATE "/STACK:8388608")
+    target_compile_options(KickLockHostAcceptanceTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
+endif()
+
 add_test(NAME KickLockAudioSmokeTests COMMAND KickLockAudioSmokeTests)
 add_test(NAME KickLockAudioAcceptanceTests COMMAND KickLockAudioAcceptanceTests)
 # Stress is intentionally not registered as a default ctest; run it explicitly.
