@@ -376,7 +376,7 @@ public:
         formats.addFormat (std::make_unique<juce::VST3PluginFormat>());
         juce::KnownPluginList known;
         juce::OwnedArray<juce::PluginDescription> found;
-        const auto module = path.getChildFile ("Contents").getChildFile ("x86_64-win").getChildFile ("KickLock.vst3");
+        const auto module = juce::File (KICKLOCK_HOST_VST3_PATH).getChildFile ("KickLock.vst3");
         expect (module.existsAsFile(), "VST3 module exists: " + module.getFullPathName());
         expect (known.scanAndAddFile (module.getFullPathName(), false, found, *formats.getFormat (0)), "VST3 scan succeeds");
         expectEquals (found.size(), 1, "exactly one VST3 description");
