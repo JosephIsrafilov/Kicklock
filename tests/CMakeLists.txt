@@ -239,4 +239,33 @@ endif()
 add_test(NAME KickLockAudioSmokeTests COMMAND KickLockAudioSmokeTests)
 add_test(NAME KickLockAudioAcceptanceTests COMMAND KickLockAudioAcceptanceTests)
 add_test(NAME KickLockGuiAcceptanceTests COMMAND KickLockGuiAcceptanceTests)
+
+# State input is supplied by arbitrary hosts and project files. Keep malformed
+# input coverage in its own deterministic executable so its seed and failure
+# diagnostics remain visible in release validation.
+add_executable(KickLockMalformedStateTests
+    DspTestMain.cpp
+    MalformedStateTests.cpp
+)
+target_include_directories(KickLockMalformedStateTests
+    PRIVATE
+        ../src
+        ../src/dsp
+        ../src/util
+        ${CMAKE_BINARY_DIR}/KickLock_artefacts/JuceLibraryCode
+)
+target_compile_features(KickLockMalformedStateTests PRIVATE cxx_std_20)
+set_target_properties(KickLockMalformedStateTests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+target_link_libraries(KickLockMalformedStateTests
+    PRIVATE
+        KickLock
+        juce::juce_core
+        juce::juce_dsp
+        juce::juce_audio_utils
+)
+if(MSVC)
+    target_link_options(KickLockMalformedStateTests PRIVATE "/STACK:8388608")
+    target_compile_options(KickLockMalformedStateTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
+endif()
+add_test(NAME KickLockMalformedStateTests COMMAND KickLockMalformedStateTests)
 # Stress is intentionally not registered as a default ctest; run it explicitly.
