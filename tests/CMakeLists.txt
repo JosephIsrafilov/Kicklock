@@ -138,6 +138,7 @@ if(MSVC)
     target_link_options(KickLockFastTests PRIVATE "/STACK:8388608")
     target_compile_options(KickLockFastTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
 endif()
+add_test(NAME KickLockFastTests COMMAND KickLockFastTests)
 
 # =============================================================================
 # Real-audio acceptance harness: three dedicated executables (Smoke / Acceptance
@@ -207,6 +208,7 @@ if(MSVC)
     target_link_options(KickLockHostAcceptanceTests PRIVATE "/STACK:8388608")
     target_compile_options(KickLockHostAcceptanceTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
 endif()
+add_test(NAME KickLockHostAcceptanceTests COMMAND KickLockHostAcceptanceTests)
 
 # Deterministic editor/component acceptance. This is intentionally separate
 # from the broad DSP suite so CI reports GUI lifecycle failures as their own
