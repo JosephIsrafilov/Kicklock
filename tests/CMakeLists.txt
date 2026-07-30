@@ -208,6 +208,35 @@ if(MSVC)
     target_compile_options(KickLockHostAcceptanceTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
 endif()
 
+# Deterministic editor/component acceptance. This is intentionally separate
+# from the broad DSP suite so CI reports GUI lifecycle failures as their own
+# release gate rather than burying them in a Phase category.
+add_executable(KickLockGuiAcceptanceTests
+    DspTestMain.cpp
+    GuiAcceptanceTests.cpp
+)
+target_include_directories(KickLockGuiAcceptanceTests
+    PRIVATE
+        ../src
+        ../src/dsp
+        ../src/util
+        ${CMAKE_BINARY_DIR}/KickLock_artefacts/JuceLibraryCode
+)
+target_compile_features(KickLockGuiAcceptanceTests PRIVATE cxx_std_20)
+set_target_properties(KickLockGuiAcceptanceTests PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+target_link_libraries(KickLockGuiAcceptanceTests
+    PRIVATE
+        KickLock
+        juce::juce_core
+        juce::juce_dsp
+        juce::juce_audio_utils
+)
+if(MSVC)
+    target_link_options(KickLockGuiAcceptanceTests PRIVATE "/STACK:8388608")
+    target_compile_options(KickLockGuiAcceptanceTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
+endif()
+
 add_test(NAME KickLockAudioSmokeTests COMMAND KickLockAudioSmokeTests)
 add_test(NAME KickLockAudioAcceptanceTests COMMAND KickLockAudioAcceptanceTests)
+add_test(NAME KickLockGuiAcceptanceTests COMMAND KickLockGuiAcceptanceTests)
 # Stress is intentionally not registered as a default ctest; run it explicitly.
