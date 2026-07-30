@@ -25,15 +25,17 @@ namespace AudioWavIo
         file.deleteFile();
 
         juce::WavAudioFormat format;
-        std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+        std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
         if (stream == nullptr)
             return false;
 
-        std::unique_ptr<juce::AudioFormatWriter> writer (
-            format.createWriterFor (stream.get(), sampleRate, 1, 24, {}, 0));
+        const auto options = juce::AudioFormatWriterOptions()
+                                 .withSampleRate (sampleRate)
+                                 .withNumChannels (1)
+                                 .withBitsPerSample (24);
+        auto writer = format.createWriterFor (stream, options);
         if (writer == nullptr)
             return false;
-        stream.release(); // writer owns the stream now
 
         juce::AudioBuffer<float> buffer (1, (int) signal.size());
         buffer.clear();
