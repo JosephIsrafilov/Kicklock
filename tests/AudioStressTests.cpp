@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <vector>
 
 // =============================================================================
@@ -35,6 +36,8 @@ public:
     {
         sampleRateBlockSizeMatrix();
         variableBlockSizeSequence();
+        hundredLoopWraps();
+        concurrentInstances();
     }
 
 private:
@@ -160,6 +163,69 @@ private:
 
         logMessage ("  variableBlockStates=" + juce::String ((int) idsVariable.size())
                     + " fixedBlockStates=" + juce::String ((int) idsFixed.size()));
+    }
+
+    void hundredLoopWraps()
+    {
+        beginTest ("Stress: 100 loop wraps retain monotonic timing, bounded output, and State selection");
+
+        AudioHarnessConfig cfg;
+        cfg.sampleRate = 48000.0;
+        cfg.blockSize = 256;
+        AudioTestHarness harness (*this, cfg);
+        const auto fx = harness.resolveFixture ("loop_wrap_first_kick");
+        const auto map = AudioTestHarness::buildProvenCorrectiveMap (cfg.sampleRate);
+
+        KickLockAudioProcessor processor;
+        harness.prepareProcessor (processor);
+        expect (harness.applyMapDirect (processor, map));
+        const auto render = harness.render (processor, fx, harness.planLoop (fx, 100));
+
+        assertReleaseStressContract (render, "100 loop wraps");
+        expectEquals (AudioMetrics::internalTimestampBackwardSteps (render.timeline), 0,
+                      "loop wraps never rewind the production monotonic timestamp");
+        expectGreaterThan (AudioMetrics::matchedPersistentBlockCount (render.timeline), 0,
+                           "State branches remain active across the endurance loop");
+        logMessage ("  processedSeconds=" + juce::String (render.processedSeconds, 2)
+                    + " realtimeFactor=" + juce::String (render.realtimeFactor(), 1)
+                    + " stateBlocks=" + juce::String (AudioMetrics::matchedPersistentBlockCount (render.timeline)));
+    }
+
+    void concurrentInstances()
+    {
+        beginTest ("Stress: concurrent processors keep Dynamic State selection independent");
+
+        AudioHarnessConfig cfg;
+        cfg.sampleRate = 48000.0;
+        cfg.blockSizeSequence = { 32, 128, 512, 2048 };
+        cfg.blockSize = 512;
+        AudioTestHarness harness (*this, cfg);
+        const auto fx = harness.resolveFixture ("repeatable_multi_note");
+        const auto map = AudioTestHarness::buildProvenCorrectiveMap (cfg.sampleRate);
+
+        auto renderInstance = [&harness, &fx, &map] ()
+        {
+            KickLockAudioProcessor processor;
+            harness.prepareProcessor (processor);
+            const bool applied = harness.applyMapDirect (processor, map);
+            auto render = harness.render (processor, fx, harness.planLinear (fx));
+            return std::make_pair (applied, std::move (render));
+        };
+
+        auto first = std::async (std::launch::async, renderInstance);
+        auto second = std::async (std::launch::async, renderInstance);
+        const auto left = first.get();
+        const auto right = second.get();
+
+        expect (left.first && right.first, "each instance accepts its own State map publication");
+        assertReleaseStressContract (left.second, "concurrent instance A");
+        assertReleaseStressContract (right.second, "concurrent instance B");
+        expect (AudioSuite::timelinesIdentical (left.second.timeline, right.second.timeline),
+                "independent instances produce the same deterministic selection timeline");
+        expectGreaterThan (AudioMetrics::matchedPersistentBlockCount (left.second.timeline), 0,
+                           "instance A selected a State");
+        expectGreaterThan (AudioMetrics::matchedPersistentBlockCount (right.second.timeline), 0,
+                           "instance B selected a State");
     }
 };
 

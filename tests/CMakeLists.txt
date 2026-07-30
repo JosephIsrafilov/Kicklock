@@ -268,4 +268,4 @@ if(MSVC)
     target_compile_options(KickLockMalformedStateTests PRIVATE "$<$<CONFIG:Debug>:/O2>")
 endif()
 add_test(NAME KickLockMalformedStateTests COMMAND KickLockMalformedStateTests)
-# Stress is intentionally not registered as a default ctest; run it explicitly.
+add_test(NAME KickLockAudioStressTests COMMAND KickLockAudioStressTests)
