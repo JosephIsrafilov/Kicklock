@@ -93,6 +93,33 @@ namespace
     {
         return left.getWidth() > 0 && right.getWidth() > 0 && left.intersects (right);
     }
+
+    // Finds a child (searched recursively, by the exact setName() every
+    // Phase 12 panel already sets) without needing dedicated test-only
+    // accessors on DynamicWorkspace.
+    juce::Component* findChildNamed (juce::Component& root, const juce::String& name)
+    {
+        if (root.getName() == name)
+            return &root;
+        for (int i = 0; i < root.getNumChildComponents(); ++i)
+            if (auto* found = findChildNamed (*root.getChildComponent (i), name))
+                return found;
+        return nullptr;
+    }
+
+    // Recursively collects every interactive control (Button/Slider) that a
+    // real layout pass actually positioned. Unused Recent Unknowns row
+    // slots are skipped because their owning panel's resized() deliberately
+    // never gives a hidden row real bounds - so a zero-size bounds check is
+    // sufficient without needing to reason about component visibility.
+    void collectInteractiveControls (juce::Component& root, std::vector<juce::Component*>& out)
+    {
+        if ((dynamic_cast<juce::Button*> (&root) != nullptr || dynamic_cast<juce::Slider*> (&root) != nullptr)
+            && ! root.getBounds().isEmpty())
+            out.push_back (&root);
+        for (int i = 0; i < root.getNumChildComponents(); ++i)
+            collectInteractiveControls (*root.getChildComponent (i), out);
+    }
 }
 
 class DynamicWorkspaceTests : public juce::UnitTest
@@ -380,17 +407,89 @@ public:
             }
         }
 
+        beginTest ("Phase 12 bottom band (Inspector/Focus/Recent Unknowns) stays within bounds and non-overlapping at every editor size");
+        {
+            for (const auto size : { juce::Point<int> (900, 680), juce::Point<int> (1180, 820),
+                                     juce::Point<int> (1600, 1000) })
+            {
+                DynamicWorkspace workspace;
+                workspace.setSize (size.x, size.y);
+                auto model = runtimeModel (8);
+                model.hasSelectedState = true;
+                model.selectedStableStateId = 100;
+                model.selectedState = makeState (100);
+                workspace.setModel (model);
+                workspace.selectDetailState (100);
+
+                auto* inspector = findChildNamed (workspace, "Dynamic State Inspector");
+                auto* focusStatus = findChildNamed (workspace, "Dynamic Focus Status");
+                auto* recentUnknowns = findChildNamed (workspace, "Recent Unknown Events");
+                expect (inspector != nullptr && focusStatus != nullptr && recentUnknowns != nullptr,
+                        "all three Phase 12 panels are real, permanent children");
+
+                const std::array<juce::Rectangle<int>, 3> bandBounds {
+                    inspector->getBounds(), focusStatus->getBounds(), recentUnknowns->getBounds()
+                };
+                for (const auto& bandBox : bandBounds)
+                    expect (bandBox.getX() >= 0 && bandBox.getY() >= 0
+                            && bandBox.getRight() <= size.x && bandBox.getBottom() <= size.y,
+                            "each Phase 12 panel stays within the workspace's own bounds");
+                for (int left = 0; left < (int) bandBounds.size(); ++left)
+                    for (int right = left + 1; right < (int) bandBounds.size(); ++right)
+                        expect (! overlaps (bandBounds[(size_t) left], bandBounds[(size_t) right]),
+                                "Inspector/Focus/Recent Unknowns never overlap each other");
+
+                const auto& cardBounds = workspace.getCardBoundsForTesting();
+                for (const auto& bandBox : bandBounds)
+                    for (const auto& card : cardBounds)
+                        expect (! overlaps (bandBox, card), "the bottom band never overlaps the State card grid");
+            }
+        }
+
+        beginTest ("Every interactive Dynamic control exposes a non-empty accessible name and description");
+        {
+            DynamicWorkspace workspace;
+            workspace.setSize (1180, 820);
+            auto model = runtimeModel (8);
+            model.hasSelectedState = true;
+            model.selectedStableStateId = 100;
+            model.selectedState = makeState (100);
+            model.focusEnabled = true;
+            DynamicRecentUnknownCluster cluster;
+            cluster.eventId = 1;
+            cluster.repeatCount = DynamicStateMapContract::kManualMinimumRepeatableHits;
+            model.recentUnknownClusters.push_back (cluster);
+            workspace.setModel (model);
+            workspace.selectDetailState (100);
+
+            std::vector<juce::Component*> controls;
+            collectInteractiveControls (workspace, controls);
+            expect (controls.size() > 8, "Clear/Revert, the Inspector's sliders and buttons, the Focus toggle, "
+                    "and the Recent Unknowns actions are all reachable");
+            for (auto* control : controls)
+            {
+                expect (control->getName().isNotEmpty(),
+                        "interactive control at " + control->getBounds().toString() + " has an accessible name");
+                if (auto* handler = control->getAccessibilityHandler())
+                    expect (handler->getDescription().isNotEmpty(),
+                            "interactive control \"" + control->getName() + "\" exposes an accessibility description");
+            }
+        }
+
         beginTest ("Workspace accepts stored snapshots only and pre-creates eight cards");
         {
             static_assert (! std::is_constructible_v<DynamicWorkspace, KickLockAudioProcessor&>);
             DynamicWorkspace workspace;
-            expectEquals (workspace.getNumChildComponents(), 10);
+            // 8 State cards + Clear + Revert + the Phase 12 State Inspector,
+            // Focus Status, and Recent Unknowns panel (all real, permanent
+            // children - not conditionally created).
+            expectEquals (workspace.getNumChildComponents(), 13);
             for (int i = 0; i < 12; ++i)
             {
                 workspace.setSize (900 + i * 10, 360 + i * 5);
                 workspace.setModel (runtimeModel (i % 2 == 0 ? 1 : 8));
             }
-            expectEquals (workspace.getNumChildComponents(), 10);
+            expectEquals (workspace.getNumChildComponents(), 13);
         }
 
         beginTest ("Editor and workspace survive Dynamic construction, resizing, and close/reopen");

@@ -313,3 +313,150 @@ components); `PluginProcessor` stays a thin integration layer.
 This document freezes architecture only. Commit 1 adds persistent
 DynamicStateMap v1 contract and serialization. It does not activate runtime,
 Learn, DSP, transport, UI, or legacy compatibility behavior.
+
+## Phase 12 Dynamic Manual State Workflow
+
+Phase 10 was explicitly presentation-only: State selection was inspection
+identity, Dynamic Strength was the only live Dynamic control, and there was no
+processor write-path for a single State. Phase 12 closes that gap end to end:
+Learn -> Apply -> understand -> select -> manually correct -> safely audition
+-> verify -> persist -> reload -> loop -> render -> revert, without weakening
+any Phase 1-11 contract.
+
+**Edit transaction layer.** `src/dsp/DynamicStateEditTransaction.h` adds pure,
+audio-thread-independent functions (`setManualTrim`, `resetManualTrim`,
+`resetToLearned`, `resetToGlobal`, `setEnabled`, `setBypassed`,
+`promoteToManual`, `removeManualState`, `createManualState`) that each take a
+complete `DynamicStateMap`, locate the target purely by `stableStateId`
+(never by slot), apply exactly one mutation to a copy, and re-validate the
+whole result with the existing `isStructurallyValidDynamicStateMap`. Any
+rejection returns the original map completely untouched plus a specific
+`DynamicStateEditRejectionReason` - never a silent no-op, never a partial
+mutation. `KickLockAudioProcessor::applyDynamicStateEdit()` wraps this using
+exactly `applyLatestLearnResult()`'s existing atomic-publish lock sequence
+(`mapPublicationMutex` then `mapMutex`, stage into `messageOwnedDynamicStateMap`,
+push to `dynamicMapUpdateQueue`, roll back on a full queue) so per-state edits
+get the identical accept/reject guarantee Apply already has, with no new
+persistence code: `messageOwnedDynamicStateMap` is the exact value
+`getStateInformation()` already serializes.
+
+**Manual editing model.** All live parameter editing (Delay/Frequency/Q) goes
+through `setManualTrim` for both Auto and Manual origin States;
+`manualBasePackage` is set once, at promotion or creation, exactly mirroring
+`learnedPackage` as the stable Auto base. There is no separate "set manual
+base package" transaction - nothing in the required workflow needs to edit it
+after promotion. Promotion (`promoteToManual`) preserves `stableStateId`,
+fingerprint, hit evidence and optional pitch/MIDI; it initializes
+`manualBasePackage` from a safe Global-equivalent package (zero delay delta,
+current Global allpass frequency/Q) and never invents an automatic
+improvement result. `resetToGlobal` is Auto-origin only: a Manual State always
+requires a manual base package by the frozen validity contract, so its
+equivalent action is Remove Manual State, not reset-to-Global.
+
+**Safe runtime retune (the hard part).** `DynamicHotBranchEngine` applies a
+reconfigured package's coefficients and delay tap immediately against
+whatever filter/interpolator memory a branch already has -
+`AllpassStageState::process()`/`FractionalInterpolator::process()` have no
+ramp, and `configureStateSlot()` with unchanged identity does not call
+`resetRuntime()`. Silently republishing an edited-but-same-identity package
+through the ordinary map-generation path would therefore click if that exact
+identity is currently audible. Phase 12 does not touch
+`DynamicHotBranchEngine.h`, `DynamicSelectorScheduler.h`, or
+`DynamicContinuityMixer.h` to fix this; it adds a liveness-gated retune
+entirely inside `DynamicProductionRuntime` (`configurePackagesIfNeeded()`'s
+per-slot loop plus a new `advanceStateEditAuditions()` called every chunk),
+using two already-existing, already-tested scheduler primitives:
+`DynamicSelectorScheduler::isSemanticStateReferenced()` (true iff an identity
+is currently contributing non-zero gain or is a live fade source/target) and
+the existing `MatchedService` decision path (the scheduler already prefers a
+warm persistent slot and falls back to a warm, bound Service branch
+otherwise). The rule: never touch a branch's config, and never hide it from
+the roster, while its identity is referenced - `checkStaleReferences()`
+proves that hiding a *live* branch collapses the whole selection to Global
+abruptly, not gracefully. Concretely:
+
+- If the edited State is not currently referenced, the persistent slot is
+  reconfigured directly (silent, therefore safe) - unchanged from before this
+  phase.
+- If it is currently referenced, the new package is configured onto the
+  Service branch instead, primed, and bound to the same `stableStateId`. The
+  persistent slot keeps playing its old, already-committed package until the
+  in-flight hit's fade/Hold naturally ends (this is also exactly mission's
+  "no late transition across an already-audible attack" rule, and falls out
+  for free rather than being separately enforced). Once the identity is no
+  longer referenced anywhere, the persistent slot is silently reconfigured to
+  the new package and hidden from the roster (`forceHiddenSlot`) for a bounded
+  settle window (`DynamicHotBranchDetail::warmFramesRequired`), because
+  `engine`'s own `warm` flag does not reset on a same-identity content change
+  and so cannot be trusted to mean "the recursive filter has actually
+  converged onto the new coefficients." Once the settle window elapses, the
+  slot is un-hidden; the existing, unmodified Service-auto-drop-back logic in
+  `updateServiceBinding()` (via the now edit-aware `warmPersistentSlotFor()`)
+  hands ownership back on its own.
+- Rapid re-edits overwrite the same slot's pending package and restart at
+  "claim Service" - there is at most one audition record per persistent slot,
+  never a queue. A new map generation (any edit, Apply, or Revert) cancels
+  every in-flight audition; `configurePackagesIfNeeded()`'s content-based
+  comparison (not a generation counter) then re-detects exactly what, if
+  anything, still needs retuning against the fresh map, so an edit to one
+  State never disturbs another State's already-committed package.
+- `updateServiceBinding()`'s ordinary confident-match-driven Service usage is
+  paused (not stolen) while an edit audition owns Service
+  (`serviceOwnedByEditAuditionForId`); the pause is bounded by the audition's
+  own completion.
+
+**Focused-scope trace.** Reuses the Phase 9 `DynamicRuntimeMeasurementCapture`
+mechanism rather than adding a parallel one: its `beforeBass`/`beforeKick`/
+`afterBass`/`afterKick` windows are already captured for confidently-matched,
+correction-eligible events and already gated on settledness (not mid-fade,
+right identity, right branch, current generation) by
+`DynamicProductionRuntime::takeCompletedMeasurementCapture()`. Focus adds
+`focusedStableStateId` (a plain atomic set by `setFocusedStableStateId()`) and
+mirrors the identical, already-vetted capture into a second
+`DynamicBoundedSpscQueue<DynamicRuntimeMeasurementCaptureResult>`
+(`dynamicFocusedTraceQueue`) only when it belongs to the currently-focused
+State. No new audio-thread capture logic, no raw audio persistence, no
+fabricated waveform.
+
+**Recent Unknown Events.** Bounded, explicitly two-stage, non-persistent
+(`src/dsp/DynamicRecentUnknownEvents.h`): the audio thread stages fixed-size
+`DynamicRecentUnknownRawEvent` values (fingerprint, outcome, distance, trigger
+sample, map generation) in a tiny same-thread ring inside
+`DynamicProductionRuntime` whenever `matchDynamicFingerprint()` returns
+Unknown or Ambiguous; `PluginProcessor::drainRecentUnknownEvents()` (audio
+thread) pops that ring once per block into an SPSC queue; and
+`DynamicRecentUnknownEventLog` - message-thread-only, no synchronization
+because only one thread ever touches it - coalesces repeatable similar
+events (normalized fingerprint distance <= 0.12, reusing the canonical
+`dynamicFingerprintDistanceV1`) into a bounded 32-cluster list, dropping a
+genuinely new, distinct cluster with a diagnostic once full rather than
+evicting an existing one. One arbitrary Unknown event never becomes a
+persistent State: `createManualStateFromRecentUnknown()` delegates every
+eligibility check (minimum 3 repeatable hits, valid fingerprint, free
+capacity, valid Global-equivalent starting package) to
+`DynamicStateEditTransaction::createManualState()`. "Assign Unknown to
+Existing State" is explicitly out of scope for Phase 12 rather than shipping
+a vague prototype-averaging merge; only Create Manual State is implemented.
+
+**Preview/persistence/measurement invalidation.** Preview continues to read
+only `previewMap`/`previewPredicted` (a separate value from the applied map);
+edits only ever target `messageOwnedDynamicStateMap`, so a preview-only
+candidate ID that doesn't yet exist in the applied map is naturally rejected
+as `StateNotFound`, with no dedicated preview check needed in the transaction
+layer itself (the UI's own control-eligibility helpers are responsible for
+disabling Inspector controls while a preview card is shown, and explaining
+why). No schema bump: every field a manual edit needs
+(`manualBasePackage`, `manualTrim`, `origin`, `evidence`, `enabled`,
+`bypassed`) already round-trips through `DynamicStateSerialization.h`. Every
+edit publish is a normal map-generation bump, so it reconciles with
+`DynamicVerifiedAggregation` and in-flight measurement captures exactly the
+way Apply/Revert already do - an edited State's stale Verified result cannot
+survive as if it verified the new package.
+
+Phase 12 changes no DynamicStateMap v1 schema, no persistence format, no
+Static-mode behavior, and no frozen Phase 1-11 file
+(`DynamicHotBranchEngine.h`, `DynamicSelectorScheduler.h`,
+`DynamicContinuityMixer.h`, `DynamicPackageMorpher.h` are all unmodified). All
+new logic lives in `DynamicProductionRuntime` (the existing Phase 7
+integration layer), `PluginProcessor`, and new single-purpose headers
+following this codebase's existing one-concern-per-file convention.

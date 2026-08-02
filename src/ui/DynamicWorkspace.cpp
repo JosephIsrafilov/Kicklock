@@ -69,7 +69,9 @@ namespace
             && measurementsEqual (left.predicted, right.predicted)
             && measurementsEqual (left.verified, right.verified)
             && left.assessment == right.assessment
-            && left.rejectionReason == right.rejectionReason;
+            && left.rejectionReason == right.rejectionReason
+            && left.correctionPolicy == right.correctionPolicy
+            && left.policyRejectionReason == right.policyRejectionReason;
     }
 }
 
@@ -185,6 +187,12 @@ public:
         auto assessment = dynamicCorrectionAssessmentLabel (card.assessment);
         const auto reason = dynamicCorrectionRejectionLabel (card.rejectionReason);
         if (reason.isNotEmpty()) assessment << " - " << reason;
+        if (card.correctionPolicy == DynamicCorrectionPolicy::NeutralSafe)
+        {
+            assessment << "  [" << dynamicCorrectionPolicyLabel (card.correctionPolicy) << "]";
+            const auto policyReason = dynamicPolicyRejectionReasonLabel (card.policyRejectionReason);
+            if (policyReason.isNotEmpty()) assessment << ": " << policyReason;
+        }
         g.drawText (assessment, footer, juce::Justification::centredLeft, true);
     }
 
@@ -240,6 +248,26 @@ DynamicWorkspace::DynamicWorkspace()
     revertButton.setWantsKeyboardFocus (true);
     revertButton.onClick = [this] { if (onRevert) onRevert(); };
     addAndMakeVisible (revertButton);
+
+    inspector.onEdit = [this] (const DynamicStateInspectorEditRequest& request)
+    {
+        if (onEdit) onEdit (request);
+    };
+    addAndMakeVisible (inspector);
+
+    focusStatus.onFocusToggle = [this] (bool enabled) { if (onFocusToggle) onFocusToggle (enabled); };
+    addAndMakeVisible (focusStatus);
+
+    recentUnknownsPanel.onCreateManualState = [this] (uint64_t eventId)
+    {
+        if (onCreateManualState) onCreateManualState (eventId);
+    };
+    recentUnknownsPanel.onIgnore = [this] (uint64_t eventId)
+    {
+        if (onIgnoreRecentUnknown) onIgnoreRecentUnknown (eventId);
+    };
+    recentUnknownsPanel.onClear = [this] { if (onClearRecentUnknowns) onClearRecentUnknowns(); };
+    addAndMakeVisible (recentUnknownsPanel);
 }
 
 DynamicWorkspace::~DynamicWorkspace() = default;
@@ -306,6 +334,17 @@ void DynamicWorkspace::setModel (const DynamicWorkspaceViewModel& next)
     headerStatus = header.status;
     headerDetail = header.detail;
 
+    const auto summary = dynamicWorkspaceSummary (model);
+    headerSummary = juce::String (summary.recognizedStateCount) + " recognized State"
+        + (summary.recognizedStateCount == 1 ? juce::String() : juce::String ("s"))
+        + " · " + juce::String (summary.correctionCount) + " correction"
+        + (summary.correctionCount == 1 ? juce::String() : juce::String ("s"))
+        + " · " + juce::String (summary.manualCount) + " Manual";
+
+    inspector.setModel (model);
+    focusStatus.setModel (model);
+    recentUnknownsPanel.setModel (model);
+
     if (headerChanged)
         repaint (getLocalBounds().removeFromTop (62));
     resized();
@@ -345,7 +384,7 @@ void DynamicWorkspace::selectDetailState (uint64_t stableStateId)
 void DynamicWorkspace::resized()
 {
     auto area = getLocalBounds().reduced (12, 10);
-    auto header = area.removeFromTop (52);
+    auto header = area.removeFromTop (62);
     auto actions = header.removeFromRight (150);
     clearButton.setBounds (actions.removeFromLeft (72).reduced (1, 8));
     revertButton.setBounds (actions.reduced (1, 8));
@@ -359,6 +398,17 @@ void DynamicWorkspace::resized()
     }
 
     area.removeFromTop (6);
+    // Reserve the bottom band for Inspector / Focus / Recent Unknowns, stacked
+    // vertically; the State card grid gets whatever remains above. This is a
+    // functional layout, not yet the final responsive pass (Checkpoint 3).
+    const int bottomBandHeight = juce::jmin (360, (area.getHeight() * 2) / 3);
+    auto bottomBand = area.removeFromBottom (bottomBandHeight);
+    inspector.setBounds (bottomBand.removeFromTop (juce::jmax (120, bottomBandHeight - 200)));
+    bottomBand.removeFromTop (6);
+    focusStatus.setBounds (bottomBand.removeFromTop (90));
+    bottomBand.removeFromTop (6);
+    recentUnknownsPanel.setBounds (bottomBand);
+    area.removeFromBottom (6);
     const int minCardWidth = 185;
     cardColumns = juce::jlimit (1, 4, juce::jmax (1, (area.getWidth() + 8) / (minCardWidth + 8)));
     const int rows = (int) std::ceil ((double) cards.size() / (double) cardColumns);
@@ -389,7 +439,7 @@ void DynamicWorkspace::paint (juce::Graphics& g)
     g.setColour (kBorder);
     g.drawRoundedRectangle (bounds, 7.0f, 1.0f);
 
-    auto header = getLocalBounds().reduced (14, 10).removeFromTop (48);
+    auto header = getLocalBounds().reduced (14, 10).removeFromTop (62);
     g.setColour (model.previewActive ? kAmber : kTeal);
     g.setFont (juce::Font (juce::FontOptions (12.0f)).boldened());
     g.drawText (headerSource, header.removeFromTop (15), juce::Justification::centredLeft, true);
@@ -398,5 +448,7 @@ void DynamicWorkspace::paint (juce::Graphics& g)
     g.drawText (headerStatus, header.removeFromTop (18), juce::Justification::centredLeft, true);
     g.setColour (kMuted);
     g.setFont (juce::Font (juce::FontOptions (9.5f)));
+    if (headerSummary.isNotEmpty())
+        g.drawText (headerSummary, header.removeFromTop (14), juce::Justification::centredLeft, true);
     g.drawText (headerDetail, header, juce::Justification::centredLeft, true);
 }

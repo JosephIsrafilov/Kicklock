@@ -6,6 +6,8 @@
 #include <string>
 
 #include "DynamicWorkspaceModel.h"
+#include "../dsp/DynamicStateEditTransaction.h"
+#include "../dsp/DynamicManualTrimConversion.h"
 
 enum class DynamicWorkspaceColourRole
 {
@@ -34,8 +36,32 @@ inline juce::String dynamicBranchLabel (DynamicSelectorBranchKind branch)
         case DynamicSelectorBranchKind::Global:  return "GLOBAL";
         case DynamicSelectorBranchKind::State:   return "STATE";
         case DynamicSelectorBranchKind::Service: return "SERVICE";
+        case DynamicSelectorBranchKind::Neutral: return "SAFE NEUTRAL";
     }
     return "GLOBAL";
+}
+
+inline juce::String dynamicCorrectionPolicyLabel (DynamicCorrectionPolicy policy)
+{
+    switch (policy)
+    {
+        case DynamicCorrectionPolicy::LearnedState:   return "LEARNED";
+        case DynamicCorrectionPolicy::GlobalFallback: return "GLOBAL FALLBACK";
+        case DynamicCorrectionPolicy::NeutralSafe:    return "SAFE NEUTRAL";
+    }
+    return "GLOBAL FALLBACK";
+}
+
+inline juce::String dynamicPolicyRejectionReasonLabel (DynamicPolicyRejectionReason reason)
+{
+    switch (reason)
+    {
+        case DynamicPolicyRejectionReason::None:
+            return "";
+        case DynamicPolicyRejectionReason::GlobalPackageExcessiveRegression:
+            return "Global package caused excessive degradation for this identity";
+    }
+    return "";
 }
 
 inline juce::String dynamicStateOriginLabel (DynamicStateOrigin origin)
@@ -403,4 +429,222 @@ inline DynamicWorkspaceWorkflowVisibility dynamicWorkspaceWorkflowVisibility (
         || learnState == LearnState::Failed;
     return { resultReady && controlsVisible, resolved && controlsVisible,
              controlsVisible, controlsVisible, controlsVisible };
+}
+
+// =============================================================================
+// Phase 12: State Inspector / Status Header / actions support (Sections 5-10).
+// =============================================================================
+
+inline juce::String dynamicStateEditRejectionLabel (DynamicStateEditRejectionReason reason)
+{
+    switch (reason)
+    {
+        case DynamicStateEditRejectionReason::None:                        return {};
+        case DynamicStateEditRejectionReason::MapNotStructurallyValid:     return "The current map is not valid.";
+        case DynamicStateEditRejectionReason::StateNotFound:               return "That State no longer exists.";
+        case DynamicStateEditRejectionReason::InsufficientEvidence:        return "Need at least 3 repeatable hits.";
+        case DynamicStateEditRejectionReason::AlreadyManual:               return "State is already Manual.";
+        case DynamicStateEditRejectionReason::RequiresAutoOrigin:          return "Only available for Auto States.";
+        case DynamicStateEditRejectionReason::RequiresManualOrigin:        return "Only available for Manual States.";
+        case DynamicStateEditRejectionReason::InvalidFingerprint:          return "Invalid fingerprint.";
+        case DynamicStateEditRejectionReason::InvalidTrim:                 return "That value is outside the allowed range.";
+        case DynamicStateEditRejectionReason::InvalidGlobalStartingPackage:return "Invalid Global starting package.";
+        case DynamicStateEditRejectionReason::MapValidationFailed:         return "That change would produce an invalid map.";
+        case DynamicStateEditRejectionReason::NoFreeCapacity:              return "No free capacity (maximum 8 States).";
+        case DynamicStateEditRejectionReason::PreviewNotApplied:           return "Apply the preview first.";
+        case DynamicStateEditRejectionReason::LegacyMapReadOnly:           return "Legacy map is read-only.";
+        case DynamicStateEditRejectionReason::NoMapApplied:                return "No Dynamic map is applied yet.";
+        case DynamicStateEditRejectionReason::PublicationBusy:             return "Busy publishing the last change - try again.";
+    }
+    return {};
+}
+
+struct DynamicStateControlEligibility
+{
+    bool controlsEnabled = false;
+    juce::String disabledReason;
+    bool canPromote = false;
+    juce::String promoteDisabledReason;
+    bool canRemoveManual = false;
+};
+
+// Pure control-eligibility policy (Section 8.4): Preview/Legacy/No-map/no-
+// selection disable everything with an explicit reason; otherwise controls
+// are enabled and promotion/removal are gated on origin and evidence.
+inline DynamicStateControlEligibility dynamicStateControlEligibility (
+    const DynamicWorkspaceViewModel& model) noexcept
+{
+    DynamicStateControlEligibility result;
+    if (model.previewActive)
+    {
+        result.disabledReason = "Preview is not applied yet. Apply the result to edit States.";
+        result.promoteDisabledReason = result.disabledReason;
+        return result;
+    }
+    if (model.runtime.source == DynamicMapSource::LegacyDynamicCompatibility)
+    {
+        result.disabledReason = "Legacy map is read-only.";
+        result.promoteDisabledReason = result.disabledReason;
+        return result;
+    }
+    if (model.runtime.source == DynamicMapSource::None)
+    {
+        result.disabledReason = "No Dynamic map is applied yet.";
+        result.promoteDisabledReason = result.disabledReason;
+        return result;
+    }
+    if (! model.hasSelectedState)
+    {
+        result.disabledReason = "Select a State to inspect or edit it.";
+        result.promoteDisabledReason = result.disabledReason;
+        return result;
+    }
+
+    result.controlsEnabled = true;
+    const auto& state = model.selectedState;
+    if (state.origin == DynamicStateOrigin::Manual)
+    {
+        result.promoteDisabledReason = "State is already Manual.";
+        result.canRemoveManual = true;
+    }
+    else if (state.hitCount < DynamicStateMapContract::kManualMinimumRepeatableHits)
+    {
+        result.promoteDisabledReason = dynamicStateEditRejectionLabel (
+            DynamicStateEditRejectionReason::InsufficientEvidence);
+    }
+    else
+    {
+        result.canPromote = true;
+    }
+    return result;
+}
+
+// Section 7C: correction status for the selected State (distinct from the
+// per-card assessment badge - this is the full producer-facing sentence).
+inline juce::String dynamicStateCorrectionStatusLine (const DynamicState& state) noexcept
+{
+    if (! state.occupied)
+        return "No State selected.";
+    if (! state.enabled)
+        return "Disabled - not eligible for matching.";
+    if (state.bypassed)
+        return "Bypassed - using Global.";
+    if (state.origin == DynamicStateOrigin::Manual)
+        return state.hasManualBasePackage ? "Manual correction." : "Manual State - invalid package.";
+    if (state.hasLearnedPackage)
+        return "Automatic correction accepted.";
+    return "Recognized - no automatic correction. Using Global. Manual editing is available.";
+}
+
+// Section 7D: effective package values for display, using the canonical
+// conversion (never a second, duplicated formula).
+struct DynamicEffectivePackageDisplay
+{
+    bool valid = false;
+    float delayDeltaMs = 0.0f;
+    double frequencyHz = 0.0;
+    double q = 0.0;
+};
+
+inline DynamicEffectivePackageDisplay dynamicEffectivePackageDisplay (
+    const DynamicState& state, double sampleRate) noexcept
+{
+    DynamicEffectivePackageDisplay result;
+    const DynamicZonePackage* source = nullptr;
+    if (state.origin == DynamicStateOrigin::Auto && state.hasLearnedPackage)
+        source = &state.learnedPackage;
+    else if (state.origin == DynamicStateOrigin::Manual && state.hasManualBasePackage)
+        source = &state.manualBasePackage;
+    if (source == nullptr)
+        return result;
+
+    float effectiveDelay = 0.0f;
+    if (! getEffectiveStoredDynamicStateDelayDeltaMs (state, effectiveDelay))
+        return result;
+
+    double freq = 0.0, q = 0.0;
+    if (! DynamicManualTrimConversion::effectiveFrequencyQ (*source, state.manualTrim, sampleRate, freq, q))
+        return result;
+
+    result.valid = true;
+    result.delayDeltaMs = effectiveDelay;
+    result.frequencyHz = freq;
+    result.q = q;
+    return result;
+}
+
+// Section 5: header summary counts.
+struct DynamicWorkspaceSummary
+{
+    int recognizedStateCount = 0;
+    int correctionCount = 0;
+    int manualCount = 0;
+    int globalOnlyCount = 0;
+};
+
+inline DynamicWorkspaceSummary dynamicWorkspaceSummary (const DynamicWorkspaceViewModel& model) noexcept
+{
+    DynamicWorkspaceSummary summary;
+    if (model.previewActive)
+    {
+        for (int slot = 0; slot < DynamicMeasurementContract::kMaxRetainedStates; ++slot)
+        {
+            const auto& state = model.previewMap.states[(size_t) slot];
+            if (! state.occupied)
+                continue;
+            ++summary.recognizedStateCount;
+            const bool hasCorrection = (state.origin == DynamicStateOrigin::Auto
+                                        && state.evidence == DynamicStateEvidence::Stable
+                                        && state.hasLearnedPackage)
+                || (state.origin == DynamicStateOrigin::Manual && state.hasManualBasePackage);
+            if (hasCorrection) ++summary.correctionCount; else ++summary.globalOnlyCount;
+            if (state.origin == DynamicStateOrigin::Manual) ++summary.manualCount;
+        }
+        return summary;
+    }
+
+    if (model.runtime.source != DynamicMapSource::NewDynamicStateMap)
+        return summary;
+    for (const auto& card : model.runtime.states)
+    {
+        if (! card.occupied)
+            continue;
+        ++summary.recognizedStateCount;
+        if (card.hasCorrection) ++summary.correctionCount; else ++summary.globalOnlyCount;
+        if (card.origin == DynamicStateOrigin::Manual) ++summary.manualCount;
+    }
+    return summary;
+}
+
+// Section 13: Focus status text. Never called "Solo" - audio is never soloed.
+inline juce::String dynamicFocusStatusText (const DynamicWorkspaceViewModel& model) noexcept
+{
+    if (! model.focusEnabled)
+        return {};
+    if (model.previewActive || model.runtime.source != DynamicMapSource::NewDynamicStateMap)
+        return "Focus unavailable in Preview/Legacy/No Map.";
+    if (model.focusedStableStateId == 0)
+        return "Select a State to focus.";
+
+    const DynamicStateCard* card = nullptr;
+    for (const auto& c : model.runtime.states)
+        if (c.occupied && c.stableStateId == model.focusedStableStateId) { card = &c; break; }
+    if (card == nullptr)
+        return "Selected State not detected recently.";
+    if (! card->enabled)
+        return "Selected State disabled.";
+    if (card->bypassed)
+        return "Selected State bypassed.";
+
+    const bool isActive = card->active && card->stableStateId == model.runtime.activeSemanticStateId;
+    if (! isActive)
+        return "Waiting for selected State...";
+
+    const auto& verified = card->verified;
+    if (verified.availability == DynamicMeasurementAvailability::Collecting)
+        return "Collecting verification " + juce::String (verified.validWindowCount) + "/"
+             + juce::String (DynamicMeasurementContract::kMinVerifiedEvents);
+    if (verified.availability == DynamicMeasurementAvailability::Available)
+        return "Verified.";
+    return "Selected State detected.";
 }

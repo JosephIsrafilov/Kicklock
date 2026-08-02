@@ -33,6 +33,8 @@
 #include "dsp/DynamicRuntimeSelector.h"
 #include "dsp/DynamicStateMap.h"
 #include "dsp/DynamicStateSerialization.h"
+#include "dsp/DynamicStateEditTransaction.h"
+#include "dsp/DynamicRecentUnknownEvents.h"
 #include "dsp/DynamicMapSourceResolver.h"
 #include "dsp/DynamicProductionRuntime.h"
 #include "dsp/TransientPunchMeter.h"
@@ -224,10 +226,164 @@ public:
         return dynamicSnapshotPublisher.read();
     }
 
+    // ---- Phase 12: per-state edit transaction API (message thread only) ----
+    // Targets a single stableStateId within the currently-applied New
+    // DynamicStateMap. Never mutates by slot. Copies the applied map, runs the
+    // matching pure DynamicStateEditTransaction.h function, and on success
+    // publishes atomically through the same lock sequence and SPSC queue
+    // Apply already uses (see applyLatestLearnResult()); on failure the
+    // applied map is left completely untouched and a specific rejection
+    // reason is returned - never a silent no-op.
+    enum class DynamicStateEditKind : uint8_t
+    {
+        SetManualTrim = 0,
+        ResetManualTrim,
+        ResetToLearned,
+        ResetToGlobal,
+        SetEnabled,
+        SetBypassed,
+        PromoteToManual,
+        RemoveManualState,
+        CreateManualState
+    };
+
+    struct DynamicStateEditRequest
+    {
+        DynamicStateEditKind kind = DynamicStateEditKind::SetManualTrim;
+        uint64_t stableStateId = 0; // ignored for CreateManualState
+        DynamicManualTrim trim;
+        bool boolValue = false;    // SetEnabled/SetBypassed
+        DynamicManualStateCreationRequest creation;
+    };
+
+    struct DynamicStateEditOutcome
+    {
+        bool success = false;
+        DynamicStateEditRejectionReason reason = DynamicStateEditRejectionReason::None;
+        // Echoes request.stableStateId, or the newly-allocated id for
+        // CreateManualState on success.
+        uint64_t stableStateId = 0;
+    };
+
+    DynamicStateEditOutcome applyDynamicStateEdit (const DynamicStateEditRequest& request);
+
+    // ---- Phase 12: Focus (Section 13) ----
+    // Selects which stableStateId the focused-scope trace below tracks. Does
+    // not change runtime selection/audio in any way - purely gates which
+    // State's already-happening measurement captures get mirrored to the UI.
+    void setFocusedStableStateId (uint64_t stableStateId) noexcept
+    {
+        focusedStableStateId.store (stableStateId, std::memory_order_relaxed);
+    }
+    uint64_t getFocusedStableStateId() const noexcept
+    {
+        return focusedStableStateId.load (std::memory_order_relaxed);
+    }
+
+    struct DynamicFocusedTraceForUi
+    {
+        bool available = false;
+        uint64_t stableStateId = 0;
+        uint64_t mapGeneration = 0;
+        DynamicSelectorBranchKind branchKind = DynamicSelectorBranchKind::Global;
+        double sampleRate = 0.0;
+        int windowSamples = 0;
+        std::vector<float> beforeBass;
+        std::vector<float> beforeKick;
+        std::vector<float> afterBass;
+        std::vector<float> afterKick;
+    };
+
+    // Message-thread only. Drains every trace queued since the last call and
+    // returns the newest one that still belongs to the currently-focused
+    // State (a focus change mid-flight correctly discards traces for the
+    // previous selection rather than presenting them as if current).
+    // available=false when nothing new arrived for the focused State this
+    // call - never a fabricated or reused-stale waveform.
+    DynamicFocusedTraceForUi drainFocusedTraceForUi()
+    {
+        DynamicFocusedTraceForUi result;
+        const uint64_t focusedId = focusedStableStateId.load (std::memory_order_relaxed);
+        DynamicRuntimeMeasurementCaptureResult drained;
+        while (dynamicFocusedTraceQueue.pop (drained))
+        {
+            if (! drained.valid || drained.stableStateId != focusedId)
+                continue;
+            result.available = true;
+            result.stableStateId = drained.stableStateId;
+            result.mapGeneration = drained.mapGeneration;
+            result.branchKind = drained.branchKind;
+            result.sampleRate = drained.sampleRate;
+            result.windowSamples = drained.windowSamples;
+            result.beforeBass = drained.beforeBass;
+            result.beforeKick = drained.beforeKick;
+            result.afterBass = drained.afterBass;
+            result.afterKick = drained.afterKick;
+        }
+        return result;
+    }
+
+    // ---- Phase 12, Section 15: Recent Unknown Events (message thread only) ----
+    // Drains the SPSC queue fed by drainRecentUnknownEvents() (audio thread)
+    // into recentUnknownLog. Call periodically (e.g. from the editor timer).
+    void drainRecentUnknownEventsForUi()
+    {
+        DynamicRecentUnknownRawEvent event;
+        while (recentUnknownQueue.pop (event))
+            recentUnknownLog.ingest (event);
+    }
+    int getRecentUnknownClusterCount() const noexcept { return recentUnknownLog.getClusterCount(); }
+    DynamicRecentUnknownCluster getRecentUnknownCluster (int index) const noexcept
+    {
+        return recentUnknownLog.getCluster (index);
+    }
+    uint64_t getRecentUnknownOverflowCount() const noexcept { return recentUnknownLog.getOverflowCount(); }
+
+    // "Ignore / Use Global": discards one cluster without creating a State.
+    bool ignoreRecentUnknownCluster (uint64_t eventId)
+    {
+        return recentUnknownLog.removeCluster (eventId);
+    }
+    void clearRecentUnknownEvents() { recentUnknownLog.clear(); }
+
+    // Creates a new persistent Manual State from a repeatable Unknown
+    // cluster (mission Scenario J). Requires the New Dynamic map to be
+    // applied; delegates evidence/capacity/fingerprint validation entirely
+    // to DynamicStateEditTransaction::createManualState via
+    // applyDynamicStateEdit(). On success, consumes (removes) the cluster so
+    // one Unknown occurrence can never be created twice.
+    DynamicStateEditOutcome createManualStateFromRecentUnknown (uint64_t eventId)
+    {
+        for (int i = 0; i < recentUnknownLog.getClusterCount(); ++i)
+        {
+            const auto cluster = recentUnknownLog.getCluster (i);
+            if (cluster.eventId != eventId)
+                continue;
+
+            DynamicStateEditRequest request;
+            request.kind = DynamicStateEditKind::CreateManualState;
+            request.creation.fingerprint = cluster.prototype;
+            request.creation.hitCount = cluster.repeatCount;
+            request.creation.evidence = DynamicStateEvidence::Candidate;
+            const auto outcome = applyDynamicStateEdit (request);
+            if (outcome.success)
+                recentUnknownLog.removeCluster (eventId);
+            return outcome;
+        }
+        DynamicStateEditOutcome outcome;
+        outcome.reason = DynamicStateEditRejectionReason::StateNotFound;
+        return outcome;
+    }
+
     bool applyLatestLearnResult();
     bool discardLatestLearnResult();
     bool clearLearnedDynamicData();
     bool clearNoteMap();
+
+    // Message-thread read of a single State by id from the currently-applied
+    // map, for the Inspector. Returns a default-constructed (unoccupied)
+    // DynamicState if the source isn't the New map or the id isn't found.
+    DynamicState getDynamicStateForUi (uint64_t stableStateId) const;
     bool hasValidNoteMap() const noexcept;
     bool hasLearnedDynamicData() const noexcept;
     NotePhaseMapSnapshot getNoteMapSnapshot() const;
@@ -597,6 +753,28 @@ private:
     // sized once in prepareToPlay() so draining never allocates.
     DynamicRuntimeMeasurementCaptureResult dynamicMeasurementDrainScratch;
     DynamicMeasurementScoreQueue dynamicMeasurementScoreQueue;
+
+    // Phase 12: Focused-scope raw-trace hand-off. Reuses the exact same
+    // already-settled-gated capture DynamicProductionRuntime hands to
+    // drainDynamicMeasurementCaptures() (see that method) - no new audio-
+    // thread capture logic, just a second conditional push of the identical
+    // value into an identically-prepared queue whenever it belongs to the
+    // currently message-thread-selected focused State. focusedStableStateId
+    // is written only by the message thread (setFocusedStableStateId) and
+    // read only by the audio thread (relaxed load; a one-block-late focus
+    // change is harmless, it only gates which State's trace gets a second
+    // copy).
+    std::atomic<uint64_t> focusedStableStateId { 0 };
+    DynamicMeasurementCaptureQueue dynamicFocusedTraceQueue;
+
+    // Phase 12, Section 15: Recent Unknown Events. Audio thread drains
+    // DynamicProductionRuntime's same-thread staging ring once per block
+    // (drainRecentUnknownEvents()) and pushes each raw event into this SPSC
+    // queue; recentUnknownLog is message-thread-only (see
+    // DynamicRecentUnknownEvents.h) and is fed exclusively by
+    // drainRecentUnknownEventsForUi().
+    DynamicBoundedSpscQueue<DynamicRecentUnknownRawEvent> recentUnknownQueue;
+    DynamicRecentUnknownEventLog recentUnknownLog;
     DynamicVerifiedAggregation dynamicVerifiedAggregation;
     DynamicSnapshotPublisher dynamicSnapshotPublisher;
     std::unique_ptr<DynamicMeasurementWorker> dynamicMeasurementWorker;
@@ -735,6 +913,10 @@ private:
     // Phase 9 measurement helpers (audio-thread, allocation-free).
     void drainDynamicMeasurementCaptures() noexcept;
     void drainDynamicMeasurementScores() noexcept;
+    // Section 15 (audio-thread, allocation-free): drains
+    // DynamicProductionRuntime's same-thread staging ring into
+    // recentUnknownQueue for the message thread to later coalesce.
+    void drainRecentUnknownEvents() noexcept;
     void publishDynamicRuntimeSnapshot (bool sidechainPresent, bool bypassActive) noexcept;
     bool serviceDynamicMeasurementWorkerStep();
     void classifyDynamicTransportForNewRuntime (int numSamples) noexcept;

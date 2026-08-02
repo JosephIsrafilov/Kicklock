@@ -1279,9 +1279,12 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
     DynamicRuntimeMeasurementCaptureResult captureQueueTemplate;
     captureQueueTemplate.resizeWindows (DynamicRuntimeMeasurementCaptureContract::windowSamplesFor (sampleRate));
     dynamicMeasurementCaptureQueue.prepare (DynamicMeasurementQueueContract::kCaptureQueueCapacity, captureQueueTemplate);
+    dynamicFocusedTraceQueue.prepare (DynamicMeasurementQueueContract::kCaptureQueueCapacity, captureQueueTemplate);
     dynamicMeasurementDrainScratch.resizeWindows (dynamicRuntime.getMeasurementWindowSamples());
   }
   dynamicMeasurementScoreQueue.prepare (DynamicMeasurementQueueContract::kScoreQueueCapacity);
+  recentUnknownQueue.prepare (DynamicRecentUnknownContract::kMaxRecentUnknownClusters);
+  recentUnknownLog.clear();
   dynamicPredictedMeasurementQueue.prepare (4);
   dynamicVerifiedAggregation.reset();
   dynamicVerifiedAggregation.reconcile (activeDynamicStateMap, dynamicRuntime.getMapGeneration());
@@ -2158,6 +2161,7 @@ void KickLockAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
   // Phase 9: once per process() call, never once per sample.
   drainDynamicMeasurementCaptures();
   drainDynamicMeasurementScores();
+  drainRecentUnknownEvents();
   publishDynamicRuntimeSnapshot(hasSidechain, /*bypassActive=*/false);
 }
 
@@ -3240,7 +3244,26 @@ void KickLockAudioProcessor::drainDynamicMeasurementCaptures() noexcept
   // dynamicMeasurementDrainScratch is sized once in prepareToPlay(), so
   // neither the hand-off nor the queue push allocates here.
   while (dynamicRuntime.takeCompletedMeasurementCapture (dynamicMeasurementDrainScratch))
+  {
     dynamicMeasurementCaptureQueue.push (dynamicMeasurementDrainScratch);
+    // Phase 12: mirror the identical, already-settled-gated capture to the
+    // Focus trace queue when it belongs to the currently focused State.
+    // Never a second, independently-computed capture - same data, same
+    // eligibility gate DynamicProductionRuntime already applied.
+    if (dynamicMeasurementDrainScratch.stableStateId != 0
+        && dynamicMeasurementDrainScratch.stableStateId == focusedStableStateId.load (std::memory_order_relaxed))
+      dynamicFocusedTraceQueue.push (dynamicMeasurementDrainScratch);
+  }
+}
+
+void KickLockAudioProcessor::drainRecentUnknownEvents() noexcept
+{
+  // Audio thread: same-thread pop from the runtime's tiny staging ring
+  // (filled during this same processChunk()), then a normal SPSC push -
+  // matches the two-stage shape of drainDynamicMeasurementCaptures() above.
+  DynamicRecentUnknownRawEvent event;
+  while (dynamicRuntime.takeRecentUnknownEvent (event))
+    recentUnknownQueue.push (event);
 }
 
 void KickLockAudioProcessor::drainDynamicMeasurementScores() noexcept
@@ -3316,6 +3339,8 @@ void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresen
     card.likelyMidi = state.hasLikelyMidi ? state.likelyMidi : -1;
     card.hasLikelyPitchHz = state.hasLikelyPitchHz;
     card.likelyPitchHz = state.likelyPitchHz;
+    card.correctionPolicy = state.correctionPolicy;
+    card.policyRejectionReason = state.policyRejectionReason;
 
     card.selected = selectorDiag.selectedSemanticStateId == state.stableStateId;
     card.active = snapshot.activeSemanticStateId == state.stableStateId;
@@ -4215,6 +4240,114 @@ bool KickLockAudioProcessor::clearLearnedDynamicData()
   // clearNoteMap() already atomically clears the New map, its measurement
   // sidecar, and legacy compatibility data through the established queues.
   return clearNoteMap();
+}
+
+KickLockAudioProcessor::DynamicStateEditOutcome KickLockAudioProcessor::applyDynamicStateEdit (
+    const DynamicStateEditRequest& request)
+{
+  DynamicStateEditOutcome outcome;
+  outcome.stableStateId = request.stableStateId;
+
+  const auto source = activeDynamicMapSource.load (std::memory_order_acquire);
+  if (source == DynamicMapSource::LegacyDynamicCompatibility)
+  {
+    outcome.reason = DynamicStateEditRejectionReason::LegacyMapReadOnly;
+    return outcome;
+  }
+  if (source == DynamicMapSource::None)
+  {
+    outcome.reason = DynamicStateEditRejectionReason::NoMapApplied;
+    return outcome;
+  }
+
+  DynamicStateMap current;
+  {
+    const std::lock_guard<std::mutex> lock (mapMutex);
+    current = messageOwnedDynamicStateMap;
+  }
+
+  DynamicStateEditResult result;
+  switch (request.kind)
+  {
+    case DynamicStateEditKind::SetManualTrim:
+      result = setManualTrim (current, request.stableStateId, request.trim);
+      break;
+    case DynamicStateEditKind::ResetManualTrim:
+      result = resetManualTrim (current, request.stableStateId);
+      break;
+    case DynamicStateEditKind::ResetToLearned:
+      result = resetToLearned (current, request.stableStateId);
+      break;
+    case DynamicStateEditKind::ResetToGlobal:
+      result = resetToGlobal (current, request.stableStateId);
+      break;
+    case DynamicStateEditKind::SetEnabled:
+      result = setEnabled (current, request.stableStateId, request.boolValue);
+      break;
+    case DynamicStateEditKind::SetBypassed:
+      result = setBypassed (current, request.stableStateId, request.boolValue);
+      break;
+    case DynamicStateEditKind::PromoteToManual:
+      result = promoteToManual (current, request.stableStateId);
+      break;
+    case DynamicStateEditKind::RemoveManualState:
+      result = removeManualState (current, request.stableStateId);
+      break;
+    case DynamicStateEditKind::CreateManualState:
+      result = createManualState (current, request.creation);
+      break;
+  }
+
+  if (! result.success)
+  {
+    outcome.reason = result.reason;
+    return outcome;
+  }
+
+  if (request.kind == DynamicStateEditKind::CreateManualState)
+  {
+    // The new id is whatever nextStateId was before the transaction advanced
+    // it (createManualState() always allocates exactly one id and increments
+    // by exactly one; current.nextStateId is still the pre-mutation value
+    // here because `current` was never reassigned).
+    outcome.stableStateId = current.nextStateId;
+  }
+
+  ensureRevertBundleCaptured();
+
+  // Same atomic accept/reject publish sequence as applyLatestLearnResult():
+  // stage under both locks, try the RT-safe push, and roll back the
+  // message-owned map on failure so a busy queue never leaves a half-applied
+  // edit in place.
+  {
+    const std::lock_guard<std::mutex> publicationLock (mapPublicationMutex);
+    const std::lock_guard<std::mutex> lock (mapMutex);
+    const auto previous = messageOwnedDynamicStateMap;
+    hasPendingDynamicMapPublication = false;
+    messageOwnedDynamicStateMap = result.map;
+    if (! dynamicMapUpdateQueue.push (result.map))
+    {
+      messageOwnedDynamicStateMap = previous;
+      outcome.reason = DynamicStateEditRejectionReason::PublicationBusy;
+      return outcome;
+    }
+  }
+
+  outcome.success = true;
+  outcome.reason = DynamicStateEditRejectionReason::None;
+  return outcome;
+}
+
+DynamicState KickLockAudioProcessor::getDynamicStateForUi (uint64_t stableStateId) const
+{
+  if (activeDynamicMapSource.load (std::memory_order_acquire) != DynamicMapSource::NewDynamicStateMap)
+    return {};
+
+  const std::lock_guard<std::mutex> lock (mapMutex);
+  const int slot = DynamicStateEditDetail::findOccupiedSlotByStableId (messageOwnedDynamicStateMap, stableStateId);
+  if (slot < 0)
+    return {};
+  return messageOwnedDynamicStateMap.states[(size_t) slot];
 }
 
 bool KickLockAudioProcessor::hasValidNoteMap() const noexcept

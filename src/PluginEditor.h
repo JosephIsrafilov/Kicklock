@@ -296,6 +296,19 @@ private:
     NotePhaseMapSnapshot latestNoteMap;
     int selectedLearnMidi = -1;
 
+    // Phase 12: last per-state edit-transaction outcome, surfaced to the
+    // Inspector so a rejected edit explains why rather than failing silently.
+    bool lastDynamicEditFailed = false;
+    juce::String lastDynamicEditFailureReason;
+
+    // Phase 12, Section 13/14: retains the latest focused trace across
+    // polls where drainFocusedTraceForUi() returns nothing new (a settled
+    // hit is a rare event; the last real one stays displayed, exactly like
+    // Verified measurements already do) - but only for the SAME focused id,
+    // never carried over as a stale trace after switching focus.
+    DynamicFocusedTraceViewModel latestFocusedTrace;
+    uint64_t latestFocusedTraceForStableStateId = 0;
+
     // Panel backgrounds computed in resized(), painted behind the child
     // controls in paint() so the geometry lives in one place.
     juce::Rectangle<int> manualPanelBounds;

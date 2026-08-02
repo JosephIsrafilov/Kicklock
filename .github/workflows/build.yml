@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   windows-pr:
-    name: ${{ github.event_name == 'pull_request' && 'Windows Release (build, tests, pluginval)' || 'Windows PR Fast Internal' }}
+    name: Windows fast internal categories
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 25
@@ -39,9 +39,9 @@ jobs:
           @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase11 Phase10 Phase9 Phase8 Phase7 Processor UI Helpers", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
 
   windows-full:
-    name: ${{ github.event_name != 'pull_request' && 'Windows Release (build, tests, pluginval)' || 'Windows Full Internal' }}
-    if: github.event_name != 'pull_request'
+    name: Windows Release full automated gates
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Configure full validation
@@ -54,16 +54,30 @@ jobs:
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
           cmake --build build --parallel 4
-      - name: Run full tests and pluginval
+      - name: Run dedicated Release gates and pluginval strictness 10
         shell: pwsh
         run: |
           $timer = [Diagnostics.Stopwatch]::StartNew()
+          & "build/tests/KickLockFastTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "build/tests/KickLockDspTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "build/tests/KickLockAudioSmokeTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "build/tests/KickLockAudioAcceptanceTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "build/tests/KickLockAudioStressTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "build/tests/KickLockGuiAcceptanceTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "build/tests/KickLockMalformedStateTests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "build/tests/KickLockHostAcceptanceTests.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $timer.Stop()
-          @("## FULL", "- Build target: all", "- Categories: all (including Phase11, Performance, and RealAudio)", "- Phase11 fixture: executed", "- Performance gate: executed", "- Real-audio fixtures: UNVERIFIED unless private stems are supplied", "- pluginval executed: yes", "- AU validation: NOT APPLICABLE on Windows", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
+          @("## WINDOWS RELEASE GATES", "- Dedicated executables: Fast, DSP, AudioSmoke, AudioAcceptance, AudioStress, GUI acceptance, malformed-state fuzz, compiled VST3 host acceptance", "- pluginval: strictness 10", "- AU validation: not applicable on Windows", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Zip VST3
         run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
       - name: Verify Windows VST3 artifact
@@ -83,7 +97,7 @@ jobs:
           path: KickLock-Windows-VST3.zip
 
   macos-pr:
-    name: ${{ github.event_name == 'pull_request' && 'macOS Release (universal build, tests, pluginval)' || 'macOS PR Fast Internal' }}
+    name: macOS fast internal categories
     if: github.event_name == 'pull_request'
     runs-on: macos-14
     timeout-minutes: 25
@@ -108,30 +122,33 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   macos-full:
-    name: ${{ github.event_name != 'pull_request' && 'macOS Release (universal build, tests, pluginval)' || 'macOS Full Internal' }}
-    if: github.event_name != 'pull_request'
+    name: macOS Release full automated gates
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Configure full validation
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DKICKLOCK_ENABLE_PLUGINVAL=ON
       - name: Build plugin and tests
         run: cmake --build build --parallel 4
-      - name: Run full tests and pluginval
+      - name: Run dedicated Release gates and pluginval strictness 10
         run: |
           start=$SECONDS
+          build/tests/KickLockFastTests
           build/tests/KickLockDspTests
+          build/tests/KickLockAudioSmokeTests
+          build/tests/KickLockAudioAcceptanceTests
+          build/tests/KickLockAudioStressTests
+          build/tests/KickLockGuiAcceptanceTests
+          build/tests/KickLockMalformedStateTests
+          build/tests/KickLockHostAcceptanceTests
           ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
           elapsed=$((SECONDS - start))
           {
-            echo "## FULL"
-            echo "- Build target: KickLock + KickLockDspTests"
-            echo "- Categories: all (including Phase11, Performance, and RealAudio)"
-            echo "- Phase11 fixture: executed"
-            echo "- Performance gate: executed"
-            echo "- Real-audio fixtures: UNVERIFIED unless private stems are supplied"
-            echo "- pluginval executed: yes"
-            echo "- AU validation: UNVERIFIED (hosted registration is documented as an external/manual gate)"
+            echo "## MACOS RELEASE GATES"
+            echo "- Dedicated executables: Fast, DSP, AudioSmoke, AudioAcceptance, AudioStress, GUI acceptance, malformed-state fuzz, compiled VST3 host acceptance"
+            echo "- pluginval: strictness 10"
+            echo "- AU: packaged and universal-binary checked; registrar discovery remains in the release workflow"
             echo "- Universal build: yes"
             echo "- Test elapsed: ${elapsed}s"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -199,17 +216,19 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   linux-full:
-    name: ${{ github.event_name != 'pull_request' && 'Linux Debug (ASan + UBSan, tests only)' || 'Linux Full Internal' }}
-    if: github.event_name != 'pull_request'
+    name: Linux ASan UBSan and malformed-state fuzz
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install JUCE Linux dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev ninja-build
       - name: Configure full sanitizers
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKICKLOCK_ENABLE_PLUGINVAL=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-      - name: Build full tests
+      - name: Build focused sanitizer and fuzz targets
         run: cmake --build build --target KickLockDspTests --parallel 4
+      - name: Build deterministic malformed-state fuzz target
+        run: cmake --build build --target KickLockMalformedStateTests --parallel 4
       - name: Run full sanitizer-safe categories
         env:
           KICKLOCK_SKIP_TIMED_ASSERTS: "1"
@@ -218,17 +237,13 @@ jobs:
         run: |
           start=$SECONDS
           build/tests/KickLockDspTests DSP Phase1 Phase2 Phase3 Phase4 Phase7 Phase8 Phase9 Phase10 Phase11 P10 Processor Stabilization "UI Helpers"
+          build/tests/KickLockMalformedStateTests
           elapsed=$((SECONDS - start))
           {
-            echo "## FULL"
-            echo "- Build target: KickLockDspTests"
-            echo "- Categories: sanitizer-safe full set including Phase7 Phase8 Phase9 Phase10 Phase11"
-            echo "- Phase11 fixture: executed"
-            echo "- Performance gate: NOT APPLICABLE (KICKLOCK_SKIP_TIMED_ASSERTS=1)"
-            echo "- Real-audio fixtures: UNVERIFIED unless private stems are supplied"
-            echo "- pluginval executed: no"
-            echo "- AU validation: NOT APPLICABLE on Linux"
-            echo "- Universal build: no"
+            echo "## LINUX SANITIZER GATES"
+            echo "- Dedicated executables: focused DSP/processor categories and malformed-state fuzz"
+            echo "- ASan and UBSan: enabled"
+            echo "- pluginval/AU: not applicable on Linux"
             echo "- Test elapsed: ${elapsed}s"
           } >> "$GITHUB_STEP_SUMMARY"
 
