@@ -68,6 +68,19 @@ juce::File vst3File()
     return juce::File (KICKLOCK_HOST_VST3_PATH).getParentDirectory().getParentDirectory();
 }
 
+juce::File hostedVst3Module()
+{
+    const auto targetDirectory = juce::File (KICKLOCK_HOST_VST3_PATH);
+    const auto windowsModule = targetDirectory.getChildFile ("KickLock.vst3");
+
+    if (windowsModule.existsAsFile())
+        return windowsModule;
+
+    return vst3File().getChildFile ("Contents")
+                    .getChildFile ("MacOS")
+                    .getChildFile ("KickLock");
+}
+
 std::unique_ptr<juce::AudioPluginInstance> instantiate (juce::AudioPluginFormatManager& formats,
                                                           const juce::PluginDescription& description,
                                                           double rate, int block,
@@ -376,7 +389,7 @@ public:
         formats.addFormat (std::make_unique<juce::VST3PluginFormat>());
         juce::KnownPluginList known;
         juce::OwnedArray<juce::PluginDescription> found;
-        const auto module = juce::File (KICKLOCK_HOST_VST3_PATH).getChildFile ("KickLock.vst3");
+        const auto module = hostedVst3Module();
         expect (module.existsAsFile(), "VST3 module exists: " + module.getFullPathName());
         expect (known.scanAndAddFile (module.getFullPathName(), false, found, *formats.getFormat (0)), "VST3 scan succeeds");
         expectEquals (found.size(), 1, "exactly one VST3 description");
