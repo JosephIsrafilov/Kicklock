@@ -337,6 +337,7 @@ std::vector<float> process (juce::AudioPluginInstance& instance, const HostedSid
             playHead->setFrame ({ offset, n, true, false });
         const int requiredChannels = juce::jmax (instance.getTotalNumInputChannels(), instance.getTotalNumOutputChannels());
         juce::AudioBuffer<float> audio (requiredChannels, n);
+        audio.clear();
         juce::AudioBuffer<float> offBusKick (route == HostedKickRoute::WrongChannel ? 1 : 0, n);
         const auto mainOffset = instance.getChannelIndexInProcessBlockBuffer (true, 0, 0);
         const auto sidechainOffset = instance.getChannelIndexInProcessBlockBuffer (true, 1, 0);
