@@ -404,7 +404,7 @@ public:
                     + " manufacturer=" + description.manufacturerName + " version=" + description.version);
         expectEquals (description.name, juce::String ("KickLock"));
         expectEquals (description.manufacturerName, juce::String ("OpenSource"));
-        expectEquals (description.version, juce::String ("0.3.1"));
+        expectEquals (description.version, juce::String ("0.4.0"));
         expectEquals (description.pluginFormatName, juce::String ("VST3"));
         expect (! description.isInstrument, "KickLock is discovered as an effect");
         expect (description.uniqueId != 0, "non-zero VST3 unique id");

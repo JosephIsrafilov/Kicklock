@@ -134,6 +134,6 @@ Static/Dynamic work begins. No new user-facing controls are added.
   (T2).
 - **CI validation gate.** GitHub Actions now builds the tests, runs `ctest`
   (including pluginval strictness 10 on Windows and macOS), and adds a Linux
-  ASan/UBSan job. The nightly release is gated on all build/test/validation jobs.
+  ASan/UBSan job. The release workflow is gated on all build/test/validation jobs.
 
 [Unreleased]: https://github.com/JosephIsrafilov/Kicklock/compare/main...HEAD
