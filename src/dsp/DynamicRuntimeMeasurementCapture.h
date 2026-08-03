@@ -91,6 +91,7 @@ struct DynamicRuntimeMeasurementCaptureResult
 {
     bool valid = false;
     uint64_t mapGeneration = 0;
+    uint64_t inputEpoch = 0;
     uint64_t stableStateId = 0;
     DynamicSelectorBranchKind branchKind = DynamicSelectorBranchKind::Global;
     int64_t triggerSample = -1;
@@ -118,6 +119,7 @@ struct DynamicRuntimeMeasurementCaptureResult
     {
         valid = false;
         mapGeneration = 0;
+        inputEpoch = 0;
         stableStateId = 0;
         branchKind = DynamicSelectorBranchKind::Global;
         triggerSample = -1;
@@ -136,6 +138,7 @@ struct DynamicRuntimeMeasurementCaptureResult
     {
         valid = other.valid;
         mapGeneration = other.mapGeneration;
+        inputEpoch = other.inputEpoch;
         stableStateId = other.stableStateId;
         branchKind = other.branchKind;
         triggerSample = other.triggerSample;
@@ -313,7 +316,8 @@ public:
     // rounded). Returns false (Exhausted) without mutating state when all
     // slots are already active.
     bool beginCapture (uint64_t mapGeneration, uint64_t stableStateId, DynamicSelectorBranchKind branchKind,
-                       int64_t triggerSample, double tapSamples, double sampleRate) noexcept
+                       int64_t triggerSample, double tapSamples, double sampleRate,
+                       uint64_t inputEpoch = 0) noexcept
     {
         if (! prepared || ! std::isfinite (tapSamples))
             return false;
@@ -334,6 +338,7 @@ public:
             slot.afterDone = false;
             slot.result.clearForReuse();
             slot.result.mapGeneration = mapGeneration;
+            slot.result.inputEpoch = inputEpoch;
             slot.result.stableStateId = stableStateId;
             slot.result.branchKind = branchKind;
             slot.result.triggerSample = triggerSample;

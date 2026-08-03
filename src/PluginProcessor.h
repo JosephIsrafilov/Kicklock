@@ -574,7 +574,7 @@ private:
     DynamicStateMap messageOwnedDynamicStateMap = makeEmptyDynamicStateMap();
     std::atomic<DynamicMapSource> activeDynamicMapSource { DynamicMapSource::None };
     int dynamicRuntimeChannels = 2;
-    bool dynamicHadSidechain = false;
+    bool dynamicHadUsableInput = false;
     bool lastBlockUsedNewDynamic = false;
     // Internal transport classification for the New runtime (host position is
     // only used to distinguish continuous playback / valid loop wrap / seek /
@@ -735,6 +735,7 @@ private:
     // Phase 9 measurement helpers (audio-thread, allocation-free).
     void drainDynamicMeasurementCaptures() noexcept;
     void drainDynamicMeasurementScores() noexcept;
+    DynamicInputStatus classifyDynamicInputStatus (bool sidechainPresent) const noexcept;
     void publishDynamicRuntimeSnapshot (bool sidechainPresent, bool bypassActive) noexcept;
     bool serviceDynamicMeasurementWorkerStep();
     void classifyDynamicTransportForNewRuntime (int numSamples) noexcept;

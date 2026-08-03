@@ -265,7 +265,8 @@ void DynamicWorkspace::setModel (const DynamicWorkspaceViewModel& next)
         || model.runtime.holdActive != next.runtime.holdActive
         || model.runtime.fallbackActive != next.runtime.fallbackActive
         || model.runtime.sidechainPresent != next.runtime.sidechainPresent
-         || model.runtime.bypassActive != next.runtime.bypassActive
+        || model.runtime.inputStatus != next.runtime.inputStatus
+        || model.runtime.bypassActive != next.runtime.bypassActive
          || model.capturedHits != next.capturedHits
          || model.processedHits != next.processedHits
          || model.learnStatusMessage != next.learnStatusMessage

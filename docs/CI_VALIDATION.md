@@ -1,16 +1,27 @@
-# CI Validation Policy
+# KickLock 0.4.0 CI Validation Policy
 
-Pull requests use the required Windows, macOS, and Linux check names in fast
-mode. Fast mode builds `KickLockFastTests`, runs its focused categories in one
-process, and skips pluginval, universal macOS builds, artifact packaging, and
-nightly release publication. The focused PR-fast categories include `Phase11`,
-`Phase10`, `Phase9`, `Phase8`, `Phase7`, `Processor`, and `UI Helpers` (plus
-`DSP` on Linux).
+Pull requests build the short approved test targets on Windows and macOS:
 
-Pushes to `main`/`master` and manual dispatches run full validation: Release
-plugin builds, `KickLockDspTests`, strictness-10 pluginval, universal macOS
-artifacts, Linux sanitizer regression coverage, and (for main pushes) the
-nightly release. Full Windows/macOS runs include the Release-only Performance
-category; Linux runs Phase11 safety coverage with `KICKLOCK_SKIP_TIMED_ASSERTS=1`.
-Full artifacts are extracted and structurally checked. Pluginval remains a
-full-validation gate. `workflow_dispatch` never publishes the Nightly release.
+- `KickLockFastTests`
+- `KickLockHostAcceptanceTests`
+- `KickLockGuiAcceptanceTests`
+- `KickLockMalformedStateTests`
+
+Push validation additionally builds the plugin, runs pluginval strictness 10,
+and runs macOS `auval`. Release packaging is separate from ordinary CI.
+
+The release workflow checks out exactly `v0.4.0`, verifies that `HEAD` equals the
+tag commit, and runs the same approved tests before packaging. Windows signs the
+internal VST3 module with Authenticode SHA-256 and verifies the signature.
+macOS builds universal VST3/AU bundles, signs them with Developer ID and
+hardened runtime/timestamp, submits one combined ZIP to `notarytool`, requires
+`Accepted`, staples and validates both bundles, and only then creates the three
+final ZIPs.
+
+A preflight job checks all eight signing secrets. Missing secrets permit
+internal diagnostic artifacts but skip the final GitHub Release job. There is
+no automatic unsigned fallback and no appended unsigned/notarized warning in
+release notes; notes are extracted only from the `0.4.0` changelog section.
+
+AudioStress, sanitizer matrices, manual DAW checks, listening, and real-audio
+suites are intentionally not invoked by these workflows.

@@ -1,193 +1,303 @@
-name: Publish KickLock Release
+name: Publish KickLock v0.4.0 Release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing Git tag to build and publish
+        description: Existing final Git tag to build and publish
         required: true
-        default: v0.3.1
+        default: v0.4.0
         type: string
 
 permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: Signing and tag preflight
+    runs-on: ubuntu-latest
+    outputs:
+      signing_ready: ${{ steps.check.outputs.signing_ready }}
+    steps:
+      - id: check
+        name: Check required release secrets
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test "$TAG" = "v0.4.0"
+          missing=()
+          for name in \
+            WINDOWS_CERTIFICATE_PFX \
+            WINDOWS_CERTIFICATE_PASSWORD \
+            MACOS_CERTIFICATE_P12 \
+            MACOS_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_API_KEY_ID \
+            APPLE_API_ISSUER_ID \
+            APPLE_API_PRIVATE_KEY; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if ((${#missing[@]} == 0)); then
+            echo "signing_ready=true" >> "$GITHUB_OUTPUT"
+            echo "All required signing secrets are present."
+          else
+            echo "signing_ready=false" >> "$GITHUB_OUTPUT"
+            echo "Signing is unavailable; final GitHub Release publication will be skipped."
+            echo "Missing secret names: ${missing[*]}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   windows:
-    name: Windows x64 VST3
+    name: Windows x64 VST3 internal build and signing
+    needs: preflight
     runs-on: windows-latest
     env:
       TAG: ${{ inputs.tag }}
+      SIGNING_READY: ${{ needs.preflight.outputs.signing_ready }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
 
-      - name: Verify tagged source
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
-          if [ "$TAG" = "v0.2.0" ]; then
-            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
-          fi
-
-      - name: Configure Release build
-        shell: bash
-        run: cmake -B build-release -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
-
-      - name: Build VST3
-        shell: bash
-        run: cmake --build build-release --config Release --parallel 4
-
-      - name: Validate Release build and VST3
-        shell: bash
-        run: ctest --test-dir build-release -C Release --output-on-failure
-
-      - name: Package VST3 bundle
+      - name: Verify exact clean tagged source
         shell: pwsh
         run: |
-          $vst3 = "build-release/KickLock_artefacts/Release/VST3/KickLock.vst3"
-          if (-not (Test-Path -LiteralPath $vst3 -PathType Container)) { throw "Missing VST3 bundle: $vst3" }
-          Compress-Archive -Path $vst3 -DestinationPath "KickLock-$env:TAG-windows-x64-vst3.zip"
+          if ($env:TAG -ne 'v0.4.0') { throw "This workflow only publishes v0.4.0." }
+          $tagRef = "$($env:TAG)^{commit}"
+          $head = (git rev-parse HEAD).Trim()
+          $tagCommit = (git rev-parse $tagRef).Trim()
+          if ($head -ne $tagCommit) { throw "HEAD does not exactly match $env:TAG." }
+          if ((git status --porcelain).Trim()) { throw "Tagged checkout is not clean." }
+          git diff-tree --check $tagCommit
 
-      - uses: actions/upload-artifact@v4
+      - name: Configure and build approved release targets
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DKICKLOCK_ENABLE_PLUGINVAL=ON
+          cmake --build build-release --target KickLock_VST3 KickLockFastTests KickLockHostAcceptanceTests KickLockGuiAcceptanceTests KickLockMalformedStateTests --parallel 4
+
+      - name: Run approved tests and pluginval strictness 10
+        shell: pwsh
+        run: |
+          foreach ($name in @('KickLockFastTests.exe', 'KickLockHostAcceptanceTests.exe', 'KickLockGuiAcceptanceTests.exe', 'KickLockMalformedStateTests.exe')) {
+            $path = Join-Path 'build-release/tests' $name
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing test executable: $path" }
+            & $path
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          ctest --test-dir build-release -R '^pluginval_vst3$' --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify Windows VST3 bundle and 0.4.0 host metadata
+        shell: pwsh
+        run: |
+          $bundle = 'build-release/KickLock_artefacts/Release/VST3/KickLock.vst3'
+          $module = Join-Path $bundle 'Contents/x86_64-win/KickLock.vst3'
+          if (-not (Test-Path -LiteralPath $bundle -PathType Container)) { throw "Missing VST3 bundle: $bundle" }
+          if (-not (Test-Path -LiteralPath $module) -or (Get-Item -LiteralPath $module).Length -le 0) { throw "Missing VST3 module: $module" }
+
+      - name: Import certificate, sign, and verify Authenticode
+        if: needs.preflight.outputs.signing_ready == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $module = 'build-release/KickLock_artefacts/Release/VST3/KickLock.vst3/Contents/x86_64-win/KickLock.vst3'
+          $pfx = Join-Path $env:RUNNER_TEMP 'kicklock-signing.pfx'
+          $encoded = ($env:WINDOWS_CERTIFICATE_PFX -replace '\s', '')
+          try { $bytes = [Convert]::FromBase64String($encoded) }
+          catch { throw 'WINDOWS_CERTIFICATE_PFX must be base64 encoded.' }
+          [IO.File]::WriteAllBytes($pfx, $bytes)
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          if (-not $signtool) {
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+            $signtool = (& $vswhere -latest -products * -find 'Windows Kits/10/bin/*/x64/signtool.exe' | Select-Object -First 1)
+          }
+          if (-not $signtool) { throw 'signtool.exe was not found.' }
+          & $signtool sign /fd SHA256 /td SHA256 /tr 'http://timestamp.digicert.com' /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD $module
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $signtool verify /pa /all $module
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package signed Windows VST3
+        if: needs.preflight.outputs.signing_ready == 'true'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'build-release/KickLock_artefacts/Release/VST3/KickLock.vst3' -DestinationPath "KickLock-$env:TAG-windows-x64-vst3.zip"
+
+      - name: Upload signed Windows release asset
+        if: needs.preflight.outputs.signing_ready == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: windows-release-assets
-          path: KickLock-${{ inputs.tag }}-windows-x64-vst3.zip
+          path: KickLock-v0.4.0-windows-x64-vst3.zip
+          if-no-files-found: error
+
+      - name: Upload internal unsigned Windows bundle
+        if: needs.preflight.outputs.signing_ready != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-internal-unsigned
+          path: build-release/KickLock_artefacts/Release/VST3/KickLock.vst3
           if-no-files-found: error
 
   macos:
-    name: macOS universal VST3 and AU
-    runs-on: macos-15-intel
+    name: macOS universal VST3/AU internal build and signing
+    needs: preflight
+    runs-on: macos-14
     env:
-      GH_TOKEN: ${{ github.token }}
       TAG: ${{ inputs.tag }}
+      SIGNING_READY: ${{ needs.preflight.outputs.signing_ready }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
 
-      - name: Verify tagged source
+      - name: Verify exact clean tagged source
         run: |
+          set -euo pipefail
+          test "$TAG" = "v0.4.0"
           test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
-          if [ "$TAG" = "v0.2.0" ]; then
-            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
-          fi
+          test -z "$(git status --porcelain)"
+          git diff-tree --check "$(git rev-parse HEAD)"
 
-      - name: Configure universal Release build
-        run: >
-          cmake -B build-release -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-          -DKICKLOCK_ENABLE_PLUGINVAL=ON
-
-      - name: Build VST3 and AU
-        run: cmake --build build-release --config Release --parallel 4
-
-      - name: Validate Release build and VST3
-        run: ctest --test-dir build-release -C Release --output-on-failure
-
-      - name: Validate bundles and universal architectures
+      - name: Configure and build approved universal release targets
         run: |
+          set -euo pipefail
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DKICKLOCK_ENABLE_PLUGINVAL=ON
+          cmake --build build-release --target KickLock_VST3 KickLock_AU KickLockFastTests KickLockHostAcceptanceTests KickLockGuiAcceptanceTests KickLockMalformedStateTests --parallel 4
+
+      - name: Run approved tests, pluginval strictness 10, and auval
+        run: |
+          set -euo pipefail
+          for test_binary in \
+            build-release/tests/KickLockFastTests \
+            build-release/tests/KickLockHostAcceptanceTests \
+            build-release/tests/KickLockGuiAcceptanceTests \
+            build-release/tests/KickLockMalformedStateTests; do
+            test -x "$test_binary"
+            "$test_binary"
+          done
+          ctest --test-dir build-release -R '^pluginval_vst3$' --output-on-failure
+
           vst3="build-release/KickLock_artefacts/Release/VST3/KickLock.vst3"
           au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
-          test -d "$vst3"
-          test -d "$au"
+          test -d "$vst3" && test -d "$au"
           for binary in "$vst3/Contents/MacOS/KickLock" "$au/Contents/MacOS/KickLock"; do
             test -f "$binary"
-            lipo -info "$binary"
-            lipo -info "$binary" | grep -qw arm64
-            lipo -info "$binary" | grep -qw x86_64
+            lipo -archs "$binary" | grep -qw arm64
+            lipo -archs "$binary" | grep -qw x86_64
           done
 
-      - name: Check AU registrar discovery
+      - name: Import Developer ID certificate and sign bundles
+        if: needs.preflight.outputs.signing_ready == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
-          component_dir="/Library/Audio/Plug-Ins/Components"
-          sudo mkdir -p "$component_dir"
-          sudo rm -rf "$component_dir/KickLock.component"
-          sudo ditto "$au" "$component_dir/KickLock.component"
-          sudo killall -9 AudioComponentRegistrar || true
-          sleep 2
-          auval_line=""
-          for _ in 1 2 3 4 5; do
-            auval_line="$(auval -a 2>/dev/null | awk '/[[:space:]]KickLock([[:space:]]|$)/ { print; exit }')"
-            test -n "$auval_line" && break
-            sleep 1
-          done
-          test -n "$auval_line"
+          set -euo pipefail
+          p12="$RUNNER_TEMP/kicklock-signing.p12"
+          printf '%s' "$MACOS_CERTIFICATE_P12" | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$p12"
+          keychain="$RUNNER_TEMP/kicklock-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
 
-      - name: Package macOS plugins
-        run: |
           vst3="build-release/KickLock_artefacts/Release/VST3/KickLock.vst3"
           au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
-          test -d "$vst3"
-          test -d "$au"
-          ditto -c -k --sequesterRsrc --keepParent "$vst3" "KickLock-${TAG}-macos-universal-vst3.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$au" "KickLock-${TAG}-macos-universal-au.zip"
+          codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$vst3"
+          codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$au"
+          codesign --verify --deep --strict --verbose=2 "$vst3"
+          codesign --verify --deep --strict --verbose=2 "$au"
 
-      - uses: actions/upload-artifact@v4
+          payload="$RUNNER_TEMP/kicklock-notary-payload"
+          rm -rf "$payload"
+          mkdir -p "$payload"
+          ditto "$vst3" "$payload/KickLock.vst3"
+          ditto "$au" "$payload/KickLock.component"
+          notary_zip="$RUNNER_TEMP/KickLock-v0.4.0-notary.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$payload" "$notary_zip"
+          api_key="$RUNNER_TEMP/kicklock-api-key.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$api_key"
+          chmod 600 "$api_key"
+          submission="$(xcrun notarytool submit "$notary_zip" --key "$api_key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait --output-format json)"
+          status="$(printf '%s' "$submission" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))')"
+          test "$status" = "Accepted"
+
+          xcrun stapler staple "$vst3"
+          xcrun stapler staple "$au"
+          xcrun stapler validate "$vst3"
+          xcrun stapler validate "$au"
+          codesign --verify --deep --strict --verbose=2 "$vst3"
+          codesign --verify --deep --strict --verbose=2 "$au"
+
+      - name: Run macOS auval against the validated AU
+        run: |
+          set -euo pipefail
+          au="build-release/KickLock_artefacts/Release/AU/KickLock.component"
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          rm -rf "$HOME/Library/Audio/Plug-Ins/Components/KickLock.component"
+          ditto "$au" "$HOME/Library/Audio/Plug-Ins/Components/KickLock.component"
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aufx Klck Oskl
+
+      - name: Package signed macOS VST3 and AU
+        if: needs.preflight.outputs.signing_ready == 'true'
+        run: |
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build-release/KickLock_artefacts/Release/VST3/KickLock.vst3" \
+            "KickLock-v0.4.0-macos-universal-vst3.zip"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build-release/KickLock_artefacts/Release/AU/KickLock.component" \
+            "KickLock-v0.4.0-macos-universal-au.zip"
+
+      - name: Upload signed macOS release assets
+        if: needs.preflight.outputs.signing_ready == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: macos-release-assets
           path: |
-            KickLock-${{ inputs.tag }}-macos-universal-vst3.zip
-            KickLock-${{ inputs.tag }}-macos-universal-au.zip
+            KickLock-v0.4.0-macos-universal-vst3.zip
+            KickLock-v0.4.0-macos-universal-au.zip
           if-no-files-found: error
 
-  linux-sanitizers:
-    name: Linux ASan and UBSan
-    runs-on: ubuntu-latest
-    env:
-      TAG: ${{ inputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
+      - name: Upload internal unsigned macOS bundles
+        if: needs.preflight.outputs.signing_ready != 'true'
+        uses: actions/upload-artifact@v4
         with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-
-      - name: Verify tagged source
-        run: |
-          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
-          if [ "$TAG" = "v0.2.0" ]; then
-            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
-          fi
-
-      - name: Install JUCE Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev libx11-dev libxext-dev libxinerama-dev \
-            libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev \
-            libgl1-mesa-dev libcurl4-openssl-dev ninja-build
-
-      - name: Configure Debug sanitizer build
-        run: |
-          cmake -B build-sanitizers -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-            -DKICKLOCK_ENABLE_PLUGINVAL=OFF \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-
-      - name: Build tests
-        run: cmake --build build-sanitizers --target KickLockDspTests --parallel 4
-
-      - name: Run ASan and UBSan tests
-        env:
-          KICKLOCK_SKIP_TIMED_ASSERTS: "1"
-          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
-        run: |
-          test_binary="build-sanitizers/tests/KickLockDspTests"
-          test -x "$test_binary"
-          # ponytail: Phase5 depends on real-time worker scheduling and flakes under ASan;
-          # Windows and macOS release builds exercise it against the tagged source.
-          for category in DSP Phase1 Phase2 Phase3 Phase4 P10 Processor Stabilization "UI Helpers"; do
-            "$test_binary" "$category"
-          done
+          name: macos-internal-unsigned
+          path: |
+            build-release/KickLock_artefacts/Release/VST3/KickLock.vst3
+            build-release/KickLock_artefacts/Release/AU/KickLock.component
+          if-no-files-found: error
 
   publish:
-    name: Publish release assets
-    needs: [windows, macos, linux-sanitizers]
+    name: Publish signed GitHub Release
+    needs: [preflight, windows, macos]
+    if: ${{ needs.preflight.outputs.signing_ready == 'true' && needs.windows.result == 'success' && needs.macos.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -198,50 +308,56 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
 
-      - name: Verify tagged source
+      - name: Verify exact clean tagged source
         run: |
+          set -euo pipefail
+          test "$TAG" = "v0.4.0"
           test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
-          if [ "$TAG" = "v0.2.0" ]; then
-            test "$(git rev-parse HEAD)" = "d95cda2817789a068e9b193f781563024b78fdba"
-          fi
+          test -z "$(git status --porcelain)"
 
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
 
-      - name: Create release if needed
+      - name: Extract only the 0.4.0 changelog section
         run: |
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --verify-tag \
-              --title "KickLock $TAG" \
-              --notes-file CHANGELOG.md
+          set -euo pipefail
+          awk '
+            /^## \[0\.4\.0\]/ { in_section=1 }
+            in_section && /^## \[/ && !/^## \[0\.4\.0\]/ { exit }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          ! grep -Eq '^## \[(Unreleased|0\.3\.1|0\.2\.)' release-notes.md
+
+      - name: Create or update the signed release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "KickLock $TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" --verify-tag --title "KickLock $TAG" --notes-file release-notes.md --latest
           fi
 
-      - name: State macOS signing status
+      - name: Remove stale release assets
         run: |
-          notes="$(gh release view "$TAG" --json body --jq .body)"
-          if ! printf '%s' "$notes" | grep -Fqi "unsigned and not notarized"; then
-            gh release edit "$TAG" --notes "${notes}
-
-          ## macOS distribution
-          The macOS VST3 and AU binaries are unsigned and not notarized."
-          fi
-
-      - name: Remove stale assets
-        run: |
+          set -euo pipefail
           while IFS= read -r asset; do
             case "$asset" in
-              "KickLock-${TAG}-windows-x64-vst3.zip"|"KickLock-${TAG}-macos-universal-vst3.zip"|"KickLock-${TAG}-macos-universal-au.zip") ;;
+              "KickLock-v0.4.0-windows-x64-vst3.zip"|"KickLock-v0.4.0-macos-universal-vst3.zip"|"KickLock-v0.4.0-macos-universal-au.zip") ;;
               *) gh release delete-asset "$TAG" "$asset" --yes ;;
             esac
           done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
 
-      - name: Upload release assets
+      - name: Upload exactly three signed ZIP artifacts
         run: |
+          set -euo pipefail
+          test -f release-assets/KickLock-v0.4.0-windows-x64-vst3.zip
+          test -f release-assets/KickLock-v0.4.0-macos-universal-vst3.zip
+          test -f release-assets/KickLock-v0.4.0-macos-universal-au.zip
           gh release upload "$TAG" \
-            "release-assets/KickLock-${TAG}-windows-x64-vst3.zip" \
-            "release-assets/KickLock-${TAG}-macos-universal-vst3.zip" \
-            "release-assets/KickLock-${TAG}-macos-universal-au.zip" \
+            release-assets/KickLock-v0.4.0-windows-x64-vst3.zip \
+            release-assets/KickLock-v0.4.0-macos-universal-vst3.zip \
+            release-assets/KickLock-v0.4.0-macos-universal-au.zip \
             --clobber

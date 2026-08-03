@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ===========================================
-echo   KickLock VST3 Test Runner
+echo   KickLock 0.4.0 Test Runner
 echo ===========================================
 echo.
 
@@ -33,7 +33,7 @@ echo Found CMake at: !CMAKE_PATH!
 echo.
 
 echo [1/3] Configuring tests...
-!CMAKE_PATH! -B build-tests -DCMAKE_BUILD_TYPE=Debug
+!CMAKE_PATH! -B build-tests -DCMAKE_BUILD_TYPE=Release
 
 if %errorlevel% neq 0 (
     echo.
@@ -43,8 +43,8 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [2/3] Building tests...
-!CMAKE_PATH! --build build-tests --config Debug --target KickLockDspTests
+echo [2/3] Building approved tests...
+!CMAKE_PATH! --build build-tests --config Release --target KickLockFastTests KickLockHostAcceptanceTests KickLockGuiAcceptanceTests KickLockMalformedStateTests
 
 if %errorlevel% neq 0 (
     echo.
@@ -54,9 +54,9 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [3/3] Running tests...
+echo [3/3] Running approved tests...
 cd build-tests
-!CTEST_PATH! -C Debug --output-on-failure
+!CTEST_PATH! -C Release -R "^KickLock(Fast^|HostAcceptance^|GuiAcceptance^|MalformedState)Tests$" --output-on-failure
 set TEST_RESULT=%errorlevel%
 cd ..
 

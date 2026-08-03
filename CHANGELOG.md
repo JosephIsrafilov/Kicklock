@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-03
+
+### Dynamic input-state hardening
+- Added fixed `DynamicInputStatus` reporting for `NoSidechain`,
+  `WaitingForKick`, `WaitingForBass`, `SignalTooLow`, and `Active`.
+- Dynamic runtime now gates captures and matcher input on held kick/bass
+  activity and clears Hold, State/Service selection, unfinished fingerprints,
+  and stale measurement work after usable input expires.
+- Normal gaps between hits remain inside the approximately 1.5 second activity
+  hold; signal return begins with a new fingerprint before a State can reactivate.
+
+### Layout fix
+- Main bus layouts now accept only mono-to-mono and stereo-to-stereo.
+  Optional sidechain disabled, mono, and stereo layouts remain supported.
+
+### Compatibility
+- Canonical APVTS IDs remain the primary editor, preset, Apply, and automation
+  path. Legacy IDs remain available under the `Legacy Compatibility` host group.
+- Legacy-only state payloads migrate to canonical values without changing the
+  audible result; DynamicStateMap v1, stable IDs, serialization, thresholds,
+  correction ranges, PDC, and DSP package math are unchanged.
+- Added JUCE FetchContent `core.longpaths=true` and removed the local
+  `playHead` shadowing warning.
+
+### Release changes
+- Raised the project/plugin version to 0.4.0 and added dedicated Windows x64
+  VST3, macOS universal VST3, and macOS universal AU release artifacts.
+- Release workflows now require Windows Authenticode and macOS Developer ID /
+  notarization secrets before creating a GitHub Release; unsigned fallback
+  releases are not published.
+- Updated the automated QA scope, Mermaid routing documentation, and release
+  notes extraction to use only this 0.4.0 section.
+
 ## [0.3.1] - 2026-07-16
 
 ### Added

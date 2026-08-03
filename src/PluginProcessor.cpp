@@ -640,9 +640,7 @@ private:
       return;
 
     setParameter("delay_ms", result.delayMs);
-    setParameter("delayMs", result.delayMs);
     setParameter("polarity_invert", result.invertPolarity ? 1.0f : 0.0f);
-    setParameter("polarityInvert", result.invertPolarity ? 1.0f : 0.0f);
   }
 
   void setParameter(const char *id, float value) {
@@ -739,6 +737,7 @@ bool KickLockAudioProcessor::serviceDynamicMeasurementWorkerStep()
 
     DynamicMeasurementScoredCapture scored;
     scored.mapGeneration = capture.mapGeneration;
+    scored.inputEpoch = capture.inputEpoch;
     scored.stableStateId = capture.stableStateId;
     scored.branchKind = capture.branchKind;
     scored.triggerSample = capture.triggerSample;
@@ -1069,11 +1068,27 @@ KickLockAudioProcessor::createParameterLayout() {
       juce::AudioParameterFloatAttributes().withStringFromValueFunction(
           [] (float value, int) { return juce::String (std::round (value * 100.0f)) + "%"; })));
 
-  layout.add(std::make_unique<juce::AudioParameterFloat>(
+  // Keep the legacy IDs alive for old projects and automation, but expose
+  // them under an explicit host compatibility group. New UI/presets/automation
+  // write the canonical IDs above; migration still reads these IDs when a
+  // legacy-only state is restored.
+  auto legacyCompatibility = std::make_unique<juce::AudioProcessorParameterGroup>(
+      "legacy_compatibility", "Legacy Compatibility", "|");
+  legacyCompatibility->addChild (std::make_unique<juce::AudioParameterFloat>(
       juce::ParameterID{"delayMs", 1}, "Legacy Audio Bass Delay",
       juce::NormalisableRange<float>(-20.0f, 20.0f, 0.01f), 0.0f,
-      juce::AudioParameterFloatAttributes().withStringFromValueFunction(
+      juce::AudioParameterFloatAttributes().withStringFromValueFunction (
           signedMsText)));
+  legacyCompatibility->addChild (std::make_unique<juce::AudioParameterBool>(
+      juce::ParameterID{"polarityInvert", 1}, "Legacy Polarity Invert", false));
+  legacyCompatibility->addChild (std::make_unique<juce::AudioParameterBool>(
+      juce::ParameterID{"phaseFilterEnabled", 1}, "Phase Filter", false));
+  legacyCompatibility->addChild (std::make_unique<juce::AudioParameterFloat>(
+      juce::ParameterID{"rotatorFreq", 1}, "Legacy Rotator Frequency",
+      juce::NormalisableRange<float>(20.0f, 500.0f, 0.0f, 0.35f), 50.0f,
+      juce::AudioParameterFloatAttributes().withStringFromValueFunction (
+          wholeHzText)));
+  layout.add (std::move (legacyCompatibility));
 
   layout.add(std::make_unique<juce::AudioParameterChoice>(
       juce::ParameterID{"delayInterp", 1}, "Delay Interpolation",
@@ -1096,18 +1111,6 @@ KickLockAudioProcessor::createParameterLayout() {
   layout.add(std::make_unique<juce::AudioParameterInt>(
       juce::ParameterID{"visualOffsetSamples", 1}, "Visual Offset Samples",
       -4096, 4096, 0));
-
-  layout.add(std::make_unique<juce::AudioParameterBool>(
-      juce::ParameterID{"polarityInvert", 1}, "Legacy Polarity Invert", false));
-
-  layout.add(std::make_unique<juce::AudioParameterBool>(
-      juce::ParameterID{"phaseFilterEnabled", 1}, "Phase Filter", false));
-
-  layout.add(std::make_unique<juce::AudioParameterFloat>(
-      juce::ParameterID{"rotatorFreq", 1}, "Legacy Rotator Frequency",
-      juce::NormalisableRange<float>(20.0f, 500.0f, 0.0f, 0.35f), 50.0f,
-      juce::AudioParameterFloatAttributes().withStringFromValueFunction(
-          wholeHzText)));
 
   layout.add(std::make_unique<juce::AudioParameterFloat>(
       juce::ParameterID{"rotatorQ", 1}, "Rotator Q",
@@ -1239,7 +1242,7 @@ void KickLockAudioProcessor::prepareToPlay(double sampleRate,
   dynamicRawKickMono.setSize (1, juce::jmax (1, samplesPerBlock), false, false, true);
   dynamicRuntimeOutput.setSize (dynamicRuntimeChannels, juce::jmax (1, samplesPerBlock), false, false, true);
   activeDynamicMapSource.store (DynamicMapSource::None, std::memory_order_release);
-  dynamicHadSidechain = false;
+  dynamicHadUsableInput = false;
   lastBlockUsedNewDynamic = false;
   dynamicHasLastPlayheadPosition = false;
   dynamicLastPlayheadEndSample = 0;
@@ -1772,6 +1775,9 @@ bool KickLockAudioProcessor::isBusesLayoutSupported(
   if (!isMonoOrStereo(mainIn) || !isMonoOrStereo(mainOut))
     return false;
 
+  if (mainIn != mainOut)
+    return false;
+
   if (!sidechainIn.isDisabled() && !isMonoOrStereo(sidechainIn))
     return false;
 
@@ -2261,17 +2267,11 @@ KickLockAudioProcessor::captureCurrentParameterSnapshot() const {
 void KickLockAudioProcessor::restoreParameterSnapshot(
     const ParameterSnapshot &snapshot) {
   setParameterValueWithGesture("delay_ms", snapshot.delayMs);
-  setParameterValueWithGesture("delayMs", snapshot.delayMs);
   setParameterValueWithGesture("polarity_invert",
-                               snapshot.polarityInvert ? 1.0f : 0.0f);
-  setParameterValueWithGesture("polarityInvert",
-                               snapshot.polarityInvert ? 1.0f : 0.0f);
+                                snapshot.polarityInvert ? 1.0f : 0.0f);
   setParameterValueWithGesture("allpass_enable",
-                               snapshot.phaseFilterEnabled ? 1.0f : 0.0f);
-  setParameterValueWithGesture("phaseFilterEnabled",
-                               snapshot.phaseFilterEnabled ? 1.0f : 0.0f);
+                                snapshot.phaseFilterEnabled ? 1.0f : 0.0f);
   setParameterValueWithGesture("allpass_freq", snapshot.phaseFilterFreqHz);
-  setParameterValueWithGesture("rotatorFreq", snapshot.phaseFilterFreqHz);
   setParameterValueWithGesture("rotatorQ", snapshot.phaseFilterQ);
   setParameterValueWithGesture("rotatorStages",
                                (float)snapshot.phaseFilterStageIndex);
@@ -2871,20 +2871,13 @@ bool KickLockAudioProcessor::applyLatestFix() {
 
   setParameterValueWithGesture("polarity_invert",
                                fix.bassPolarityInvert ? 1.0f : 0.0f);
-  setParameterValueWithGesture("polarityInvert",
-                               fix.bassPolarityInvert ? 1.0f : 0.0f);
   setParameterValueWithGesture("delay_ms",
-                               juce::jlimit(-20.0f, 20.0f, fix.bassDelayMs));
-  setParameterValueWithGesture("delayMs",
                                juce::jlimit(-20.0f, 20.0f, fix.bassDelayMs));
 
   if (fix.phaseFilterEnabled) {
     setParameterValueWithGesture("allpass_enable", 1.0f);
-    setParameterValueWithGesture("phaseFilterEnabled", 1.0f);
     setParameterValueWithGesture(
         "allpass_freq", juce::jlimit(20.0f, 500.0f, fix.phaseFilterFreqHz));
-    setParameterValueWithGesture(
-        "rotatorFreq", juce::jlimit(20.0f, 500.0f, fix.phaseFilterFreqHz));
     setParameterValueWithGesture("rotatorQ", fix.phaseFilterQ);
     setParameterValueWithGesture(
         "rotatorStages", (float)juce::jlimit(0, 2, fix.phaseFilterStages - 2));
@@ -3246,12 +3239,28 @@ void KickLockAudioProcessor::drainDynamicMeasurementCaptures() noexcept
 void KickLockAudioProcessor::drainDynamicMeasurementScores() noexcept
 {
   // Audio thread: fold every worker-scored result into the fixed rolling
-  // verified aggregate. addResult() itself rejects a stale
-  // stableStateId/mapGeneration pairing, so a result computed against a map
-  // generation that has since been replaced can never update the wrong slot.
+  // verified aggregate. The input epoch additionally rejects a score that was
+  // completed by the worker after usable kick/bass material was lost; a later
+  // return of signal must begin with a fresh fingerprint before verification
+  // can resume.
   DynamicMeasurementScoredCapture scored;
   while (dynamicMeasurementScoreQueue.pop (scored))
-    dynamicVerifiedAggregation.addResult (scored);
+    if (scored.inputEpoch == dynamicRuntime.getMeasurementInputEpoch())
+      dynamicVerifiedAggregation.addResult (scored);
+}
+
+DynamicInputStatus KickLockAudioProcessor::classifyDynamicInputStatus (
+    bool sidechainPresent) const noexcept
+{
+  if (! sidechainPresent)
+    return DynamicInputStatus::NoSidechain;
+  if (! kickActiveHeld.load (std::memory_order_acquire))
+    return DynamicInputStatus::WaitingForKick;
+  if (! bassActiveHeld.load (std::memory_order_acquire))
+    return DynamicInputStatus::WaitingForBass;
+  if (! analysisSignalUsable.load (std::memory_order_acquire))
+    return DynamicInputStatus::SignalTooLow;
+  return DynamicInputStatus::Active;
 }
 
 void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresent, bool bypassActive) noexcept
@@ -3283,6 +3292,7 @@ void KickLockAudioProcessor::publishDynamicRuntimeSnapshot (bool sidechainPresen
   snapshot.holdActive = selectorDiag.holdEventCount > 0;
   snapshot.fallbackActive = dynamicRuntime.isFallbackActive();
   snapshot.sidechainPresent = sidechainPresent;
+  snapshot.inputStatus = classifyDynamicInputStatus (sidechainPresent);
   snapshot.bypassActive = bypassActive;
   snapshot.captureExhaustedCount = dynamicRuntime.getMeasurementCaptureExhaustedCount();
   snapshot.captureDroppedForTransportCount = dynamicRuntime.getMeasurementCaptureDroppedForTransportCount();
@@ -3350,9 +3360,9 @@ void KickLockAudioProcessor::classifyDynamicTransportForNewRuntime(int numSample
   bool isLooping = false;
   int64_t startSample = 0;
 
-  if (auto* playHead = getPlayHead())
+  if (auto* currentPlayHead = getPlayHead())
   {
-    if (const auto position = playHead->getPosition())
+    if (const auto position = currentPlayHead->getPosition())
     {
       isPlaying = position->getIsPlaying();
       isLooping = position->getIsLooping();
@@ -3451,18 +3461,22 @@ void KickLockAudioProcessor::renderNewDynamicRuntime(
     dynamicRuntime.notifyTransportReset(DynamicProductionTransportReason::HostReset);
     dynamicHasLastPlayheadPosition = false;
     dynamicWasPlaying = false;
-    dynamicHadSidechain = hasSidechain;
+    dynamicHadUsableInput = false;
   }
   else
   {
     classifyDynamicTransportForNewRuntime(numSamples);
   }
 
-  // Sidechain-loss transition (once, on the edge): return to Global, clear Hold,
-  // captures and the Service binding; keep the bass path latency-correct.
-  if (dynamicHadSidechain && ! hasSidechain)
+  // Usable-input loss (once, on the edge): return to Global, clear Hold,
+  // captures and the Service binding. The held activity trackers keep normal
+  // gaps between hits inside the active window, so this edge occurs only when
+  // the current hold has actually expired or the material is too quiet.
+  const bool usableInput = classifyDynamicInputStatus (hasSidechain)
+      == DynamicInputStatus::Active;
+  if (dynamicHadUsableInput && ! usableInput)
     dynamicRuntime.notifySidechainLost();
-  dynamicHadSidechain = hasSidechain;
+  dynamicHadUsableInput = usableInput;
 
   fillRawDynamicFingerprintInputs(mainBuffer, sidechainBuffer, hasSidechain, numSamples);
 
@@ -3471,7 +3485,7 @@ void KickLockAudioProcessor::renderNewDynamicRuntime(
 
   const bool ok = dynamicRuntime.process(
       mainBuffer, dynamicRawBassMono.getReadPointer(0),
-      hasSidechain ? dynamicRawKickMono.getReadPointer(0) : nullptr, hasSidechain,
+      usableInput ? dynamicRawKickMono.getReadPointer(0) : nullptr, usableInput,
       strength, dynamicRuntimeOutput, numSamples);
 
   if (! shadowOnly)
@@ -4143,18 +4157,14 @@ bool KickLockAudioProcessor::applyLatestLearnResult()
   ensureRevertBundleCaptured();
   const bool preserveAllpassEnabled = getEffectivePhaseFilterEnabled();
   setParameterValueWithGesture ("delay_ms", delay);
-  setParameterValueWithGesture ("delayMs", delay);
   setParameterValueWithGesture ("polarity_invert", polarity ? 1.0f : 0.0f);
-  setParameterValueWithGesture ("polarityInvert", polarity ? 1.0f : 0.0f);
   setParameterValueWithGesture ("crossover_enable", candidate.context.crossoverEnabled ? 1.0f : 0.0f);
   setParameterValueWithGesture ("crossover_freq", candidate.context.crossoverHz);
   setParameterValueWithGesture ("delayInterp", (float) appliedMap.base.delayInterpolationIndex);
   setParameterValueWithGesture ("rotatorStages", (float) (stages - 2));
   setParameterValueWithGesture ("allpass_freq", frequency);
-  setParameterValueWithGesture ("rotatorFreq", frequency);
   setParameterValueWithGesture ("rotatorQ", q);
   setParameterValueWithGesture ("allpass_enable", rotatorRequired || preserveAllpassEnabled ? 1.0f : 0.0f);
-  setParameterValueWithGesture ("phaseFilterEnabled", rotatorRequired || preserveAllpassEnabled ? 1.0f : 0.0f);
 
   const auto actual = captureCurrentParameterSnapshot();
   appliedMap.base.delayMs = actual.delayMs;

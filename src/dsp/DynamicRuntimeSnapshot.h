@@ -51,6 +51,23 @@ struct DynamicStateCard
 
 inline constexpr DynamicStateCard makeEmptyDynamicStateCard() noexcept { return {}; }
 
+// Physical sidechain presence and usable analysis material are intentionally
+// separate concepts. The fixed ordering is part of the UI/test contract.
+enum class DynamicInputStatus : uint8_t
+{
+    NoSidechain = 0,
+    WaitingForKick,
+    WaitingForBass,
+    SignalTooLow,
+    Active
+};
+
+inline constexpr bool isValidDynamicInputStatus (DynamicInputStatus status) noexcept
+{
+    const auto value = static_cast<uint8_t> (status);
+    return value <= static_cast<uint8_t> (DynamicInputStatus::Active);
+}
+
 struct DynamicRuntimeSnapshot
 {
     uint64_t sequence = 0;
@@ -69,6 +86,7 @@ struct DynamicRuntimeSnapshot
     bool fallbackActive = true;
 
     bool sidechainPresent = false;
+    DynamicInputStatus inputStatus = DynamicInputStatus::NoSidechain;
     bool bypassActive = false;
 
     uint64_t captureExhaustedCount = 0;

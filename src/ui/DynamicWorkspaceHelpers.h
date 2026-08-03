@@ -326,8 +326,14 @@ inline juce::String dynamicWorkspaceRuntimeStatus (const DynamicRuntimeSnapshot&
         return "LEGACY COMPATIBILITY";
     if (runtime.bypassActive)
         return "BYPASSED";
-    if (! runtime.sidechainPresent)
-        return "NO SIDECHAIN";
+    switch (runtime.inputStatus)
+    {
+        case DynamicInputStatus::NoSidechain:   return "NO SIDECHAIN";
+        case DynamicInputStatus::WaitingForKick: return "WAITING FOR KICK";
+        case DynamicInputStatus::WaitingForBass: return "WAITING FOR BASS";
+        case DynamicInputStatus::SignalTooLow:  return "SIGNAL TOO LOW";
+        case DynamicInputStatus::Active:        break;
+    }
     if (runtime.holdActive)
         return "HOLD";
     if (runtime.activeBranchKind == DynamicSelectorBranchKind::Service)

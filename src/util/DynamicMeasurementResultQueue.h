@@ -101,6 +101,7 @@ struct DynamicMeasurementScoredCapture
 {
     bool valid = false;
     uint64_t mapGeneration = 0;
+    uint64_t inputEpoch = 0;
     uint64_t stableStateId = 0;
     DynamicSelectorBranchKind branchKind = DynamicSelectorBranchKind::Global;
     int64_t triggerSample = -1;

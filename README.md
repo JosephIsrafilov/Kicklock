@@ -4,7 +4,12 @@ KickLock is an open-source JUCE plugin for visually aligning kick and bass phase
 It processes the bass on the main input, reads the kick from the sidechain, and
 shows a trigger-locked oscilloscope plus a live low-end match score.
 
-![Routing GIF placeholder](docs/routing-placeholder.gif)
+```mermaid
+flowchart LR
+    Bass["Bass / main input"] --> KickLock["KickLock"]
+    Kick["Kick / optional sidechain"] -->|reference only| KickLock
+    KickLock --> Out["Latency-compensated bass output"]
+```
 
 ## What It Does
 
@@ -17,10 +22,9 @@ shows a trigger-locked oscilloscope plus a live low-end match score.
 
 ## Downloads
 
-You can download the latest automatically built plugins (VST3 and AU) from the Nightly Release:
-- [⬇️ Download Latest Nightly Build](https://github.com/JosephIsrafilov/Kicklock/releases/tag/nightly)
-
-*(Artifacts are automatically uploaded to this release on every push to the main branch)*
+The `v0.4.0` release contains three signed distribution archives: Windows x64
+VST3, macOS universal VST3, and macOS universal AU. The release workflow does
+not publish unsigned or unnotarized fallbacks.
 
 ## Routing
 
@@ -35,7 +39,7 @@ DAW notes:
 - FL Studio: Put KickLock on the bass mixer insert, route the kick insert with "Sidechain to this track", then select that input in the wrapper.
 - Logic Pro: Insert KickLock on bass, use the plugin sidechain menu, choose the kick track or bus.
 - Cubase: Insert KickLock on bass, enable the plugin sidechain, send the kick channel to it.
-- Reaper: Put KickLock on bass, route kick channels 1/2 to bass channels 3/4.
+- Reaper: Put KickLock on the bass track, route kick channels 1/2 to bass channels 3/4.
 
 ## Workflow
 
@@ -56,25 +60,20 @@ from before the first applied fix.
 
 ### Dynamic
 
-1. Select **Dynamic** and play a representative bassline with the kick routed
-   to the sidechain.
+1. Select **Dynamic** and play a representative bassline with the kick routed to the sidechain.
 2. Press **Learn**, then **Stop Learn** after capturing enough stable hits.
-3. Review the Dynamic workspace preview. Learn forms repeatable signed conflict
-   States, not note buckets: three hits create a Candidate and five repeatable
-   hits create a Stable State. MIDI and pitch are optional labels only.
-4. Candidates are recognizable but use Global; a recognizable State without a
-   confident correction also safely uses Global. Predicted values are offline
-   Learn evidence, while Verified values require fresh runtime output.
-5. Press **Apply Learn** to activate the Global correction and State map, or
-   **Discard** to leave the current sound unchanged.
+3. Review the Dynamic workspace preview. Learn forms repeatable signed conflict States, not note buckets: three hits create a Candidate and five repeatable hits create a Stable State. MIDI and pitch are optional labels only.
+4. Candidates are recognizable but use Global; a recognizable State without a confident correction also safely uses Global. Predicted values are offline Learn evidence, while Verified values require fresh runtime output.
+5. Press **Apply Learn** to activate the Global correction and State map, or **Discard** to leave the current sound unchanged.
 
 Dynamic Strength blends from the learned global correction at 0% to the full
-State correction at 100%. Pitch Follow is ignored in Dynamic mode but its
-saved value is not changed.
+State correction at 100%. Pitch Follow is ignored in Dynamic mode but its saved
+value is not changed.
 
-Dynamic status labels are explicit: **NO MAP** means no applied map exists,
-**ACTIVE STATE**, **ACTIVE SERVICE**, **GLOBAL FALLBACK**, **HOLD**,
-**BYPASSED**, and **NO SIDECHAIN** describe current runtime routing. Pending
+Dynamic status labels are explicit: **NO MAP** means no applied map exists;
+**BYPASSED**, **NO SIDECHAIN**, **WAITING FOR KICK**, **WAITING FOR BASS**, and
+**SIGNAL TOO LOW** describe unavailable input; **HOLD**, **ACTIVE STATE**,
+**ACTIVE SERVICE**, and **GLOBAL FALLBACK** describe runtime routing. Pending
 Learn is marked preview/not applied and never presented as active or Verified.
 **Clear Map** removes applied learned data without changing manual parameters;
 **Revert** restores the previous map when available.
@@ -129,11 +128,13 @@ cmake -B build
 cmake --build build --config Release
 ```
 
-Build and run tests:
+Build and run the 0.4.0 validation targets:
 
 ```sh
-cmake --build build --target KickLockDspTests --config Debug
-./build/tests/Debug/KickLockDspTests
+cmake --build build --target KickLockFastTests KickLockHostAcceptanceTests \
+  KickLockGuiAcceptanceTests KickLockMalformedStateTests --config Release
+ctest --test-dir build -R '^KickLock(Fast|HostAcceptance|GuiAcceptance|MalformedState)Tests$' \
+  --output-on-failure
 ```
 
 On Windows with Visual Studio's bundled CMake, use the generated build directory
@@ -141,18 +142,11 @@ and run the test executable directly if `ctest` is not on PATH.
 
 ## Validation
 
-The intended release gate is:
-
-```sh
-pluginval --strictness-level 10 path/to/KickLock.vst3
-```
-
-Release candidates also run the deterministic Phase 11 fixture, callback
-allocation gates, Release performance ratios, artifact extraction checks, and
-cross-platform sanitizer coverage. Recorded kick/bass integration is optional:
-without `tests/assets/real_kick.wav` and `tests/assets/real_bass.wav` it is
-reported as unverified, never as a successful real-audio test. Set
-`KICKLOCK_REQUIRE_REAL_AUDIO_FIXTURES=1` to require those stems.
+The 0.4.0 automated gate runs only `KickLockFastTests`,
+`KickLockHostAcceptanceTests`, `KickLockGuiAcceptanceTests`,
+`KickLockMalformedStateTests`, pluginval strictness 10, and macOS `auval`.
+Manual DAW runs, listening checks, real-audio stems, sanitizer matrices, and
+the excluded stress suites are outside this release gate.
 
 ## License
 

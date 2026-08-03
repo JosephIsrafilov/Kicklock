@@ -139,6 +139,7 @@ public:
     int getReportedLatencySamples() const noexcept { return reportedLatencySamples; }
     double getSampleRate() const noexcept { return sampleRate; }
     int64_t getRuntimeSamplePosition() const noexcept { return runtimeSamplePos; }
+    uint64_t getMeasurementInputEpoch() const noexcept { return measurementInputEpoch; }
 
     const DynamicStateMap& getActiveMap() const noexcept { return activeMap; }
     uint64_t getMapGeneration() const noexcept { return mapGeneration; }
@@ -176,11 +177,11 @@ public:
         resetTimeline();
     }
 
-    // Sidechain-loss transition (call once when the sidechain disappears while
-    // New Dynamic is active). Clears pending captures, Hold and the Service
-    // binding, returns selection to Global and publishes no active State, but
-    // keeps the persistent hot branches configured and the bass path
-    // latency-correct (engine history is preserved).
+    // Usable-input-loss transition (call once when the held kick/bass input is
+    // no longer suitable for Dynamic matching). Clears pending captures, Hold
+    // and the Service binding, returns selection to Global and publishes no
+    // active State, but keeps the persistent hot branches configured and the
+    // bass path latency-correct (engine history is preserved).
     void notifySidechainLost() noexcept
     {
         if (! prepared)
@@ -315,6 +316,8 @@ private:
 
     void resetTimeline (DynamicCaptureRejectCategory measurementDiscardReason = DynamicCaptureRejectCategory::TransportInvalidated) noexcept
     {
+        if (++measurementInputEpoch == 0)
+            measurementInputEpoch = 1;
         captureBank.reset();
         scheduler.reset (0);
         kickTrigger.reset();
@@ -480,7 +483,8 @@ private:
                                 + package.effectiveAbsoluteDelayMs * sampleRate / 1000.0;
                             measurementCapture.beginCapture (mapGeneration, match.selectedStableStateId,
                                                              DynamicSelectorBranchKind::Global,
-                                                             observation.triggerSample, tap, sampleRate);
+                                                             observation.triggerSample, tap, sampleRate,
+                                                             measurementInputEpoch);
                         }
                     }
                 }
@@ -641,6 +645,7 @@ private:
     double configuredSampleRate = 0.0;
 
     int64_t runtimeSamplePos = 0;
+    uint64_t measurementInputEpoch = 0;
 
     juce::AudioBuffer<float> chunkInput;
     juce::AudioBuffer<float> chunkOutput;

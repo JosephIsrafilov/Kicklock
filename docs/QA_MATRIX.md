@@ -1,33 +1,24 @@
-# KickLock 0.2.0 QA Matrix
+# KickLock 0.4.0 QA Matrix
 
-Automated results refer to the deterministic unit, runtime, serialization, and
-CI checks in this repository. Manual DAW rows are intentionally not inferred
-from those checks.
+The 0.4.0 gate is deliberately short and automated. It does not infer DAW
+behavior from unit tests and does not require real kick/bass stems.
 
-| Area | Status | Evidence / Follow-up |
+| Area | Gate | Evidence |
 | --- | --- | --- |
-| Standalone build | Automated pass | Release build target in local release validation. |
-| VST3 build | Automated pass | Release build target in local release validation. |
-| pluginval VST3 strictness 10 | Automated pass in CI | Windows and macOS workflow `ctest` registration. |
-| pluginval AU | Not run / requires macOS host validation | AU artifact is built on macOS CI; no AU pluginval claim is made. |
-| Windows VST3 host smoke test | Not run / requires DAW | Open in a supported Windows VST3 host. |
-| macOS VST3/AU host smoke test | Not run / requires DAW | Open in a supported macOS host. |
-| Project save/reload | Automated pass | Phase 5 orchestration and Dynamic-mode serialization tests. |
-| Sidechain routing | Automated pass | Processor observation and Learn bypass coverage. |
-| Learn, Stop, Apply, Discard, Clear Map, Revert | Automated pass | Phase 5 orchestration tests. |
-| Editor close/reopen | Automated pass | Editor lifecycle test for Preparing, Capturing, and ResultReady. |
-| Host bypass | Automated pass | Learn and processor bypass tests. |
-| Sample-rate change | Automated pass | Dynamic runtime 44.1/48/96 kHz coverage. |
-| Offline bounce / deterministic render | Automated pass | Static golden and Dynamic runtime deterministic render tests. |
-| Static/Dynamic automation | Automated pass | Dynamic transition smoothing coverage; verify host lane UX manually. |
-| Dynamic Strength automation | Automated pass | Runtime interpolation is finite/bounded; verify host lane UX manually. |
-| CPU comparison: Static, Dynamic fallback, Dynamic learned note, editor open/closed | Not run / no local DAW CPU harness | Existing runtime tests verify finite, deterministic paths; no universal CPU claim is made. |
-| Linux ASan + UBSan | Automated pass in CI | Linux Debug workflow runs the complete test executable under sanitizers. |
-| Cooperative worker teardown | Automated pass | Maximum Learn material, active Static analysis, and active Spectrum FFT teardown complete within the conservative 3,000 ms bound. |
+| DynamicInputStatus values and labels | `KickLockFastTests` | All five fixed values and workspace priority. |
+| Activity hold and signal loss | `KickLockFastTests` | Normal hit gaps stay held; expired/quiet input clears runtime state. |
+| No stale Unknown/Verified work | `KickLockFastTests` | Runtime input epoch rejects post-loss worker scores. |
+| Mono/stereo bus rules | `KickLockFastTests` / host test | Symmetric main layouts pass; asymmetric layouts fail; sidechain disabled/mono/stereo are supported. |
+| Canonical/legacy APVTS IDs | `KickLockFastTests` / GUI test | Canonical writes, legacy grouping, migration, and equivalent output. |
+| Malformed and old state | `KickLockMalformedStateTests` | Truncated/wrong-root payloads and missing 0.4.0 parameters fail safely. |
+| Dynamic Workspace/editor lifecycle | `KickLockGuiAcceptanceTests` | Status model, cards, canonical IDs, resize, and close/reopen. |
+| Hosted VST3 routing/state | `KickLockHostAcceptanceTests` | JUCE host scan, metadata 0.4.0, actual sidechain buses, signal loss/recovery, 20 ms PDC, finite output, save/reload. |
+| VST3 ABI/runtime | pluginval strictness 10 | Windows and macOS release workflows. |
+| AU host validation | macOS `auval` | Runs against the built AU bundle. |
+| Windows distribution | release workflow | Authenticode SHA-256 sign + verify before ZIP. |
+| macOS distribution | release workflow | Universal arm64+x86_64, hardened runtime, timestamp, notarization, staple, validate. |
 
-## Manual DAW Follow-up
+## Explicitly outside this matrix
 
-Before release, verify sidechain routing, project reload, Dynamic Learn,
-automation, offline bounce, bypass, and 44.1/48/96 kHz switching in at least
-one Windows VST3 host and one macOS VST3/AU host. Record the host and version
-when those checks are performed.
+Manual DAW runs, listening review, real-audio suites, AudioStress, sanitizer
+matrices, and installer packaging are not 0.4.0 acceptance requirements.

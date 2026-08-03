@@ -64,6 +64,7 @@ namespace
         model.runtime.mapValid = true;
         model.runtime.stateCount = stateCount;
         model.runtime.sidechainPresent = true;
+        model.runtime.inputStatus = DynamicInputStatus::Active;
         for (int i = 0; i < stateCount; ++i)
         {
             const auto state = makeState ((uint64_t) (100 + i));
@@ -327,6 +328,16 @@ public:
             expect (! dynamicCardIsActive (cards[0], model.runtime));
             expect (dynamicCardIsActive (cards[1], model.runtime));
             expectEquals (dynamicWorkspaceRuntimeStatus (model.runtime), juce::String ("ACTIVE SERVICE"));
+
+            model.runtime.inputStatus = DynamicInputStatus::NoSidechain;
+            expectEquals (dynamicWorkspaceRuntimeStatus (model.runtime), juce::String ("NO SIDECHAIN"));
+            model.runtime.inputStatus = DynamicInputStatus::WaitingForKick;
+            expectEquals (dynamicWorkspaceRuntimeStatus (model.runtime), juce::String ("WAITING FOR KICK"));
+            model.runtime.inputStatus = DynamicInputStatus::WaitingForBass;
+            expectEquals (dynamicWorkspaceRuntimeStatus (model.runtime), juce::String ("WAITING FOR BASS"));
+            model.runtime.inputStatus = DynamicInputStatus::SignalTooLow;
+            expectEquals (dynamicWorkspaceRuntimeStatus (model.runtime), juce::String ("SIGNAL TOO LOW"));
+            model.runtime.inputStatus = DynamicInputStatus::Active;
 
             model.runtime.holdActive = true;
             expectEquals (dynamicWorkspaceRuntimeStatus (model.runtime), juce::String ("HOLD"));

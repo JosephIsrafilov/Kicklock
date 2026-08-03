@@ -299,15 +299,15 @@ public:
             // The delay parameter round-trips through APVTS normalisation, which
             // is not bit-exact across architectures (arm64 reads back ~-4.5e-7
             // for a clamped 0 ms). Allow that negligible undershoot.
-            expectGreaterOrEqual (rawParam (processor, "delayMs"), -1.0e-4f);
-            expectWithinAbsoluteError (rawParam (processor, "polarityInvert"),
+            expectGreaterOrEqual (rawParam (processor, "delay_ms"), -1.0e-4f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"),
                                        fix.bassPolarityInvert ? 1.0f : 0.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"),
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"),
                                        fix.phaseFilterEnabled ? 1.0f : 0.0f, 1.0e-7f);
 
             if (fix.phaseFilterEnabled)
             {
-                expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), fix.phaseFilterFreqHz, 0.01f);
+                expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), fix.phaseFilterFreqHz, 0.01f);
                 expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), fix.phaseFilterQ, 0.01f);
                 expectWithinAbsoluteError (rawParam (processor, "rotatorStages"),
                                            (float) (fix.phaseFilterStages - 2), 1.0e-7f);
@@ -342,10 +342,8 @@ public:
 
             expect (processor.applyLatestFix());
             expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 1.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 1.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "polarityInvert"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "polarity_invert"), 1.0f, 1.0e-7f);
             expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 90.0f, 0.01f);
-            expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 90.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 4.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 2.0f, 1.0e-7f);
         }
@@ -375,8 +373,8 @@ public:
             expect (! PhaseFixEngine::canApply (fix));
             expect (fix.optionalApplyAllowed);
             expect (processor.applyLatestFix());
-            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 1.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 100.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 100.0f, 0.01f);
         }
 
         beginTest ("Analyze snapshots the complete pre-analysis state for Revert");
@@ -532,8 +530,8 @@ public:
             processor.setLatestFixResultForTesting (fix);
 
             expect (processor.applyLatestFix());
-            expectWithinAbsoluteError (rawParam (processor, "phaseFilterEnabled"), 1.0f, 1.0e-7f);
-            expectWithinAbsoluteError (rawParam (processor, "rotatorFreq"), 450.0f, 0.01f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_enable"), 1.0f, 1.0e-7f);
+            expectWithinAbsoluteError (rawParam (processor, "allpass_freq"), 450.0f, 0.01f);
             expectWithinAbsoluteError (rawParam (processor, "rotatorQ"), 2.0f, 0.01f);
                 expectWithinAbsoluteError (rawParam (processor, "rotatorStages"), 1.0f, 1.0e-7f);
         }
@@ -770,7 +768,7 @@ public:
             expect (processor.applyLatestFix());
             // Delay round-trips through APVTS normalisation (not bit-exact on
             // arm64); 1e-4 ms is negligible for a +/-20 ms parameter.
-            expectWithinAbsoluteError (rawParam (processor, "delayMs"), -3.25f, 1.0e-4f);
+            expectWithinAbsoluteError (rawParam (processor, "delay_ms"), -3.25f, 1.0e-4f);
             expectWithinAbsoluteError (rawParam (processor, "visualOffsetSamples"), -128.0f, 1.0e-7f);
         }
 
