@@ -80,7 +80,8 @@ jobs:
           $head = (git rev-parse HEAD).Trim()
           $tagCommit = (git rev-parse $tagRef).Trim()
           if ($head -ne $tagCommit) { throw "HEAD does not exactly match $env:TAG." }
-          if ((git status --porcelain).Trim()) { throw "Tagged checkout is not clean." }
+          $dirty = git status --porcelain
+          if ($dirty) { throw "Tagged checkout is not clean." }
           git diff-tree --check $tagCommit
 
       - name: Configure and build approved release targets
