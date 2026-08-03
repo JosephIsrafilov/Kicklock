@@ -26,6 +26,7 @@ struct DynamicContinuityMixerInputs
     const juce::AudioBuffer<float>* globalLow = nullptr;
     std::array<const juce::AudioBuffer<float>*, DynamicSelectorContract::kStateSlotCount> stateLow {};
     const juce::AudioBuffer<float>* serviceLow = nullptr;
+    const juce::AudioBuffer<float>* neutralLow = nullptr;
     const juce::AudioBuffer<float>* commonHigh = nullptr;
 };
 
@@ -73,7 +74,8 @@ public:
 
         if (! prepared || ! scheduler.isPrepared() || numSamples <= 0)
             return false;
-        if (inputs.globalLow == nullptr || inputs.serviceLow == nullptr || inputs.commonHigh == nullptr)
+        if (inputs.globalLow == nullptr || inputs.serviceLow == nullptr || inputs.neutralLow == nullptr
+            || inputs.commonHigh == nullptr)
             return false;
         for (const auto* statePtr : inputs.stateLow)
             if (statePtr == nullptr)
@@ -81,6 +83,7 @@ public:
 
         if (! hasBufferCapacity (*inputs.globalLow, numSamples)
             || ! hasBufferCapacity (*inputs.serviceLow, numSamples)
+            || ! hasBufferCapacity (*inputs.neutralLow, numSamples)
             || ! hasBufferCapacity (*inputs.commonHigh, numSamples)
             || ! hasBufferCapacity (output, numSamples))
             return false;
@@ -120,6 +123,9 @@ public:
 
                 lowSum += gains[(size_t) kServiceBranchIndex]
                     * sanitizeBranchSample (inputs.serviceLow->getSample (ch, i));
+
+                lowSum += gains[(size_t) kNeutralBranchIndex]
+                    * sanitizeBranchSample (inputs.neutralLow->getSample (ch, i));
 
                 const float highSample = sanitizeHighSample (inputs.commonHigh->getSample (ch, i));
                 float full = lowSum + highSample;

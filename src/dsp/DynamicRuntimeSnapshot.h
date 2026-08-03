@@ -47,6 +47,13 @@ struct DynamicStateCard
     DynamicMeasurementSummary verified;
     DynamicCorrectionAssessment assessment = DynamicCorrectionAssessment::Unknown;
     DynamicCorrectionRejectionReason rejectionReason = DynamicCorrectionRejectionReason::None;
+
+    // Persisted per-identity correction policy (product safety contract).
+    // See DynamicStateMap.h's DynamicCorrectionPolicy for the full contract;
+    // policyRejectionReason is populated only when correctionPolicy is
+    // NeutralSafe, giving the UI a precise, persisted reason to display.
+    DynamicCorrectionPolicy correctionPolicy = DynamicCorrectionPolicy::GlobalFallback;
+    DynamicPolicyRejectionReason policyRejectionReason = DynamicPolicyRejectionReason::None;
 };
 
 inline constexpr DynamicStateCard makeEmptyDynamicStateCard() noexcept { return {}; }

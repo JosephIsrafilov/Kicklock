@@ -11,6 +11,11 @@ enum class DynamicPackageDecision : uint8_t
     GlobalNoSelection,
     GlobalRecognizedNoCorrection,
     GlobalBypassed,
+    // The identity is recognized and has no State-level package, but the
+    // measurement gate proved the Global package itself is harmful for it:
+    // route to the shared, always-hot, zero-delay, no-allpass Neutral branch
+    // instead of Global so the harmful package never reaches audible output.
+    NeutralSafe,
     InvalidInput
 };
 
@@ -119,6 +124,18 @@ inline DynamicPackageResolution resolveDynamicPackage (const DynamicStateMap& ma
     {
         if (! state->hasLearnedPackage)
         {
+            if (state->correctionPolicy == DynamicCorrectionPolicy::NeutralSafe)
+            {
+                // Shared-branch identity: no per-identity delay, no allpass.
+                // Crossover/channel alignment and delay interpolation stay
+                // identical to Global so the shared low/high split remains
+                // aligned; only the delay delta and allpass are stripped.
+                result.effectiveAbsoluteDelayMs = 0.0;
+                result.allpassEnabled = false;
+                result.decision = DynamicPackageDecision::NeutralSafe;
+                result.valid = true;
+                return result;
+            }
             result.decision = DynamicPackageDecision::GlobalRecognizedNoCorrection;
             result.valid = true;
             return result;

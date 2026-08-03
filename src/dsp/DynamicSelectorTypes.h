@@ -19,11 +19,13 @@
 namespace DynamicSelectorContract
 {
     inline constexpr int kStateSlotCount = DynamicStateMapContract::kMaxPersistentStates;
-    // Fixed ten low-band branch positions: Global, eight State slots, Service.
-    inline constexpr int kBranchCount = kStateSlotCount + 2;
+    // Fixed eleven low-band branch positions: Global, eight State slots,
+    // Service, Neutral (the shared Safe Neutral Override branch).
+    inline constexpr int kBranchCount = kStateSlotCount + 3;
     inline constexpr int kGlobalBranchIndex = 0;
     inline constexpr int kFirstStateBranchIndex = 1;
-    inline constexpr int kServiceBranchIndex = kBranchCount - 1;
+    inline constexpr int kServiceBranchIndex = kStateSlotCount + 1;
+    inline constexpr int kNeutralBranchIndex = kBranchCount - 1;
 
     inline constexpr int kEventQueueCapacity =
         DynamicFingerprintContract::kMaxConcurrentDynamicFingerprintCaptures;
@@ -37,7 +39,8 @@ enum class DynamicSelectorBranchKind : uint8_t
 {
     Global = 0,
     State = 1,
-    Service = 2
+    Service = 2,
+    Neutral = 3
 };
 
 struct DynamicSelectorBranchRef
@@ -50,6 +53,11 @@ struct DynamicSelectorBranchRef
 inline constexpr DynamicSelectorBranchRef makeGlobalSelectorBranchRef() noexcept
 {
     return DynamicSelectorBranchRef { DynamicSelectorBranchKind::Global, -1, 0 };
+}
+
+inline constexpr DynamicSelectorBranchRef makeNeutralSelectorBranchRef() noexcept
+{
+    return DynamicSelectorBranchRef { DynamicSelectorBranchKind::Neutral, -1, 0 };
 }
 
 inline bool dynamicSelectorBranchRefsEqual (const DynamicSelectorBranchRef& a,
@@ -71,6 +79,8 @@ inline int dynamicSelectorBranchIndex (const DynamicSelectorBranchRef& ref) noex
                 ? (kFirstStateBranchIndex + ref.stateSlot) : -1;
         case DynamicSelectorBranchKind::Service:
             return kServiceBranchIndex;
+        case DynamicSelectorBranchKind::Neutral:
+            return kNeutralBranchIndex;
     }
     return -1;
 }
@@ -83,6 +93,7 @@ struct DynamicSelectorBranchRoster
     DynamicHotBranchInfo global;
     std::array<DynamicHotBranchInfo, DynamicSelectorContract::kStateSlotCount> states {};
     DynamicHotBranchInfo service;
+    DynamicHotBranchInfo neutral;
 
     // Explicit semantic binding: which stable State identity Service currently
     // represents. Phase 5 always stores 0 as Service's internal stableStateId;
@@ -115,6 +126,9 @@ inline bool isValidDynamicSelectorBranchRoster (const DynamicSelectorBranchRoste
 
     if (roster.service.active
         && (roster.service.kind != DynamicHotBranchKind::Service || roster.service.stableStateId != 0))
+        return false;
+
+    if (roster.neutral.kind != DynamicHotBranchKind::Neutral || roster.neutral.stableStateId != 0)
         return false;
 
     if (roster.serviceBindingValid && roster.serviceBoundStableStateId == 0)
@@ -161,6 +175,7 @@ enum class DynamicSelectorDiagnostic : uint8_t
     None = 0,
     MatchedPersistentState,
     MatchedService,
+    MatchedNeutralSafe,
     MatchedGlobalNoCorrection,
     MatchedGlobalBypassed,
     HeldAmbiguous,

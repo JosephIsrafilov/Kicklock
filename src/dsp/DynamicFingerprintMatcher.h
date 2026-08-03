@@ -40,6 +40,11 @@ struct DynamicMatchResult
 
     bool correctionAvailable = false;
     bool selectedBypassed = false;
+    // True iff the matched identity's persisted policy is NeutralSafe: the
+    // scheduler must route it to the shared Neutral branch regardless of
+    // correctionAvailable, since a NeutralSafe identity's own Global fallback
+    // was proven harmful and must never reach audible output for it.
+    bool selectedNeutralSafe = false;
     int eligibleStateCount = 0;
 };
 
@@ -167,6 +172,7 @@ inline DynamicMatchResult matchDynamicFingerprint (const DynamicFingerprintObser
     result.selectedSlot = nearestSlot;
     result.correctionAvailable = stateHasCorrection (nearestState);
     result.selectedBypassed = nearestState.bypassed;
+    result.selectedNeutralSafe = nearestState.correctionPolicy == DynamicCorrectionPolicy::NeutralSafe;
 
     if (nearestDistance > threshold)
     {

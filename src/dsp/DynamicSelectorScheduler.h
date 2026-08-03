@@ -290,7 +290,16 @@ private:
             case DynamicMatchDecision::Matched:
             {
                 recognizedId = match.selectedStableStateId;
-                if (match.correctionAvailable && ! match.selectedBypassed)
+                if (match.selectedNeutralSafe)
+                {
+                    // The measurement gate proved this identity's Global
+                    // fallback is harmful: route to the shared Neutral branch
+                    // unconditionally, exactly like MatchedGlobalNoCorrection
+                    // routes to Global for an ordinary no-correction identity.
+                    resolvedTarget = makeNeutralSelectorBranchRef();
+                    decisionDiag = DynamicSelectorDiagnostic::MatchedNeutralSafe;
+                }
+                else if (match.correctionAvailable && ! match.selectedBypassed)
                 {
                     const int warmSlot = findWarmActiveStateSlotByStableId (roster, match.selectedStableStateId);
                     if (warmSlot >= 0)
@@ -487,6 +496,8 @@ private:
                 return roster.states[(size_t) ref.stateSlot].physicalTapSamples;
             case DynamicSelectorBranchKind::Service:
                 return roster.service.physicalTapSamples;
+            case DynamicSelectorBranchKind::Neutral:
+                return roster.neutral.physicalTapSamples;
         }
         return std::numeric_limits<double>::quiet_NaN();
     }
