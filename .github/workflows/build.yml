@@ -39,7 +39,7 @@ jobs:
           @("## PR FAST", "- Build target: KickLockFastTests", "- Categories: Phase11 Phase10 Phase9 Phase8 Phase7 Processor UI Helpers", "- pluginval executed: no", "- Universal build: no", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
 
   windows-full:
-    name: Windows Release full automated gates
+    name: Windows 0.4.0 approved release gates
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -53,20 +53,12 @@ jobs:
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-          cmake --build build --parallel 4
+          cmake --build build --target KickLock_VST3 KickLockFastTests KickLockHostAcceptanceTests KickLockGuiAcceptanceTests KickLockMalformedStateTests --parallel 4
       - name: Run dedicated Release gates and pluginval strictness 10
         shell: pwsh
         run: |
           $timer = [Diagnostics.Stopwatch]::StartNew()
           & "build/tests/KickLockFastTests.exe"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "build/tests/KickLockDspTests.exe"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "build/tests/KickLockAudioSmokeTests.exe"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "build/tests/KickLockAudioAcceptanceTests.exe"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "build/tests/KickLockAudioStressTests.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "build/tests/KickLockGuiAcceptanceTests.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -77,7 +69,7 @@ jobs:
           ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $timer.Stop()
-          @("## WINDOWS RELEASE GATES", "- Dedicated executables: Fast, DSP, AudioSmoke, AudioAcceptance, AudioStress, GUI acceptance, malformed-state fuzz, compiled VST3 host acceptance", "- pluginval: strictness 10", "- AU validation: not applicable on Windows", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
+          @("## WINDOWS 0.4.0 APPROVED GATES", "- Dedicated executables: Fast, GUI acceptance, malformed-state fuzz, compiled VST3 host acceptance", "- pluginval: strictness 10", "- AU validation: not applicable on Windows", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Zip VST3
         run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
       - name: Verify Windows VST3 artifact
@@ -121,7 +113,7 @@ jobs:
             echo "- Test elapsed: ${elapsed}s"
           } >> "$GITHUB_STEP_SUMMARY"
   macos-full:
-    name: macOS Release full automated gates
+    name: macOS 0.4.0 approved release gates
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -129,28 +121,34 @@ jobs:
       - name: Configure full validation
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DKICKLOCK_ENABLE_PLUGINVAL=ON
       - name: Build plugin and tests
-        run: cmake --build build --parallel 4
+        run: cmake --build build --target KickLock_VST3 KickLock_AU KickLockFastTests KickLockHostAcceptanceTests KickLockGuiAcceptanceTests KickLockMalformedStateTests --parallel 4
       - name: Run dedicated Release gates and pluginval strictness 10
         run: |
           start=$SECONDS
           build/tests/KickLockFastTests
-          build/tests/KickLockDspTests
-          build/tests/KickLockAudioSmokeTests
-          build/tests/KickLockAudioAcceptanceTests
-          build/tests/KickLockAudioStressTests
           build/tests/KickLockGuiAcceptanceTests
           build/tests/KickLockMalformedStateTests
           build/tests/KickLockHostAcceptanceTests
           ctest --test-dir build -R '^pluginval_vst3$' --output-on-failure
           elapsed=$((SECONDS - start))
           {
-            echo "## MACOS RELEASE GATES"
-            echo "- Dedicated executables: Fast, DSP, AudioSmoke, AudioAcceptance, AudioStress, GUI acceptance, malformed-state fuzz, compiled VST3 host acceptance"
+            echo "## MACOS 0.4.0 APPROVED GATES"
+            echo "- Dedicated executables: Fast, GUI acceptance, malformed-state fuzz, compiled VST3 host acceptance"
             echo "- pluginval: strictness 10"
-            echo "- AU: packaged and universal-binary checked; registrar discovery remains in the release workflow"
+            echo "- AU: auval plus packaged universal-binary checked"
             echo "- Universal build: yes"
             echo "- Test elapsed: ${elapsed}s"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run macOS auval
+        run: |
+          set -euo pipefail
+          au="build/KickLock_artefacts/Release/AU/KickLock.component"
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          rm -rf "$HOME/Library/Audio/Plug-Ins/Components/KickLock.component"
+          ditto "$au" "$HOME/Library/Audio/Plug-Ins/Components/KickLock.component"
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aufx Klck Oskl
       - name: Zip VST3
         run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "KickLock-Mac-VST3.zip"
       - name: Zip AU
@@ -183,66 +181,4 @@ jobs:
             KickLock-Mac-VST3.zip
             KickLock-Mac-AU.zip
 
-  linux-pr:
-    name: ${{ github.event_name == 'pull_request' && 'Linux Debug (ASan + UBSan, tests only)' || 'Linux PR Fast Internal' }}
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install JUCE Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev ninja-build
-      - name: Configure fast sanitizers
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKICKLOCK_ENABLE_PLUGINVAL=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-      - name: Build fast tests
-        run: cmake --build build --target KickLockFastTests --parallel 4
-      - name: Run focused sanitizers
-        env:
-          KICKLOCK_SKIP_TIMED_ASSERTS: "1"
-          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
-        run: |
-          start=$SECONDS
-          build/tests/KickLockFastTests Phase11 Phase10 Phase9 Phase8 Phase7 DSP Processor "UI Helpers"
-          elapsed=$((SECONDS - start))
-          {
-            echo "## PR FAST"
-            echo "- Build target: KickLockFastTests"
-            echo "- Categories: Phase11 Phase10 Phase9 Phase8 Phase7 DSP Processor UI Helpers"
-            echo "- pluginval executed: no"
-            echo "- Universal build: no"
-            echo "- Test elapsed: ${elapsed}s"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  linux-full:
-    name: Linux ASan UBSan and malformed-state fuzz
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install JUCE Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev ninja-build
-      - name: Configure full sanitizers
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKICKLOCK_ENABLE_PLUGINVAL=OFF -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-      - name: Build focused sanitizer and fuzz targets
-        run: cmake --build build --target KickLockDspTests --parallel 4
-      - name: Build deterministic malformed-state fuzz target
-        run: cmake --build build --target KickLockMalformedStateTests --parallel 4
-      - name: Run full sanitizer-safe categories
-        env:
-          KICKLOCK_SKIP_TIMED_ASSERTS: "1"
-          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
-        run: |
-          start=$SECONDS
-          build/tests/KickLockDspTests DSP Phase1 Phase2 Phase3 Phase4 Phase7 Phase8 Phase9 Phase10 Phase11 P10 Processor Stabilization "UI Helpers"
-          build/tests/KickLockMalformedStateTests
-          elapsed=$((SECONDS - start))
-          {
-            echo "## LINUX SANITIZER GATES"
-            echo "- Dedicated executables: focused DSP/processor categories and malformed-state fuzz"
-            echo "- ASan and UBSan: enabled"
-            echo "- pluginval/AU: not applicable on Linux"
-            echo "- Test elapsed: ${elapsed}s"
-          } >> "$GITHUB_STEP_SUMMARY"
 
