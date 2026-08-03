@@ -22,9 +22,11 @@ flowchart LR
 
 ## Downloads
 
-The `v0.4.0` release contains three signed distribution archives: Windows x64
-VST3, macOS universal VST3, and macOS universal AU. The release workflow does
-not publish unsigned or unnotarized fallbacks.
+The `v0.4.0` GitHub Actions build produces Windows x64 VST3, macOS universal
+VST3, and macOS universal AU archives. The evaluation archives are unsigned
+and unnotarized until the release signing secrets are installed; the workflow
+does not publish an unsigned public GitHub Release. Each archive includes the
+[Dynamic Mode evaluation guide](docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md).
 
 ## Routing
 
@@ -77,6 +79,9 @@ Dynamic status labels are explicit: **NO MAP** means no applied map exists;
 Learn is marked preview/not applied and never presented as active or Verified.
 **Clear Map** removes applied learned data without changing manual parameters;
 **Revert** restores the previous map when available.
+
+For installation, routing, status meanings, signal-loss recovery, and the
+sound-engineer checklist, see the [KickLock 0.4.0 Dynamic Mode evaluation guide](docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md).
 
 Older projects load as Static with no map.
 

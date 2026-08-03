@@ -139,7 +139,12 @@ jobs:
         if: needs.preflight.outputs.signing_ready == 'true'
         shell: pwsh
         run: |
-          Compress-Archive -Path 'build-release/KickLock_artefacts/Release/VST3/KickLock.vst3' -DestinationPath "KickLock-$env:TAG-windows-x64-vst3.zip"
+          $stage = Join-Path $env:RUNNER_TEMP 'kicklock-windows-release-package'
+          Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath 'build-release/KickLock_artefacts/Release/VST3/KickLock.vst3' -Destination (Join-Path $stage 'KickLock.vst3') -Recurse
+          Copy-Item -LiteralPath 'docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md' -Destination (Join-Path $stage 'KICKLOCK_0.4.0_DYNAMIC_GUIDE.md')
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath "KickLock-$env:TAG-windows-x64-vst3.zip"
 
       - name: Upload signed Windows release asset
         if: needs.preflight.outputs.signing_ready == 'true'
@@ -154,7 +159,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-internal-unsigned
-          path: build-release/KickLock_artefacts/Release/VST3/KickLock.vst3
+          path: |
+            build-release/KickLock_artefacts/Release/VST3/KickLock.vst3
+            docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md
           if-no-files-found: error
 
   macos:
@@ -268,11 +275,19 @@ jobs:
         if: needs.preflight.outputs.signing_ready == 'true'
         run: |
           set -euo pipefail
+          vst_stage="$RUNNER_TEMP/KickLock-Mac-VST3"
+          au_stage="$RUNNER_TEMP/KickLock-Mac-AU"
+          rm -rf "$vst_stage" "$au_stage"
+          mkdir -p "$vst_stage" "$au_stage"
+          ditto "build-release/KickLock_artefacts/Release/VST3/KickLock.vst3" "$vst_stage/KickLock.vst3"
+          ditto "build-release/KickLock_artefacts/Release/AU/KickLock.component" "$au_stage/KickLock.component"
+          cp "docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md" "$vst_stage/KICKLOCK_0.4.0_DYNAMIC_GUIDE.md"
+          cp "docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md" "$au_stage/KICKLOCK_0.4.0_DYNAMIC_GUIDE.md"
           ditto -c -k --sequesterRsrc --keepParent \
-            "build-release/KickLock_artefacts/Release/VST3/KickLock.vst3" \
+            "$vst_stage" \
             "KickLock-v0.4.0-macos-universal-vst3.zip"
           ditto -c -k --sequesterRsrc --keepParent \
-            "build-release/KickLock_artefacts/Release/AU/KickLock.component" \
+            "$au_stage" \
             "KickLock-v0.4.0-macos-universal-au.zip"
 
       - name: Upload signed macOS release assets
@@ -293,6 +308,7 @@ jobs:
           path: |
             build-release/KickLock_artefacts/Release/VST3/KickLock.vst3
             build-release/KickLock_artefacts/Release/AU/KickLock.component
+            docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md
           if-no-files-found: error
 
   publish:

@@ -71,7 +71,14 @@ jobs:
           $timer.Stop()
           @("## WINDOWS 0.4.0 APPROVED GATES", "- Dedicated executables: Fast, GUI acceptance, malformed-state fuzz, compiled VST3 host acceptance", "- pluginval: strictness 10", "- AU validation: not applicable on Windows", "- Test elapsed: $($timer.Elapsed.TotalSeconds)s") | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Zip VST3
-        run: Compress-Archive -Path "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -DestinationPath "KickLock-Windows-VST3.zip"
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "kicklock-windows-package"
+          Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath "build/KickLock_artefacts/Release/VST3/KickLock.vst3" -Destination (Join-Path $stage "KickLock.vst3") -Recurse
+          Copy-Item -LiteralPath "docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md" -Destination (Join-Path $stage "KICKLOCK_0.4.0_DYNAMIC_GUIDE.md")
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath "KickLock-Windows-VST3.zip"
       - name: Verify Windows VST3 artifact
         shell: pwsh
         run: |
@@ -150,9 +157,23 @@ jobs:
           sleep 2
           auval -v aufx Klck Oskl
       - name: Zip VST3
-        run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "KickLock-Mac-VST3.zip"
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/KickLock-Mac-VST3"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          ditto "build/KickLock_artefacts/Release/VST3/KickLock.vst3" "$stage/KickLock.vst3"
+          cp "docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md" "$stage/KICKLOCK_0.4.0_DYNAMIC_GUIDE.md"
+          ditto -c -k --sequesterRsrc --keepParent "$stage" "KickLock-Mac-VST3.zip"
       - name: Zip AU
-        run: ditto -c -k --sequesterRsrc --keepParent "build/KickLock_artefacts/Release/AU/KickLock.component" "KickLock-Mac-AU.zip"
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/KickLock-Mac-AU"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          ditto "build/KickLock_artefacts/Release/AU/KickLock.component" "$stage/KickLock.component"
+          cp "docs/DYNAMIC_0.4.0_SOUND_ENGINEER_EVALUATION.md" "$stage/KICKLOCK_0.4.0_DYNAMIC_GUIDE.md"
+          ditto -c -k --sequesterRsrc --keepParent "$stage" "KickLock-Mac-AU.zip"
       - name: Verify macOS universal artifacts
         run: |
           set -euo pipefail

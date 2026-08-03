@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   releases are not published.
 - Updated the automated QA scope, Mermaid routing documentation, and release
   notes extraction to use only this 0.4.0 section.
+- Added a sound-engineer Dynamic Mode guide and included it with evaluation
+  archives so signal-loss/recovery behavior can be checked after download.
 
 ## [0.3.1] - 2026-07-16
 
